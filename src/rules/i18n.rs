@@ -140,4 +140,26 @@ impl I18n {
             _ => "QuickPath Settings",
         }
     }
+
+    pub fn producer(lang: Language) -> &'static str {
+        match Self::resolve_locale(lang) {
+            Language::ZhCN => "衢州御风科技有限公司出品",
+            _ => "Produced by Quzhou Yufeng Technology Co., Ltd.",
+        }
+    }
+
+    pub fn btn_ok(lang: Language) -> &'static str {
+        match Self::resolve_locale(lang) {
+            Language::ZhCN => "确定",
+            _ => "OK",
+        }
+    }
+
+    pub fn btn_cancel(lang: Language) -> &'static str {
+        match Self::resolve_locale(lang) {
+            Language::ZhCN => "取消",
+            _ => "Cancel",
+        }
+    }
 }
+

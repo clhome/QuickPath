@@ -359,3 +359,24 @@ fn open_settings() {
         }
     }
 }
+
+pub fn get_global_config() -> AppConfig {
+    let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+    if !state_ptr.is_null() {
+        unsafe {
+            return (*state_ptr).config.clone();
+        }
+    }
+    AppConfig::load()
+}
+
+pub fn update_global_config(new_config: AppConfig) {
+    let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+    if !state_ptr.is_null() {
+        unsafe {
+            let state = &mut *state_ptr;
+            state.config = new_config;
+        }
+    }
+}
+
