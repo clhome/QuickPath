@@ -1,0 +1,44 @@
+[meta]
+code = "zh-CN"
+name = "简体中文 (zh-CN)"
+
+[floating_bar]
+title = "QuickPath 路径跳转 (点击即达 · ↑↓ 键选择，Enter 确认)"
+tag_explorer = "资源管理器"
+tag_history = "最近历史"
+tag_pinned = "常用固定"
+no_candidate = "未检测到活跃文件夹 (可尝试打开资源管理器或常用目录)"
+
+[hotkey]
+card_title = "唤出快捷键 (Global Hotkey)"
+card_desc = "在文件对话框中按下即刻呼出，点击卡片录制新按键"
+recording_prompt = "请按下新按键 (Esc取消)..."
+click_to_record = "点击录制"
+
+[settings]
+title = "QuickPath 设置中心"
+auto_switch = "自动秒切路径 (AutoSwitch)"
+auto_switch_desc = "文件对话框打开时，瞬时同步至当前或最后活跃的文件夹路径"
+autostart = "开机静默自启 (免 UAC 提权)"
+autostart_desc = "通过 Windows 任务计划程序免除管理员 UAC 提示，登录即用"
+opacity = "弹出层半透明效果 (Opacity)"
+opacity_desc = "按住滑块左右滑动或直接点击槽位，实时调整通透程度"
+language = "界面语言 (Language)"
+language_desc = "支持简体中文、英文，或跟随系统语言自动匹配，点击切换"
+ecosystem = "文件管理器生态适配"
+ecosystem_desc = "支持 Windows 11 多标签资源管理器、Directory Opus、Total Commander、XYplorer"
+version_info = "QuickPath v1.0.0 · 专为 Windows 10/11 深度打造 · 原生极速"
+producer = "衢州御风科技有限公司出品"
+btn_ok = "确定"
+btn_cancel = "取消"
+status_enabled = "已开启 - 点击切换"
+status_disabled = "已关闭 - 点击切换"
+status_all_ready = "全部适配就绪"
+lang_auto = "自动跟随系统 (中文)"
+
+[tray]
+show_candidates = "呼出候选目录"
+toggle_autoswitch = "自动秒切 (AutoSwitch)"
+toggle_autostart = "开机自启"
+settings = "设置中心..."
+exit = "退出 QuickPath"

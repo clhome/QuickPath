@@ -26,9 +26,8 @@ use windows::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_NOREPEAT,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
+
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
     RegisterClassW, TranslateMessage, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP,
@@ -37,6 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const HOTKEY_ID: i32 = 101;
 static MAIN_APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(std::ptr::null_mut());
+static HOST_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 pub struct AppState {
     pub config: AppConfig,
@@ -100,18 +100,16 @@ fn main() {
             }
         };
 
-        // 4. 注册全局唤出快捷键 (默认 Ctrl + Q)
-        let _ = RegisterHotKey(
-            Some(host_hwnd),
-            HOTKEY_ID,
-            HOT_KEY_MODIFIERS(MOD_CONTROL.0 | MOD_NOREPEAT.0),
-            0x51, // 'Q'
-        );
+        HOST_HWND.store(host_hwnd.0 as *mut _, Ordering::SeqCst);
+
+        // 4. 注册全局唤出快捷键 (根据配置动态注册，默认为 Ctrl + Q)
+        let _ = win32::hotkey::register_global_hotkey(host_hwnd, HOTKEY_ID, &config.hotkey);
 
         // 5. 初始化托盘、悬浮吸附条与设置窗口
         let tray_res = TrayIcon::new(host_hwnd);
         let floating_bar_res = FloatingBar::new();
         let settings_window_res = SettingsWindow::new();
+
 
         let state = Box::new(AppState {
             config,
@@ -176,8 +174,10 @@ unsafe extern "system" fn host_wnd_proc(
                             hwnd,
                             state.config.auto_switch_enabled,
                             state.config.autostart_enabled,
-                            state.config.language,
+                            state.config.language.clone(),
+                            &state.config.hotkey,
                         );
+
                     }
                 }
             } else if event == WM_LBUTTONUP {
@@ -270,7 +270,7 @@ fn on_foreground_window_changed(fg_hwnd: HWND) {
                 dlg_info.rect,
                 candidates,
                 state.config.floating_bar_opacity,
-                state.config.language,
+                state.config.language.clone(),
             );
         }
 
@@ -344,7 +344,7 @@ fn on_hotkey_triggered() {
                 dlg_info.rect,
                 candidates,
                 state.config.floating_bar_opacity,
-                state.config.language,
+                state.config.language.clone(),
             );
         }
     }
@@ -375,8 +375,18 @@ pub fn update_global_config(new_config: AppConfig) {
     if !state_ptr.is_null() {
         unsafe {
             let state = &mut *state_ptr;
-            state.config = new_config;
+            let old_hotkey = state.config.hotkey.clone();
+            state.config = new_config.clone();
+
+            if old_hotkey != new_config.hotkey {
+                let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                if !host_ptr.is_null() {
+                    let h = HWND(host_ptr);
+                    let _ = win32::hotkey::register_global_hotkey(h, HOTKEY_ID, &new_config.hotkey);
+                }
+            }
         }
     }
 }
+
 

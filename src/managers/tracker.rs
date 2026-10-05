@@ -170,7 +170,7 @@ impl WindowTracker {
                     if seen.insert(norm.to_lowercase()) {
                         list.push(FolderCandidate {
                             path: norm,
-                            title: crate::rules::I18n::dir_download(config.language).to_string(),
+                            title: crate::rules::I18n::dir_download(&config.language).to_string(),
                             source: "系统目录".to_string(),
                             is_active: false,
                         });
@@ -182,7 +182,7 @@ impl WindowTracker {
                     if seen.insert(norm.to_lowercase()) {
                         list.push(FolderCandidate {
                             path: norm,
-                            title: crate::rules::I18n::dir_desktop(config.language).to_string(),
+                            title: crate::rules::I18n::dir_desktop(&config.language).to_string(),
                             source: "系统目录".to_string(),
                             is_active: false,
                         });
@@ -194,7 +194,7 @@ impl WindowTracker {
                     if seen.insert(norm.to_lowercase()) {
                         list.push(FolderCandidate {
                             path: norm,
-                            title: crate::rules::I18n::dir_documents(config.language).to_string(),
+                            title: crate::rules::I18n::dir_documents(&config.language).to_string(),
                             source: "系统目录".to_string(),
                             is_active: false,
                         });

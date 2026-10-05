@@ -449,7 +449,7 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
         };
         SelectObject(hdc, HGDIOBJ(font_header.0 as _));
         SetTextColor(hdc, COLORREF(0x00e0e0e0));
-        let title_text = I18n::floating_title(state.language);
+        let title_text = I18n::floating_title(&state.language);
         let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
         DrawTextW(hdc, &mut title_buf, &mut header_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -529,7 +529,7 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                 COLORREF(0x00cca37a) // 浅青灰
             };
             SetTextColor(hdc, tag_color);
-            let localized_source = translate_source(&item.source, state.language);
+            let localized_source = translate_source(&item.source, &state.language);
             let tag_text = format!("[{}]", localized_source);
             let mut tag_buf: Vec<u16> = tag_text.encode_utf16().collect();
             DrawTextW(hdc, &mut tag_buf, &mut tag_r, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -560,7 +560,7 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
     }
 }
 
-fn translate_source(source: &str, lang: Language) -> &'static str {
+fn translate_source<'a>(source: &str, lang: &'a Language) -> &'a str {
     match source {
         "资源管理器" => I18n::tag_explorer(lang),
         "最近历史" => I18n::tag_history(lang),
@@ -569,6 +569,7 @@ fn translate_source(source: &str, lang: Language) -> &'static str {
         _ => "Explorer",
     }
 }
+
 
 fn handle_mouse_move(hwnd: HWND, y: i32) {
     let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);

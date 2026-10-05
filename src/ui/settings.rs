@@ -18,18 +18,20 @@ use windows::Win32::Graphics::Gdi::{
     PAINTSTRUCT, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics,
     LoadCursorW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
     IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SW_HIDE, SW_SHOW,
-    WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_SYSMENU,
+    WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SYSKEYDOWN, WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_MINIMIZEBOX, WS_SYSMENU,
 };
 
 static SETTINGS_WINDOW_HWND: AtomicPtr<core::ffi::c_void> =
     AtomicPtr::new(std::ptr::null_mut());
 static IS_DRAGGING_SLIDER: AtomicBool = AtomicBool::new(false);
+static IS_RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
 static DRAFT_CONFIG: Mutex<Option<AppConfig>> = Mutex::new(None);
 
 fn get_draft_config() -> AppConfig {
@@ -75,7 +77,7 @@ impl SettingsWindow {
                 0,
                 0,
                 640,
-                640,
+                670,
                 None,
                 None,
                 None,
@@ -89,7 +91,7 @@ impl SettingsWindow {
             let dpi = GetDpiForWindow(hwnd);
             let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
             let win_w = (660.0 * scale).round() as i32;
-            let win_h = (640.0 * scale).round() as i32;
+            let win_h = (670.0 * scale).round() as i32;
 
             // 启用 Win11 圆角与深色模式
             let round_pref = DWMWCP_ROUND.0 as u32;
@@ -133,6 +135,7 @@ impl SettingsWindow {
         // 每次打开设置中心，同步最新生效配置至草稿
         let current = crate::get_global_config();
         set_draft_config(current);
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
 
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -142,6 +145,7 @@ impl SettingsWindow {
     }
 
     pub fn hide(&self) {
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
@@ -164,7 +168,7 @@ unsafe extern "system" fn settings_wnd_proc(
                 let mut rect = RECT::default();
                 let _ = GetClientRect(hwnd, &mut rect);
 
-                // 双缓冲绘制，避免滑块拖拽时闪烁
+                // 双缓冲绘制，避免滑块拖拽与交互时闪烁
                 let mem_dc = CreateCompatibleDC(Some(hdc));
                 let mem_bmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
                 let old_bmp = SelectObject(mem_dc, HGDIOBJ(mem_bmp.0 as _));
@@ -180,6 +184,53 @@ unsafe extern "system" fn settings_wnd_proc(
                 let _ = EndPaint(hwnd, &ps);
             }
             LRESULT(0)
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            if IS_RECORDING_HOTKEY.load(Ordering::SeqCst) {
+                let vk = wparam.0 as u32;
+                if vk == 0x1B {
+                    // ESC 键取消录制
+                    IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                    return LRESULT(0);
+                }
+
+                if let Some(key_name) = crate::win32::hotkey::vk_to_key_name(vk) {
+                    let is_ctrl = unsafe { GetKeyState(0x11) < 0 };
+                    let is_alt = unsafe { GetKeyState(0x12) < 0 };
+                    let is_shift = unsafe { GetKeyState(0x10) < 0 };
+                    let is_win = unsafe {
+                        GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0
+                    };
+
+                    let mut combo_parts = Vec::new();
+                    if is_ctrl { combo_parts.push("Ctrl"); }
+                    if is_alt { combo_parts.push("Alt"); }
+                    if is_shift { combo_parts.push("Shift"); }
+                    if is_win { combo_parts.push("Win"); }
+
+                    // 如果未按修饰键且不是功能键，默认补充 Ctrl 防止全局按键冲突
+                    if combo_parts.is_empty() && !key_name.starts_with('F') {
+                        combo_parts.push("Ctrl");
+                    }
+                    combo_parts.push(key_name);
+
+                    let new_hotkey_str = combo_parts.join("+");
+                    let mut config = get_draft_config();
+                    config.hotkey = new_hotkey_str;
+                    set_draft_config(config);
+
+                    IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        let _ = UpdateWindow(hwnd);
+                    }
+                    return LRESULT(0);
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xffff) as i16 as i32;
@@ -206,12 +257,14 @@ unsafe extern "system" fn settings_wnd_proc(
             // 点击右上角 X，等同于取消：丢弃未保存修改并隐藏窗口
             let current = crate::get_global_config();
             set_draft_config(current);
+            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
             LRESULT(0)
         }
         WM_DESTROY => {
+            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
@@ -238,7 +291,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         SetBkMode(hdc, TRANSPARENT);
 
         let font_h1 = CreateFontW(
-            (-20.0 * scale).round() as i32, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
+            (-19.0 * scale).round() as i32, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -247,7 +300,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
         let font_card_title = CreateFontW(
-            (-15.0 * scale).round() as i32, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+            (-14.0 * scale).round() as i32, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -256,7 +309,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
         let font_text = CreateFontW(
-            (-13.0 * scale).round() as i32, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+            (-12.0 * scale).round() as i32, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -266,132 +319,101 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         );
 
         let config = get_draft_config();
-        let locale = I18n::resolve_locale(config.language);
+        let bundle = I18n::get_bundle(&config.language);
 
         // 1. 顶部大标题
         let pad_x = (28.0 * scale).round() as i32;
         SelectObject(hdc, HGDIOBJ(font_h1.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
-        let title_str = I18n::settings_title(config.language);
+        let title_str = &bundle.settings.title;
         let mut title_buf: Vec<u16> = title_str.encode_utf16().collect();
         let mut title_rect = RECT {
             left: pad_x,
-            top: (20.0 * scale).round() as i32,
+            top: (16.0 * scale).round() as i32,
             right: rect.right - pad_x,
-            bottom: (54.0 * scale).round() as i32,
+            bottom: (48.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        let mut card_top = (66.0 * scale).round() as i32;
-        let card_h = (72.0 * scale).round() as i32;
-        let card_gap = (10.0 * scale).round() as i32;
+        let mut card_top = (54.0 * scale).round() as i32;
+        let card_h = (58.0 * scale).round() as i32;
+        let card_gap = (8.0 * scale).round() as i32;
 
         // 卡片 1：自动秒切 (AutoSwitch)
-        let (card1_t, card1_d, card1_s) = match locale {
-            Language::ZhCN => (
-                "自动秒切路径 (AutoSwitch)",
-                "文件对话框打开时，瞬时同步至当前或最后活跃的文件夹路径",
-                if config.auto_switch_enabled { "[已开启 - 点击切换]" } else { "[已关闭 - 点击切换]" },
-            ),
-            _ => (
-                "Auto-Switch Path (AutoSwitch)",
-                "Instantly navigate to the active/last opened folder when dialog opens",
-                if config.auto_switch_enabled { "[Enabled - Click]" } else { "[Disabled - Click]" },
-            ),
+        let card1_s = if config.auto_switch_enabled {
+            &bundle.settings.status_enabled
+        } else {
+            &bundle.settings.status_disabled
         };
         render_card(
             hdc, pad_x, card_top, rect.right - pad_x, card_top + card_h, scale,
-            font_card_title, font_text, card1_t, card1_d, card1_s, config.auto_switch_enabled,
+            font_card_title, font_text, &bundle.settings.auto_switch, &bundle.settings.auto_switch_desc, card1_s,
+            if config.auto_switch_enabled { COLORREF(0x0050d268) } else { COLORREF(0x00777777) },
         );
 
         card_top += card_h + card_gap;
 
-        // 卡片 2：开机自启动
-        let (card2_t, card2_d, card2_s) = match locale {
-            Language::ZhCN => (
-                "开机静默自启 (免 UAC 提权)",
-                "通过 Windows 任务计划程序免除管理员 UAC 提示，登录即用",
-                if config.autostart_enabled { "[已开启 - 点击切换]" } else { "[已关闭 - 点击切换]" },
-            ),
-            _ => (
-                "Start on Boot (Silent UAC-free)",
-                "Launch automatically on system login via Windows Task Scheduler",
-                if config.autostart_enabled { "[Enabled - Click]" } else { "[Disabled - Click]" },
-            ),
+        // 卡片 2：唤出候选目录快捷键 (Hotkey) - 支持录制修改
+        let is_recording = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
+        let hotkey_disp = crate::win32::hotkey::format_hotkey_display(&config.hotkey);
+        let card2_s = if is_recording {
+            bundle.hotkey.recording_prompt.clone()
+        } else {
+            format!("[ {} · {} ]", hotkey_disp, bundle.hotkey.click_to_record)
         };
         render_card(
             hdc, pad_x, card_top, rect.right - pad_x, card_top + card_h, scale,
-            font_card_title, font_text, card2_t, card2_d, card2_s, config.autostart_enabled,
+            font_card_title, font_text, &bundle.hotkey.card_title, &bundle.hotkey.card_desc, &card2_s,
+            if is_recording { COLORREF(0x0000a5ff) } else { COLORREF(0x0050d268) },
         );
 
         card_top += card_h + card_gap;
 
-        // 卡片 3：弹出层半透明度调节（滑块控制 Slider）
-        let (card3_t, card3_d) = match locale {
-            Language::ZhCN => (
-                "弹出层半透明效果 (Opacity)",
-                "按住滑块左右滑动或直接点击槽位，实时调整通透程度",
-            ),
-            _ => (
-                "Floating Bar Opacity",
-                "Drag the slider or click the track to adjust transparency level",
-            ),
+        // 卡片 3：开机自启动
+        let card3_s = if config.autostart_enabled {
+            &bundle.settings.status_enabled
+        } else {
+            &bundle.settings.status_disabled
         };
+        render_card(
+            hdc, pad_x, card_top, rect.right - pad_x, card_top + card_h, scale,
+            font_card_title, font_text, &bundle.settings.autostart, &bundle.settings.autostart_desc, card3_s,
+            if config.autostart_enabled { COLORREF(0x0050d268) } else { COLORREF(0x00777777) },
+        );
+
+        card_top += card_h + card_gap;
+
+        // 卡片 4：弹出层半透明度调节（滑块控制 Slider）
         render_card_with_slider(
             hdc, pad_x, card_top, rect.right - pad_x, card_top + card_h, scale,
-            font_card_title, font_text, card3_t, card3_d, config.floating_bar_opacity,
+            font_card_title, font_text, &bundle.settings.opacity, &bundle.settings.opacity_desc, config.floating_bar_opacity,
         );
 
         card_top += card_h + card_gap;
 
-        // 卡片 4：多国语言 (Language)
-        let lang_name = match config.language {
-            Language::Auto => match locale {
-                Language::ZhCN => "自动跟随系统 (中文)",
-                _ => "Auto (System)",
-            },
-            Language::ZhCN => "简体中文 (zh-CN)",
-            Language::EnUS => "English (en-US)",
+        // 卡片 5：多国语言 (Language)
+        let lang_name = match &config.language {
+            Language::Auto => &bundle.settings.lang_auto,
+            _ => &bundle.meta.name,
         };
-        let (card4_t, card4_d, card4_s) = match locale {
-            Language::ZhCN => (
-                "界面语言 (Language)",
-                "支持简体中文、英文，或跟随系统语言自动匹配，点击切换",
-                format!("[{}]", lang_name),
-            ),
-            _ => (
-                "Language (i18n)",
-                "Supports English, Simplified Chinese, or Auto. Click to toggle",
-                format!("[{}]", lang_name),
-            ),
-        };
+        let card5_s = format!("[{}]", lang_name);
         render_card(
             hdc, pad_x, card_top, rect.right - pad_x, card_top + card_h, scale,
-            font_card_title, font_text, card4_t, card4_d, &card4_s, true,
+            font_card_title, font_text, &bundle.settings.language, &bundle.settings.language_desc, &card5_s,
+            COLORREF(0x0050d268),
         );
 
         card_top += card_h + card_gap;
 
-        // 卡片 5：全生态管理器支持
-        let (card5_t, card5_d, card5_s) = match locale {
-            Language::ZhCN => (
-                "文件管理器生态适配",
-                "支持 Windows 11 多标签资源管理器、Directory Opus、Total Commander、XYplorer",
-                "[全部适配就绪]",
-            ),
-            _ => (
-                "Supported File Managers",
-                "Native Win11 Tabs Explorer, Directory Opus, Total Commander, XYplorer",
-                "[All Ready]",
-            ),
-        };
+        // 卡片 6：全生态管理器支持
         render_card(
             hdc, pad_x, card_top, rect.right - pad_x, card_top + card_h, scale,
-            font_card_title, font_text, card5_t, card5_d, card5_s, true,
+            font_card_title, font_text, &bundle.settings.ecosystem, &bundle.settings.ecosystem_desc, &bundle.settings.status_all_ready,
+            COLORREF(0x0050d268),
         );
 
         // 按钮操作区：「确定」与「取消」按钮
-        card_top += card_h + (16.0 * scale).round() as i32;
+        card_top += card_h + (14.0 * scale).round() as i32;
         let btn_h = (32.0 * scale).round() as i32;
         let btn_w = (92.0 * scale).round() as i32;
         let btn_gap = (12.0 * scale).round() as i32;
@@ -418,7 +440,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         render_button(
             hdc,
             &btn_ok_rect,
-            I18n::btn_ok(config.language),
+            &bundle.settings.btn_ok,
             font_card_title,
             COLORREF(0x00d47800),
             COLORREF(0x00ffffff),
@@ -429,7 +451,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         render_button(
             hdc,
             &btn_cancel_rect,
-            I18n::btn_cancel(config.language),
+            &bundle.settings.btn_cancel,
             font_card_title,
             COLORREF(0x002f2f2f),
             COLORREF(0x00e0e0e0),
@@ -439,10 +461,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         // 底部左侧：版本标识
         SelectObject(hdc, HGDIOBJ(font_text.0 as _));
         SetTextColor(hdc, COLORREF(0x00777777));
-        let ver_str = match locale {
-            Language::ZhCN => "QuickPath v1.0.0 · 专为 Windows 10/11 深度打造 · 原生极速",
-            _ => "QuickPath v1.0.0 · Native Ultra-Fast for Windows 10/11",
-        };
+        let ver_str = &bundle.settings.version_info;
         let mut ver_buf: Vec<u16> = ver_str.encode_utf16().collect();
         let mut ver_rect = RECT {
             left: pad_x,
@@ -454,7 +473,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
 
         // 底部右侧：出品方信息（跟随当前草稿语言实时切换）
         SetTextColor(hdc, COLORREF(0x00888888));
-        let producer_str = I18n::producer(config.language);
+        let producer_str = &bundle.settings.producer;
         let mut producer_buf: Vec<u16> = producer_str.encode_utf16().collect();
         let mut producer_rect = RECT {
             left: pad_x,
@@ -463,6 +482,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             bottom: rect.bottom - (6.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut producer_buf, &mut producer_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
 
         let _ = DeleteObject(HGDIOBJ(font_h1.0 as _));
         let _ = DeleteObject(HGDIOBJ(font_card_title.0 as _));
@@ -521,7 +541,7 @@ unsafe fn render_card(
     title: &str,
     desc: &str,
     status_text: &str,
-    is_active: bool,
+    status_color: COLORREF,
 ) {
     unsafe {
         let card_rect = RECT { left, top, right, bottom };
@@ -531,16 +551,16 @@ unsafe fn render_card(
 
         // 标题
         let inner_x = left + (16.0 * scale).round() as i32;
-        let right_pad = (200.0 * scale).round() as i32;
+        let right_pad = (210.0 * scale).round() as i32;
 
         SelectObject(hdc, HGDIOBJ(font_title.0 as _));
         SetTextColor(hdc, COLORREF(0x00f0f0f0));
         let mut title_buf: Vec<u16> = title.encode_utf16().collect();
         let mut title_rect = RECT {
             left: inner_x,
-            top: top + (10.0 * scale).round() as i32,
+            top: top + (8.0 * scale).round() as i32,
             right: right - right_pad,
-            bottom: top + (32.0 * scale).round() as i32,
+            bottom: top + (28.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -550,26 +570,21 @@ unsafe fn render_card(
         let mut desc_buf: Vec<u16> = desc.encode_utf16().collect();
         let mut desc_rect = RECT {
             left: inner_x,
-            top: top + (34.0 * scale).round() as i32,
+            top: top + (30.0 * scale).round() as i32,
             right: right - right_pad,
-            bottom: bottom - (8.0 * scale).round() as i32,
+            bottom: bottom - (6.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut desc_buf, &mut desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         // 状态按键
-        let status_color = if is_active {
-            COLORREF(0x0050d268) // 现代绿色
-        } else {
-            COLORREF(0x00777777)
-        };
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
         SetTextColor(hdc, status_color);
         let mut status_buf: Vec<u16> = status_text.encode_utf16().collect();
         let mut status_rect = RECT {
             left: right - right_pad,
-            top: top + (10.0 * scale).round() as i32,
+            top: top + (8.0 * scale).round() as i32,
             right: right - (16.0 * scale).round() as i32,
-            bottom: bottom - (10.0 * scale).round() as i32,
+            bottom: bottom - (8.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut status_buf, &mut status_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
     }
@@ -604,9 +619,9 @@ unsafe fn render_card_with_slider(
         let mut title_buf: Vec<u16> = title.encode_utf16().collect();
         let mut title_rect = RECT {
             left: inner_x,
-            top: top + (10.0 * scale).round() as i32,
+            top: top + (8.0 * scale).round() as i32,
             right: right - right_pad,
-            bottom: top + (32.0 * scale).round() as i32,
+            bottom: top + (28.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -615,9 +630,9 @@ unsafe fn render_card_with_slider(
         let mut desc_buf: Vec<u16> = desc.encode_utf16().collect();
         let mut desc_rect = RECT {
             left: inner_x,
-            top: top + (34.0 * scale).round() as i32,
+            top: top + (30.0 * scale).round() as i32,
             right: right - right_pad,
-            bottom: bottom - (8.0 * scale).round() as i32,
+            bottom: bottom - (6.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut desc_buf, &mut desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -625,7 +640,7 @@ unsafe fn render_card_with_slider(
         let slider_w = (140.0 * scale).round() as i32;
         let track_right = right - (18.0 * scale).round() as i32;
         let track_left = track_right - slider_w;
-        let track_cy = top + (48.0 * scale).round() as i32;
+        let track_cy = top + (40.0 * scale).round() as i32;
         let track_h = (4.0 * scale).round() as i32;
 
         // 1. 滑块数值文字（在滑块槽上方展示，例如 88%）
@@ -633,9 +648,9 @@ unsafe fn render_card_with_slider(
         let mut val_buf: Vec<u16> = val_text.encode_utf16().collect();
         let mut val_rect = RECT {
             left: track_left,
-            top: top + (12.0 * scale).round() as i32,
+            top: top + (8.0 * scale).round() as i32,
             right: track_right,
-            bottom: top + (32.0 * scale).round() as i32,
+            bottom: top + (26.0 * scale).round() as i32,
         };
         SetTextColor(hdc, COLORREF(0x0050d268)); // 鲜明绿色数值
         DrawTextW(hdc, &mut val_buf, &mut val_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -666,7 +681,7 @@ unsafe fn render_card_with_slider(
         let _ = DeleteObject(HGDIOBJ(active_brush.0 as _));
 
         // 4. 滑块圆纽 Thumb
-        let thumb_r = (7.0 * scale).round() as i32;
+        let thumb_r = (6.0 * scale).round() as i32;
         let thumb_rect = RECT {
             left: thumb_x - thumb_r,
             top: track_cy - thumb_r,
@@ -692,29 +707,39 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
     }
     let pad_x = (28.0 * scale).round() as i32;
 
-    let card_top_1 = (66.0 * scale).round() as i32;
-    let card_h = (72.0 * scale).round() as i32;
-    let card_gap = (10.0 * scale).round() as i32;
+    let card_top_1 = (54.0 * scale).round() as i32;
+    let card_h = (58.0 * scale).round() as i32;
+    let card_gap = (8.0 * scale).round() as i32;
 
-    let card_top_2 = card_top_1 + card_h + card_gap;
-    let card_top_3 = card_top_2 + card_h + card_gap;
-    let card_top_4 = card_top_3 + card_h + card_gap;
-    let card_top_5 = card_top_4 + card_h + card_gap;
+    let card_top_2 = card_top_1 + card_h + card_gap; // 快捷键卡片
+    let card_top_3 = card_top_2 + card_h + card_gap; // 开机自启
+    let card_top_4 = card_top_3 + card_h + card_gap; // 透明度
+    let card_top_5 = card_top_4 + card_h + card_gap; // 语言
+    let card_top_6 = card_top_5 + card_h + card_gap; // 生态
 
     // 点击卡片 1: 自动秒切
     if y >= card_top_1 && y <= card_top_1 + card_h {
         config.auto_switch_enabled = !config.auto_switch_enabled;
         set_draft_config(config);
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         need_redraw = true;
     }
-    // 点击卡片 2: 开机自启
+    // 点击卡片 2: 唤出快捷键（进入/退出按键录制模式）
     else if y >= card_top_2 && y <= card_top_2 + card_h {
+        let is_rec = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
+        IS_RECORDING_HOTKEY.store(!is_rec, Ordering::SeqCst);
+        need_redraw = true;
+    }
+    // 点击卡片 3: 开机自启
+    else if y >= card_top_3 && y <= card_top_3 + card_h {
         config.autostart_enabled = !config.autostart_enabled;
         set_draft_config(config);
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         need_redraw = true;
     }
-    // 点击卡片 3: 透明度滑块（支持直接点击或拖动）
-    else if y >= card_top_3 && y <= card_top_3 + card_h {
+    // 点击卡片 4: 透明度滑块（支持直接点击或拖动）
+    else if y >= card_top_4 && y <= card_top_4 + card_h {
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         let slider_w = (140.0 * scale).round() as i32;
         let track_right = rect.right - pad_x - (18.0 * scale).round() as i32;
         let track_left = track_right - slider_w;
@@ -733,19 +758,17 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             }
         }
     }
-    // 点击卡片 4: 语言切换 (Auto -> ZhCN -> EnUS -> Auto)
-    else if y >= card_top_4 && y <= card_top_4 + card_h {
-        config.language = match config.language {
-            Language::Auto => Language::ZhCN,
-            Language::ZhCN => Language::EnUS,
-            Language::EnUS => Language::Auto,
-        };
+    // 点击卡片 5: 语言切换 (动态按可用语言列表轮转)
+    else if y >= card_top_5 && y <= card_top_5 + card_h {
+        config.language = config.language.next();
         set_draft_config(config);
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         need_redraw = true;
     }
+
     else {
         // 按钮区域判断
-        let btn_top = card_top_5 + card_h + (16.0 * scale).round() as i32;
+        let btn_top = card_top_6 + card_h + (14.0 * scale).round() as i32;
         let btn_h = (32.0 * scale).round() as i32;
         let btn_bottom = btn_top + btn_h;
         let btn_w = (92.0 * scale).round() as i32;
@@ -768,8 +791,9 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 }
                 // 2. 保存配置到磁盘
                 let _ = config.save();
-                // 3. 即时热更新运行时全局配置，所有后台监听与弹出层立即生效！
+                // 3. 即时热更新运行时全局配置（包括快捷键重新注册）
                 crate::update_global_config(config);
+                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
 
                 // 4. 隐藏窗口
                 unsafe {
@@ -781,6 +805,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             else if x >= btn_cancel_left && x <= btn_cancel_right {
                 // 丢弃未保存修改，重置为生效配置
                 set_draft_config(crate::get_global_config());
+                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_HIDE);
                 }
@@ -810,6 +835,7 @@ fn handle_slider_move(hwnd: HWND, x: i32) {
     let slider_w = (140.0 * scale).round() as i32;
     let track_right = rect.right - pad_x - (18.0 * scale).round() as i32;
     let track_left = track_right - slider_w;
+
 
     let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
     let new_val = (40.0 + ratio * 60.0).round() as u8;

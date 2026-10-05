@@ -91,6 +91,7 @@ impl TrayIcon {
         auto_switch_enabled: bool,
         autostart_enabled: bool,
         lang: crate::rules::Language,
+        hotkey: &str,
     ) {
         unsafe {
             let hmenu = CreatePopupMenu().unwrap_or_default();
@@ -112,26 +113,30 @@ impl TrayIcon {
                 MF_UNCHECKED
             };
 
-            let str_autoswitch: Vec<u16> = format!("⚡ {}", crate::rules::I18n::tray_toggle_autoswitch(lang, false))
+            let hotkey_disp = crate::win32::hotkey::format_hotkey_display(hotkey);
+
+            let str_autoswitch: Vec<u16> = format!("⚡ {}", crate::rules::I18n::tray_toggle_autoswitch(&lang, false))
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
-            let str_autostart: Vec<u16> = format!("🚀 {}", crate::rules::I18n::tray_toggle_autostart(lang, false))
+            let str_autostart: Vec<u16> = format!("🚀 {}", crate::rules::I18n::tray_toggle_autostart(&lang, false))
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
-            let str_show: Vec<u16> = format!("📂 {}", crate::rules::I18n::tray_show_candidates(lang))
+            let str_show: Vec<u16> = format!("📂 {}", crate::rules::I18n::tray_show_candidates(&lang, &hotkey_disp))
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
-            let str_settings: Vec<u16> = format!("⚙ {}", crate::rules::I18n::tray_settings(lang))
+            let str_settings: Vec<u16> = format!("⚙ {}", crate::rules::I18n::tray_settings(&lang))
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
-            let str_exit: Vec<u16> = format!("❌ {}", crate::rules::I18n::tray_exit(lang))
+
+            let str_exit: Vec<u16> = format!("❌ {}", crate::rules::I18n::tray_exit(&lang))
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
+
 
             let _ = AppendMenuW(
                 hmenu,

@@ -1,0 +1,44 @@
+[meta]
+code = "en-US"
+name = "English (en-US)"
+
+[floating_bar]
+title = "QuickPath Jump (Click to Go · ↑↓ Select, Enter Confirm)"
+tag_explorer = "Explorer"
+tag_history = "History"
+tag_pinned = "Pinned"
+no_candidate = "No active folder detected (Try opening Explorer or Pinned folders)"
+
+[hotkey]
+card_title = "Global Hotkey"
+card_desc = "Trigger candidates in file dialogs. Click card to record new keys"
+recording_prompt = "Press new keys (Esc to cancel)..."
+click_to_record = "Click to record"
+
+[settings]
+title = "QuickPath Settings"
+auto_switch = "Auto-Switch Path (AutoSwitch)"
+auto_switch_desc = "Instantly navigate to the active/last opened folder when dialog opens"
+autostart = "Start on Boot (Silent UAC-free)"
+autostart_desc = "Launch automatically on system login via Windows Task Scheduler"
+opacity = "Floating Bar Opacity"
+opacity_desc = "Drag the slider or click the track to adjust transparency level"
+language = "Language (i18n)"
+language_desc = "Supports English, Simplified Chinese, or Auto. Click to toggle"
+ecosystem = "Supported File Managers"
+ecosystem_desc = "Native Win11 Tabs Explorer, Directory Opus, Total Commander, XYplorer"
+version_info = "QuickPath v1.0.0 · Native Ultra-Fast for Windows 10/11"
+producer = "Produced by Quzhou Yufeng Technology Co., Ltd."
+btn_ok = "OK"
+btn_cancel = "Cancel"
+status_enabled = "Enabled - Click to toggle"
+status_disabled = "Disabled - Click to toggle"
+status_all_ready = "All Ready"
+lang_auto = "Auto (System)"
+
+[tray]
+show_candidates = "Show Candidates"
+toggle_autoswitch = "AutoSwitch"
+toggle_autostart = "Start on Boot"
+settings = "Settings..."
+exit = "Exit QuickPath"

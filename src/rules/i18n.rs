@@ -1,8 +1,12 @@
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
     #[serde(rename = "auto")]
     Auto,
@@ -10,6 +14,8 @@ pub enum Language {
     ZhCN,
     #[serde(rename = "en-US")]
     EnUS,
+    #[serde(untagged)]
+    Custom(String),
 }
 
 impl Default for Language {
@@ -18,148 +24,309 @@ impl Default for Language {
     }
 }
 
+impl Language {
+    pub fn as_code(&self) -> &str {
+        match self {
+            Language::Auto => "auto",
+            Language::ZhCN => "zh-CN",
+            Language::EnUS => "en-US",
+            Language::Custom(s) => s.as_str(),
+        }
+    }
+
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            "auto" => Language::Auto,
+            "zh-CN" => Language::ZhCN,
+            "en-US" => Language::EnUS,
+            other => Language::Custom(other.to_string()),
+        }
+    }
+
+    /// 动态轮转到下一个可用语言（支持用户外部扩展语言）
+    pub fn next(&self) -> Language {
+        let avail = I18n::get_available_languages();
+        let mut codes = vec!["auto".to_string()];
+        for (code, _) in avail {
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+        let current = self.as_code();
+        let idx = codes.iter().position(|c| c == current).unwrap_or(0);
+        let next_idx = (idx + 1) % codes.len();
+        Language::from_code(&codes[next_idx])
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetaSection {
+    pub code: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FloatingBarSection {
+    pub title: String,
+    pub tag_explorer: String,
+    pub tag_history: String,
+    pub tag_pinned: String,
+    #[serde(default)]
+    pub tag_system: String,
+    #[serde(default)]
+    pub no_candidate: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotkeySection {
+    pub card_title: String,
+    pub card_desc: String,
+    pub recording_prompt: String,
+    #[serde(default)]
+    pub click_to_record: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SettingsSection {
+    pub title: String,
+    pub auto_switch: String,
+    pub auto_switch_desc: String,
+    pub autostart: String,
+    pub autostart_desc: String,
+    pub opacity: String,
+    pub opacity_desc: String,
+    pub language: String,
+    pub language_desc: String,
+    pub ecosystem: String,
+    pub ecosystem_desc: String,
+    pub version_info: String,
+    pub producer: String,
+    pub btn_ok: String,
+    pub btn_cancel: String,
+    #[serde(default)]
+    pub status_enabled: String,
+    #[serde(default)]
+    pub status_disabled: String,
+    #[serde(default)]
+    pub status_all_ready: String,
+    #[serde(default)]
+    pub lang_auto: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraySection {
+    pub show_candidates: String,
+    pub toggle_autoswitch: String,
+    pub toggle_autostart: String,
+    pub settings: String,
+    pub exit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocaleBundle {
+    pub meta: MetaSection,
+    pub floating_bar: FloatingBarSection,
+    pub hotkey: HotkeySection,
+    pub settings: SettingsSection,
+    pub tray: TraySection,
+}
+
+// 编译期嵌入官方自带语言文件，确保单文件绿色分发零外部依赖
+const EMBEDDED_ZH_CN: &str = include_str!("../../locales/zh-CN.toml");
+const EMBEDDED_EN_US: &str = include_str!("../../locales/en-US.toml");
+
+static LOCALES: OnceLock<HashMap<String, LocaleBundle>> = OnceLock::new();
+
 pub struct I18n;
 
 impl I18n {
-    /// 解析实际生效的语言（若为 Auto 则根据系统语言检测）
-    pub fn resolve_locale(lang: Language) -> Language {
+    /// 获取全局语言包注册表（内置 + 外部动态扩展覆盖）
+    pub fn get_bundles() -> &'static HashMap<String, LocaleBundle> {
+        LOCALES.get_or_init(|| {
+            let mut map = HashMap::new();
+
+            // 1. 加载编译期内置官方语言
+            if let Ok(zh) = toml::from_str::<LocaleBundle>(EMBEDDED_ZH_CN) {
+                map.insert("zh-CN".to_string(), zh);
+            }
+            if let Ok(en) = toml::from_str::<LocaleBundle>(EMBEDDED_EN_US) {
+                map.insert("en-US".to_string(), en);
+            }
+
+            // 2. 动态扫描外部覆盖与扩展语言文件
+            let candidate_dirs = vec![
+                PathBuf::from("locales"),
+                PathBuf::from("./locales"),
+                directories::ProjectDirs::from("com", "yufeng", "QuickPath")
+                    .map(|p| p.config_dir().join("locales"))
+                    .unwrap_or_else(|| PathBuf::from("locales")),
+            ];
+
+            for dir in candidate_dirs {
+                if dir.is_dir() {
+                    if let Ok(entries) = fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                                if let Ok(content) = fs::read_to_string(&path) {
+                                    if let Ok(bundle) = toml::from_str::<LocaleBundle>(&content) {
+                                        map.insert(bundle.meta.code.clone(), bundle);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            map
+        })
+    }
+
+    /// 获取所有可用语言列表 (代码, 显示名称)，支持动态扩展
+    pub fn get_available_languages() -> Vec<(String, String)> {
+        let bundles = Self::get_bundles();
+        let mut list = Vec::new();
+        if let Some(zh) = bundles.get("zh-CN") {
+            list.push((zh.meta.code.clone(), zh.meta.name.clone()));
+        }
+        if let Some(en) = bundles.get("en-US") {
+            list.push((en.meta.code.clone(), en.meta.name.clone()));
+        }
+        for (code, bundle) in bundles {
+            if code != "zh-CN" && code != "en-US" {
+                list.push((code.clone(), bundle.meta.name.clone()));
+            }
+        }
+        list
+    }
+
+    /// 解析实际生效的语言代码（若为 Auto 则根据系统语言检测）
+    pub fn resolve_locale_code(lang: &Language) -> String {
         match lang {
             Language::Auto => {
                 let lcid = unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() };
-                // 0x0804: zh-CN (PRC), 0x0404: zh-TW, 0x0C04: zh-HK, 0x1004: zh-SG
                 let primary_lang = lcid & 0x03FF;
                 if primary_lang == 0x0004 {
-                    Language::ZhCN
+                    "zh-CN".to_string()
                 } else {
-                    Language::EnUS
+                    "en-US".to_string()
                 }
             }
-            Language::ZhCN => Language::ZhCN,
-            Language::EnUS => Language::EnUS,
+            Language::ZhCN => "zh-CN".to_string(),
+            Language::EnUS => "en-US".to_string(),
+            Language::Custom(code) => code.clone(),
         }
     }
 
-    pub fn floating_title(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "QuickPath 路径跳转 (点击即达 · ↑↓ 键选择，Enter 确认)",
-            _ => "QuickPath Jump (Click to Go · ↑↓ Select, Enter Confirm)",
+    /// 获取对应语言包，若不存在则回退至内置英文或中文
+    pub fn get_bundle(lang: &Language) -> &'static LocaleBundle {
+        let bundles = Self::get_bundles();
+        let code = Self::resolve_locale_code(lang);
+        bundles
+            .get(&code)
+            .or_else(|| bundles.get("en-US"))
+            .or_else(|| bundles.get("zh-CN"))
+            .expect("内置语言包不可用")
+    }
+
+    // ==========================================
+    // 高层兼容 API 保持原样，直接读取 TOML 配置
+    // ==========================================
+
+    pub fn floating_title(lang: &Language) -> &str {
+        &Self::get_bundle(lang).floating_bar.title
+    }
+
+    pub fn tag_explorer(lang: &Language) -> &str {
+        &Self::get_bundle(lang).floating_bar.tag_explorer
+    }
+
+    pub fn tag_history(lang: &Language) -> &str {
+        &Self::get_bundle(lang).floating_bar.tag_history
+    }
+
+    pub fn tag_pinned(lang: &Language) -> &str {
+        &Self::get_bundle(lang).floating_bar.tag_pinned
+    }
+
+    pub fn tag_system(lang: &Language) -> &str {
+        let b = Self::get_bundle(lang);
+        if b.floating_bar.tag_system.is_empty() {
+            "System"
+        } else {
+            &b.floating_bar.tag_system
         }
     }
 
-    pub fn tag_explorer(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "资源管理器",
-            _ => "Explorer",
-        }
-    }
-
-    pub fn tag_history(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "最近历史",
-            _ => "History",
-        }
-    }
-
-    pub fn tag_pinned(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "常用固定",
-            _ => "Pinned",
-        }
-    }
-
-    pub fn tag_system(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "系统目录",
-            _ => "System",
-        }
-    }
-
-    pub fn dir_download(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "下载",
+    pub fn dir_download(lang: &Language) -> &str {
+        match Self::resolve_locale_code(lang).as_str() {
+            "zh-CN" => "下载",
             _ => "Downloads",
         }
     }
 
-    pub fn dir_desktop(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "桌面",
+    pub fn dir_desktop(lang: &Language) -> &str {
+        match Self::resolve_locale_code(lang).as_str() {
+            "zh-CN" => "桌面",
             _ => "Desktop",
         }
     }
 
-    pub fn dir_documents(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "文档",
+    pub fn dir_documents(lang: &Language) -> &str {
+        match Self::resolve_locale_code(lang).as_str() {
+            "zh-CN" => "文档",
             _ => "Documents",
         }
     }
 
-    pub fn tray_toggle_autoswitch(lang: Language, enabled: bool) -> String {
-        let locale = Self::resolve_locale(lang);
+    pub fn tray_toggle_autoswitch(lang: &Language, enabled: bool) -> String {
         let check = if enabled { "✔ " } else { "    " };
-        match locale {
-            Language::ZhCN => format!("{}自动秒切 (AutoSwitch)", check),
-            _ => format!("{}Auto-Switch (AutoSwitch)", check),
-        }
+        format!("{}{}", check, Self::get_bundle(lang).tray.toggle_autoswitch)
     }
 
-    pub fn tray_toggle_autostart(lang: Language, enabled: bool) -> String {
-        let locale = Self::resolve_locale(lang);
+    pub fn tray_toggle_autostart(lang: &Language, enabled: bool) -> String {
         let check = if enabled { "✔ " } else { "    " };
-        match locale {
-            Language::ZhCN => format!("{}开机自启", check),
-            _ => format!("{}Start on Boot", check),
-        }
+        format!("{}{}", check, Self::get_bundle(lang).tray.toggle_autostart)
     }
 
-    pub fn tray_show_candidates(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "呼出候选目录 (Ctrl + Q)",
-            _ => "Show Candidates (Ctrl + Q)",
-        }
+    pub fn tray_show_candidates(lang: &Language, hotkey_display: &str) -> String {
+        format!("{}({})", Self::get_bundle(lang).tray.show_candidates, hotkey_display)
     }
 
-    pub fn tray_settings(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "设置中心...",
-            _ => "Settings...",
-        }
+    pub fn tray_settings(lang: &Language) -> &str {
+        &Self::get_bundle(lang).tray.settings
     }
 
-    pub fn tray_exit(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "退出 QuickPath",
-            _ => "Exit QuickPath",
-        }
+    pub fn tray_exit(lang: &Language) -> &str {
+        &Self::get_bundle(lang).tray.exit
     }
 
-    pub fn settings_title(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "QuickPath 设置中心",
-            _ => "QuickPath Settings",
-        }
+    pub fn settings_title(lang: &Language) -> &str {
+        &Self::get_bundle(lang).settings.title
     }
 
-    pub fn producer(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "衢州御风科技有限公司出品",
-            _ => "Produced by Quzhou Yufeng Technology Co., Ltd.",
-        }
+    pub fn producer(lang: &Language) -> &str {
+        &Self::get_bundle(lang).settings.producer
     }
 
-    pub fn btn_ok(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "确定",
-            _ => "OK",
-        }
+    pub fn btn_ok(lang: &Language) -> &str {
+        &Self::get_bundle(lang).settings.btn_ok
     }
 
-    pub fn btn_cancel(lang: Language) -> &'static str {
-        match Self::resolve_locale(lang) {
-            Language::ZhCN => "取消",
-            _ => "Cancel",
-        }
+    pub fn btn_cancel(lang: &Language) -> &str {
+        &Self::get_bundle(lang).settings.btn_cancel
+    }
+
+    pub fn hotkey_card_title(lang: &Language) -> &str {
+        &Self::get_bundle(lang).hotkey.card_title
+    }
+
+    pub fn hotkey_card_desc(lang: &Language) -> &str {
+        &Self::get_bundle(lang).hotkey.card_desc
+    }
+
+    pub fn hotkey_recording_prompt(lang: &Language) -> &str {
+        &Self::get_bundle(lang).hotkey.recording_prompt
     }
 }
-
