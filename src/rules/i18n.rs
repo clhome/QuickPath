@@ -89,6 +89,8 @@ pub struct HotkeySection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsSection {
     pub title: String,
+    #[serde(default)]
+    pub subtitle: String,
     pub auto_switch: String,
     pub auto_switch_desc: String,
     pub autostart: String,
@@ -97,7 +99,9 @@ pub struct SettingsSection {
     pub opacity_desc: String,
     pub language: String,
     pub language_desc: String,
+    #[serde(default)]
     pub ecosystem: String,
+    #[serde(default)]
     pub ecosystem_desc: String,
     pub version_info: String,
     pub producer: String,
@@ -111,6 +115,20 @@ pub struct SettingsSection {
     pub status_all_ready: String,
     #[serde(default)]
     pub lang_auto: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AboutSection {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub company: String,
+    #[serde(default)]
+    pub desc: String,
+    #[serde(default)]
+    pub copyright: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +146,8 @@ pub struct LocaleBundle {
     pub floating_bar: FloatingBarSection,
     pub hotkey: HotkeySection,
     pub settings: SettingsSection,
+    #[serde(default)]
+    pub about: AboutSection,
     pub tray: TraySection,
 }
 

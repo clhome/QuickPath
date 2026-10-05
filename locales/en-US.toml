@@ -17,6 +17,7 @@ click_to_record = "Click to record"
 
 [settings]
 title = "QuickPath Settings"
+subtitle = "System Enhancements & Intelligent Dialog Navigation"
 auto_switch = "Auto-Switch Path (AutoSwitch)"
 auto_switch_desc = "Instantly navigate to the active/last opened folder when dialog opens"
 autostart = "Start on Boot (Silent UAC-free)"
@@ -24,17 +25,22 @@ autostart_desc = "Launch automatically on system login via Windows Task Schedule
 opacity = "Floating Bar Opacity"
 opacity_desc = "Drag the slider or click the track to adjust transparency level"
 language = "Language (i18n)"
-language_desc = "Supports English, Simplified Chinese, or Auto. Click to toggle"
-ecosystem = "Supported File Managers"
-ecosystem_desc = "Native Win11 Tabs Explorer, Directory Opus, Total Commander, XYplorer"
+language_desc = "Supports English, Simplified Chinese, or Auto system detection"
 version_info = "QuickPath v1.0.0 · Native Ultra-Fast for Windows 10/11"
 producer = "Produced by Quzhou Yufeng Technology Co., Ltd."
 btn_ok = "OK"
 btn_cancel = "Cancel"
-status_enabled = "Enabled - Click to toggle"
-status_disabled = "Disabled - Click to toggle"
+status_enabled = "Enabled"
+status_disabled = "Disabled"
 status_all_ready = "All Ready"
 lang_auto = "Auto (System)"
+
+[about]
+title = "About QuickPath"
+version = "v1.0.0 Official Release (Ultra-Fast · Lightweight)"
+company = "Produced by Quzhou Yufeng Technology Co., Ltd."
+desc = "Dedicated to Next-Gen Windows native productivity & system enhancements"
+copyright = "Copyright © 2026 Quzhou Yufeng Technology Co., Ltd. All Rights Reserved."
 
 [tray]
 show_candidates = "Show Candidates"
