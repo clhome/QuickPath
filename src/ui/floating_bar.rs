@@ -18,7 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     HBRUSH, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
     TRANSPARENT, WHITE_BRUSH,
 };
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetSystemMetrics, RegisterClassW, SetLayeredWindowAttributes,
     SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LWA_ALPHA,
@@ -170,19 +170,23 @@ impl FloatingBar {
         self.state.language = language;
         self.set_opacity(opacity);
 
-        // 1. 获取窗口的真实 DPI 并计算缩放比率（优先从吸附条自身获取，其次从目标对话框获取）
+        // 1. 获取对话框所在物理显示器的精确物理 DPI（通过 MonitorFromWindow + GetDpiForMonitor 直接获取目标屏 DPI）
+        let h_mon = unsafe { MonitorFromWindow(dialog_hwnd, MONITOR_DEFAULTTONEAREST) };
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
         let dpi = unsafe {
-            let mut d = GetDpiForWindow(self.state.hwnd);
-            if d == 0 {
-                d = GetDpiForWindow(dialog_hwnd);
+            if GetDpiForMonitor(h_mon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x > 0 {
+                dpi_x
+            } else {
+                let d = GetDpiForWindow(dialog_hwnd);
+                if d > 0 { d } else { 96 }
             }
-            if d == 0 { 96 } else { d }
         };
         let scale = (dpi as f32 / 96.0).max(1.0);
         self.state.dpi_scale = scale;
 
-        // 2. 根据 DPI 动态计算单行高密度几何尺寸（基准宽度 780px，行高 38px）
-        self.state.bar_width = (780.0 * scale).round() as i32;
+        // 2. 根据目标屏幕真实 DPI 动态计算单行高密度几何尺寸（基准宽度 740px，行高 38px）
+        self.state.bar_width = (740.0 * scale).round() as i32;
         self.state.header_height = (36.0 * scale).round() as i32;
         self.state.item_height = (38.0 * scale).round() as i32;
         self.state.padding = (10.0 * scale).round() as i32;
@@ -197,15 +201,11 @@ impl FloatingBar {
         let visible_items = self.state.candidates.len().min(8) as i32;
         let total_height = self.state.header_height + visible_items * self.state.item_height + self.state.padding;
 
-        let bar_w = self.state.bar_width;
-        let dlg_w = dialog_rect.right - dialog_rect.left;
-
         // 3. 多显示器感知定位：精准获取对话框所在显示器的物理工作区 rcWork
         let mut mi = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        let h_mon = unsafe { MonitorFromWindow(dialog_hwnd, MONITOR_DEFAULTTONEAREST) };
         let has_mon_info = unsafe { GetMonitorInfoW(h_mon, &mut mi).as_bool() };
         let work_area = if has_mon_info {
             mi.rcWork
@@ -217,6 +217,16 @@ impl FloatingBar {
                 bottom: unsafe { GetSystemMetrics(SM_CYSCREEN) },
             }
         };
+
+        // 屏幕宽度保护：确保宽度不超过当前屏幕物理工作区可用宽度的 90%
+        let max_w = (work_area.right - work_area.left - 24).max(400);
+        let mut bar_w = self.state.bar_width;
+        if bar_w > max_w {
+            bar_w = max_w;
+            self.state.bar_width = max_w;
+        }
+
+        let dlg_w = dialog_rect.right - dialog_rect.left;
 
         // 默认居中贴附在对话框底部边缘
         let mut x = dialog_rect.left + (dlg_w - bar_w) / 2;
@@ -231,7 +241,7 @@ impl FloatingBar {
                 }
             }
 
-            // 水平坐标严格约束在当前显示器工作区范围内，杜绝跳回主屏
+            // 水平坐标严格约束在当前显示器工作区范围内，杜绝跳出屏幕
             if x < work_area.left + 8 {
                 x = work_area.left + 8;
             } else if x + bar_w > work_area.right - 8 {
@@ -342,6 +352,23 @@ unsafe extern "system" fn floating_bar_wnd_proc(
         WM_LBUTTONDOWN => {
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
             handle_mouse_click(hwnd, y);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
+            let new_dpi = (wparam.0 & 0xffff) as u32;
+            let scale = (new_dpi as f32 / 96.0).max(1.0);
+            let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+            if !state_ptr.is_null() {
+                unsafe {
+                    let state = &mut *state_ptr;
+                    state.dpi_scale = scale;
+                    state.bar_width = (740.0 * scale).round() as i32;
+                    state.header_height = (36.0 * scale).round() as i32;
+                    state.item_height = (38.0 * scale).round() as i32;
+                    state.padding = (10.0 * scale).round() as i32;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                }
+            }
             LRESULT(0)
         }
         WM_DESTROY => LRESULT(0),
