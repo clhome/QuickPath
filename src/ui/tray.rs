@@ -6,8 +6,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetCursorPos, LoadIconW, RegisterClassW, SetForegroundWindow,
-    TrackPopupMenu, IDI_APPLICATION, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
+    GetCursorPos, RegisterClassW, SetForegroundWindow,
+    TrackPopupMenu, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
     TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
@@ -55,7 +55,8 @@ impl TrayIcon {
                 Ok(h) if !h.0.is_null() => h,
                 _ => return Err("创建托盘消息宿主窗口失败".to_string()),
             };
-            let hicon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+            let hicon = crate::win32::icon::get_app_icon(true);
+
 
             let mut tip = [0u16; 128];
             let tip_str = "QuickPath - 现代文件对话框智能跟随\0";

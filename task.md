@@ -162,3 +162,19 @@
   - [x] 保持对外高层 API 兼容，无缝过渡
 - [x] **14.4 编译验证与外部语言文件扩展测试**
 
+## 阶段十五：产品专属 Logo 与图标全局集成
+- [x] **15.1 资源归位与规范化存放**
+  - [x] 创建 `assets/` 目录并将 `Document/imgs/logo.ico` 与 `Document/imgs/logo.png` 复制至该目录
+- [x] **15.2 EXE 可执行程序图标嵌入**
+  - [x] 更新 `quickpath.rc` 增加 `1 ICON "assets/logo.ico"`
+  - [x] 更新 `build.rs` 监听 `assets/logo.ico` 变化
+- [x] **15.3 系统托盘图标（Tray Icon）升级**
+  - [x] 新建 `src/win32/icon.rs` 模块，通过 `LoadImageW` 动态匹配 DPI 尺寸加载专属图标
+  - [x] 更新 `src/ui/tray.rs`，从程序嵌入资源精准加载专属 Logo，告别 Windows 通用白板图标
+- [x] **15.4 窗口标题栏与任务栏图标升级**
+  - [x] 在 `src/ui/settings.rs` 窗口注册中绑定专属 Logo，设置中心窗口呈现专业视觉
+  - [x] 发送 `WM_SETICON` 消息同时配置 `ICON_SMALL` 与 `ICON_BIG`
+- [x] **15.5 编译验证与交付**
+  - [x] Release 构建成功，体积轻巧（1.1MB），资源完全嵌入且无需任何外部动态链接
+
+

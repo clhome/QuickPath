@@ -21,12 +21,13 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GetClientRect, GetSystemMetrics,
-    LoadCursorW, RegisterClassW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
-    IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SW_HIDE, SW_SHOW,
+    LoadCursorW, RegisterClassW, SendMessageW, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
+    ICON_BIG, ICON_SMALL, IDC_ARROW, SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SW_HIDE, SW_SHOW,
     WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SYSKEYDOWN, WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETICON, WM_SYSKEYDOWN, WNDCLASSW, WS_CAPTION, WS_CLIPCHILDREN,
     WS_MINIMIZEBOX, WS_SYSMENU,
 };
+
 
 static SETTINGS_WINDOW_HWND: AtomicPtr<core::ffi::c_void> =
     AtomicPtr::new(std::ptr::null_mut());
@@ -58,10 +59,13 @@ impl SettingsWindow {
         let class_name = w!("QuickPath_Settings_Class");
         unsafe {
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
+            let hicon_big = crate::win32::icon::get_app_icon(false);
+            let hicon_sm = crate::win32::icon::get_app_icon(true);
             let wc = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(settings_wnd_proc),
                 hInstance: HINSTANCE::default(),
+                hIcon: hicon_big,
                 hCursor: cursor,
                 lpszClassName: class_name,
                 hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
@@ -83,9 +87,15 @@ impl SettingsWindow {
                 None,
                 None,
             ) {
-                Ok(h) if !h.0.is_null() => h,
+                Ok(h) if !h.0.is_null() => {
+                    let _ = SendMessageW(h, WM_SETICON, Some(WPARAM(ICON_SMALL as _)), Some(LPARAM(hicon_sm.0 as _)));
+                    let _ = SendMessageW(h, WM_SETICON, Some(WPARAM(ICON_BIG as _)), Some(LPARAM(hicon_big.0 as _)));
+                    h
+                }
+
                 _ => return Err("创建设置中心窗口失败".to_string()),
             };
+
 
             // 获取当前显示器 DPI 并缩放尺寸
             let dpi = GetDpiForWindow(hwnd);
