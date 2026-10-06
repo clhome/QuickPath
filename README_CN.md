@@ -3,6 +3,7 @@
 ![index](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/Image_index.webp)
 
 <div align="center">
+
 **简体中文** | [English](README.md)
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
@@ -31,6 +32,8 @@
 ---
 
 ## 🌟 核心特性
+
+![detail](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/detail.webp)
 
 - **⚡ 智能自动秒切 (AutoSwitch)**：
   在文本编辑器、IDE、办公或设计软件中弹出“打开”或“另存为”对话框时，毫秒级无感自动同步至你最后浏览的文件管理器目录，彻底告别在长目录树中重复点选和复制粘贴。
@@ -71,6 +74,8 @@
 ---
 
 ## 🛠️ 设置中心一览
+
+![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings.webp)
 
 QuickPath 配备了符合 Fluent 视觉的现代化卡片式设置中心：
 - **常规自动化**：一键开启或关闭“智能自动秒切”，并提供滑块调节切换触发延时（40ms ~ 500ms）；

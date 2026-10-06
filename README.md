@@ -1,5 +1,7 @@
 # QuickPath 🚀
 
+![index](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/Image_index.webp)
+
 <div align="center">
 
 [简体中文](README_CN.md) | **English**
@@ -30,6 +32,8 @@ When working across multiple applications, do you frequently face this frustrati
 ---
 
 ## 🌟 Key Features
+
+![detail](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/detail_en.webp)
 
 - **⚡ Smart AutoSwitch**:
   When an "Open" or "Save As" dialog appears in editors, IDEs, or creative software, QuickPath synchronizes it to your most recently browsed file manager directory within milliseconds—eliminating repetitive path hunting and copy-pasting.
@@ -70,6 +74,8 @@ When working across multiple applications, do you frequently face this frustrati
 ---
 
 ## 🛠️ Modern Settings Center
+
+![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings_en.webp)
 
 QuickPath includes a modern Fluent card-based Settings Center:
 - **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms).
