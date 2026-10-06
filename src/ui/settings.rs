@@ -14,11 +14,12 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
     InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_CENTER,
-    DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC,
-    HGDIOBJ, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
+    DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
+    HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DrawIconEx, GetClientRect, GetSystemMetrics, LoadCursorW,
     RegisterClassW, SendMessageW, SetCursor, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
@@ -473,17 +474,20 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
 
         // 卡片 5：“关于 QuickPath”现代专属信息卡片 (About Card)
         let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-        let about_h = (98.0 * scale).round() as i32;
+        let about_h = (104.0 * scale).round() as i32;
         render_about_card(
             hdc, pad_x, card5_top, pad_x + card_w, card5_top + about_h, scale,
-            &bundle, font_card_title, font_text, font_small,
+            &bundle, font_card_title, font_text, font_small, hovered,
         );
 
-        // 3. 底部「确定」与「取消」按钮
-        let btn_top = card5_top + about_h + (16.0 * scale).round() as i32;
+        // 3. 底部「确定」与「取消」按钮（沉底排布，与窗体底部保留舒缓间距）
+        let bottom_pad = (22.0 * scale).round() as i32;
         let btn_h = (34.0 * scale).round() as i32;
         let btn_w = (98.0 * scale).round() as i32;
         let btn_gap = (12.0 * scale).round() as i32;
+
+        let btn_bottom = rect.bottom - bottom_pad;
+        let btn_top = btn_bottom - btn_h;
 
         let btn_cancel_right = rect.right - pad_x;
         let btn_cancel_left = btn_cancel_right - btn_w;
@@ -494,13 +498,13 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             left: btn_ok_left,
             top: btn_top,
             right: btn_ok_right,
-            bottom: btn_top + btn_h,
+            bottom: btn_bottom,
         };
         let btn_cancel_rect = RECT {
             left: btn_cancel_left,
             top: btn_top,
             right: btn_cancel_right,
-            bottom: btn_top + btn_h,
+            bottom: btn_bottom,
         };
 
         let is_hov_ok = hovered == Some(10);
@@ -521,18 +525,18 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             cancel_bg, COLORREF(0x00e2e2e2), Some(cancel_border), (4.0 * scale).round() as i32,
         );
 
-        // 4. 底部微型标语与出品方
+        // 4. 底部微型标语与版本信息（与确定/取消按钮垂直平齐，排布在左侧）
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
         SetTextColor(hdc, COLORREF(0x006e6e6e));
         let ver_str = &bundle.settings.version_info;
         let mut ver_buf: Vec<u16> = ver_str.encode_utf16().collect();
         let mut ver_rect = RECT {
             left: pad_x,
-            top: rect.bottom - (24.0 * scale).round() as i32,
-            right: rect.right - pad_x,
-            bottom: rect.bottom - (6.0 * scale).round() as i32,
+            top: btn_top,
+            right: btn_ok_left - (16.0 * scale).round() as i32,
+            bottom: btn_bottom,
         };
-        DrawTextW(hdc, &mut ver_buf, &mut ver_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut ver_buf, &mut ver_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // 5. 顶层叠加渲染网页风格下拉选择选项层（展开时覆盖在关于卡片上方）
         if is_dropdown_open {
@@ -1047,6 +1051,7 @@ unsafe fn render_about_card(
     font_bold: windows::Win32::Graphics::Gdi::HFONT,
     font_normal: windows::Win32::Graphics::Gdi::HFONT,
     font_small: windows::Win32::Graphics::Gdi::HFONT,
+    hovered: Option<usize>,
 ) {
     unsafe {
         // 卡片背景与精致微边框
@@ -1067,55 +1072,68 @@ unsafe fn render_about_card(
         let text_x = logo_x + logo_w + (18.0 * scale).round() as i32;
         let text_right = right - (16.0 * scale).round() as i32;
 
-        // 行 1: QuickPath + 版本徽标
+        // 行 1: QuickPath + 动态版本徽标
         SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
         let ver_name = if bundle.about.version.is_empty() {
-            "v1.0.0 正式版 (原生极速 · 极简轻量)"
+            format!("v{} 正式版 (原生极速 · 极简轻量)", crate::rules::version::APP_VERSION)
         } else {
-            &bundle.about.version
+            bundle.about.version.clone()
         };
         let line1 = format!("QuickPath  {}", ver_name);
         let mut buf1: Vec<u16> = line1.encode_utf16().collect();
         let mut r1 = RECT {
             left: text_x,
-            top: top + (9.0 * scale).round() as i32,
+            top: top + (10.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (28.0 * scale).round() as i32,
+            bottom: top + (29.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf1, &mut r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 行 2: 出品方信息（衢州御风科技有限公司）
+        // 行 2: 出品方及官网链接（衢州御风科技有限公司 · qp.yftec.top ↗）
         SelectObject(hdc, HGDIOBJ(font_normal.0 as _));
-        SetTextColor(hdc, COLORREF(0x00e0e0e0));
+        let is_hov_web = hovered == Some(20);
+        let web_color = if is_hov_web {
+            COLORREF(0x00ffcd60) // 悬停 Fluent Accent 亮天蓝
+        } else {
+            COLORREF(0x00d8d8d8) // 普通态柔和亮白
+        };
+        SetTextColor(hdc, web_color);
         let company_text = if bundle.about.company.is_empty() {
             "出品方：衢州御风科技有限公司"
         } else {
             &bundle.about.company
         };
-        let mut buf2: Vec<u16> = company_text.encode_utf16().collect();
+        let line2 = format!("{}  ·  qp.yftec.top ↗", company_text);
+        let mut buf2: Vec<u16> = line2.encode_utf16().collect();
         let mut r2 = RECT {
             left: text_x,
-            top: top + (31.0 * scale).round() as i32,
+            top: top + (32.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (49.0 * scale).round() as i32,
+            bottom: top + (50.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf2, &mut r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 行 3: 产品研发定位
-        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
-        SetTextColor(hdc, COLORREF(0x00909090));
-        let desc_text = if bundle.about.desc.is_empty() {
-            "专注于新一代 Windows 现代生产力工具与原生系统增强研发"
+        // 行 3: GitHub 官方开源地址（GitHub 纯白高清图标 + github.com/clhome/QuickPath ↗）
+        let gh_size = (15.0 * scale).round() as i32;
+        let gh_y = top + (54.0 * scale).round() as i32 + ((18.0 * scale) as i32 - gh_size) / 2;
+        let _ = crate::win32::icon::draw_github_png(hdc, text_x, gh_y, gh_size, gh_size);
+
+        let is_hov_github = hovered == Some(21);
+        let gh_color = if is_hov_github {
+            COLORREF(0x00ffcd60) // 悬停 Fluent Accent 亮天蓝
         } else {
-            &bundle.about.desc
+            COLORREF(0x00b0b0b0) // 普通态优雅浅灰
         };
-        let mut buf3: Vec<u16> = desc_text.encode_utf16().collect();
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        SetTextColor(hdc, gh_color);
+        let line3 = "GitHub: github.com/clhome/QuickPath ↗";
+        let mut buf3: Vec<u16> = line3.encode_utf16().collect();
         let mut r3 = RECT {
-            left: text_x,
-            top: top + (52.0 * scale).round() as i32,
+            left: text_x + gh_size + (7.0 * scale).round() as i32,
+            top: top + (53.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (70.0 * scale).round() as i32,
+            bottom: top + (72.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf3, &mut r3, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -1129,9 +1147,9 @@ unsafe fn render_about_card(
         let mut buf4: Vec<u16> = copyright_text.encode_utf16().collect();
         let mut r4 = RECT {
             left: text_x,
-            top: top + (72.0 * scale).round() as i32,
+            top: top + (75.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (90.0 * scale).round() as i32,
+            bottom: top + (93.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf4, &mut r4, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
@@ -1159,10 +1177,12 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let card3_top = card2_top + card_h + card_gap;
     let card4_top = card3_top + card_h + card_gap;
     let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-    let about_h = (98.0 * scale).round() as i32;
+    let about_h = (104.0 * scale).round() as i32;
 
-    let btn_top = card5_top + about_h + (16.0 * scale).round() as i32;
+    let bottom_pad = (22.0 * scale).round() as i32;
     let btn_h = (34.0 * scale).round() as i32;
+    let btn_bottom = rect.bottom - bottom_pad;
+    let btn_top = btn_bottom - btn_h;
     let btn_w = (98.0 * scale).round() as i32;
     let btn_gap = (12.0 * scale).round() as i32;
 
@@ -1331,10 +1351,27 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 new_hover = Some(4);
                 is_pointer = true;
             }
+        } else if y >= card5_top && y <= card5_top + about_h {
+            let logo_w = ((about_h as f32) * 0.8).round() as i32;
+            let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
+            let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
+
+            let web_top = card5_top + (32.0 * scale).round() as i32;
+            let web_bottom = card5_top + (50.0 * scale).round() as i32;
+            let gh_top = card5_top + (53.0 * scale).round() as i32;
+            let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+
+            if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
+                new_hover = Some(20);
+                is_pointer = true;
+            } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
+                new_hover = Some(21);
+                is_pointer = true;
+            }
         }
     }
 
-    if y >= btn_top && y <= btn_top + btn_h {
+    if y >= btn_top && y <= btn_bottom {
         if x >= btn_ok_left && x <= btn_ok_right {
             new_hover = Some(10);
             is_pointer = true;
@@ -1399,7 +1436,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
     let card3_top = card2_top + card_h + card_gap;
     let card4_top = card3_top + card_h + card_gap;
     let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-    let about_h = (98.0 * scale).round() as i32;
+    let about_h = (104.0 * scale).round() as i32;
 
     let is_dropdown_open = IS_DROPDOWN_OPEN.load(Ordering::SeqCst);
     let combo_w = (170.0 * scale).round() as i32;
@@ -1541,11 +1578,53 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             need_redraw = true;
         }
     }
+    // 点击卡片 5: 关于卡片内的官网链接与 GitHub 开源主页链接
+    else if y >= card5_top && y <= card5_top + about_h {
+        let logo_w = ((about_h as f32) * 0.8).round() as i32;
+        let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
+        let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
+
+        let web_top = card5_top + (32.0 * scale).round() as i32;
+        let web_bottom = card5_top + (50.0 * scale).round() as i32;
+        let gh_top = card5_top + (53.0 * scale).round() as i32;
+        let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+
+        if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
+            let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
+            let op: Vec<u16> = "open\0".encode_utf16().collect();
+            unsafe {
+                ShellExecuteW(
+                    None,
+                    windows::core::PCWSTR(op.as_ptr()),
+                    windows::core::PCWSTR(url.as_ptr()),
+                    windows::core::PCWSTR::null(),
+                    windows::core::PCWSTR::null(),
+                    SW_SHOW,
+                );
+            }
+            return;
+        } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
+            let url: Vec<u16> = "https://github.com/clhome/QuickPath\0".encode_utf16().collect();
+            let op: Vec<u16> = "open\0".encode_utf16().collect();
+            unsafe {
+                ShellExecuteW(
+                    None,
+                    windows::core::PCWSTR(op.as_ptr()),
+                    windows::core::PCWSTR(url.as_ptr()),
+                    windows::core::PCWSTR::null(),
+                    windows::core::PCWSTR::null(),
+                    SW_SHOW,
+                );
+            }
+            return;
+        }
+    }
     else {
-        // 按钮区域点击判定
-        let btn_top = card5_top + about_h + (16.0 * scale).round() as i32;
+        // 按钮区域点击判定（使用沉底坐标）
+        let bottom_pad = (22.0 * scale).round() as i32;
         let btn_h = (34.0 * scale).round() as i32;
-        let btn_bottom = btn_top + btn_h;
+        let btn_bottom = rect.bottom - bottom_pad;
+        let btn_top = btn_bottom - btn_h;
         let btn_w = (98.0 * scale).round() as i32;
         let btn_gap = (12.0 * scale).round() as i32;
 

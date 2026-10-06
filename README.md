@@ -1,51 +1,93 @@
 # QuickPath 🚀
 
-> **专为 Windows 10 与 Windows 11 深度打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器。**
+<div align="center">
+
+[简体中文](README_CN.md) | **English**
+
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
+[![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
+[![Version](https://img.shields.io/badge/Version-v1.0.0-success)](#)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
+
+**A modern Fluent-style smart path following and quick navigation companion for Windows 10 & 11 file dialogs.**
+
+[🌐 Official Website](https://qp.yftec.top) · [📘 User Manual (English)](Document/User_Manual_EN.md) · [📖 使用说明书 (中文)](Document/User_Manual_CN.md) · [🐛 Issues & Feedback](https://github.com/clhome/QuickPath/issues)
+
+</div>
 
 ---
 
-## 🌟 核心特性
+## 💡 Why QuickPath?
 
-- **⚡ 智能自动秒切 (AutoSwitch)**：
-  在文本编辑器、IDE、办公或设计软件中弹出“打开”或“另存为”对话框时，毫秒级无感自动同步至你最后浏览的文件管理器目录，彻底告别在长目录树中重复点选和复制粘贴。
-- **🪟 Windows 11 现代 Fluent Design**：
-  原生适配 Windows 11 **Mica / Acrylic（亚克力磨砂）** 材质与系统级深色/浅色自适应圆角，告别传统老旧丑陋的 Win32 弹窗。
-- **📑 Windows 11 多标签页（Tabs）原生适配**：
-  突破传统 COM 无法获取活动标签页的限制，精准感知 Windows 11 文件资源管理器的活跃 Tab。
-- **🛡️ 输入法隔离与文件名保护**：
-  独创 `ImeGuard` 输入法状态保护机制，在路径注入过程中暂时挂起中文输入法候选，杜绝拼音顶词与乱码，同时智能保留用户原本敲入的文件名。
-- **🔌 主流文件管理器全生态支持**：
-  - Windows 11 / Windows 10 文件资源管理器 (Explorer)
+When working across multiple applications, do you frequently face this frustration?
+- You just navigated to a deeply nested project folder in **File Explorer** or **Directory Opus**, but when invoking "Open" or "Save As" in your code editor, IDE, Photoshop, or Office suite, the file dialog defaults back to "Downloads" or "Documents";
+- You are forced to traverse through long directory trees again or manually copy and paste folder paths into the dialog address bar;
+- Outdated legacy switcher tools often trigger your Input Method Editor (IME) unintentionally during path injection, causing typos, candidate popups, or accidentally overwriting your desired filename.
+
+**QuickPath** was engineered to eliminate this friction once and for all. It senses your active file manager folders in milliseconds upon opening a file dialog, providing seamless automatic synchronization and instant keyboard-driven navigation.
+
+---
+
+## 🌟 Key Features
+
+- **⚡ Smart AutoSwitch**:
+  When an "Open" or "Save As" dialog appears in editors, IDEs, or creative software, QuickPath synchronizes it to your most recently browsed file manager directory within milliseconds—eliminating repetitive path hunting and copy-pasting.
+- **🪟 Windows 11 Modern Fluent Design**:
+  Natively integrates Windows 11 **Mica / Acrylic blur**, rounded corners, and adaptive dark/light themes. Say goodbye to dated and clunky legacy Win32 popups.
+- **📑 Windows 11 Multi-Tab Explorer Support**:
+  Overcomes the classic COM API limitation that fails to detect active tabs in Windows 11 Explorer, accurately recognizing the currently focused tab.
+- **🛡️ IME Guard & Filename Preservation (ImeGuard)**:
+  Innovative input method protection mechanism temporarily suspends IME candidate windows during path injection, preventing pinyin typos and garbled text while intelligently preserving filenames you've already typed.
+- **🔌 Full File Manager Ecosystem Support**:
+  - Windows 11 / 10 Native File Explorer (including multi-tab recognition)
   - Directory Opus (DOpus)
   - Total Commander (TC)
   - XYplorer
-- **🚀 免 UAC 静默开机自启**：
-  内置 Windows 任务计划程序管理，支持开机以最高权限静默启动，与任何以管理员权限运行的软件无缝通信，开机零弹窗打扰。
-- **🎈 现代悬浮吸附条 (Floating Bar)**：
-  贴合在文件对话框边缘，快捷键 `Ctrl + Q` 随时呼出，支持上下键直选、收藏夹与历史记录直达。
-- **🪶 极速与超轻量**：
-  纯原生 Rust 构建，单个便携式可执行文件仅 **520 KB**，常驻后台内存 **< 10 MB**，待机 CPU 占用 **0%**。
+- **🚀 UAC-Free Silent AutoStart**:
+  Built-in Windows Task Scheduler integration allows the application to launch silently with highest privileges at system startup, eliminating annoying UAC prompts while communicating seamlessly with elevated applications.
+- **🎈 Modern Floating Bar**:
+  Snaps to the edge of your file dialogs. Summon it instantly via hotkey (default `Ctrl + Q`), navigate candidates with `↑`/`↓` arrow keys, and jump to pinned favorites or recent folders with a single press of `Enter`.
+- **🎨 Deep Customization**:
+  Adjust window transparency seamlessly from 40% to 100% via a sleek slider, record custom global hotkeys interactively, and switch between English, Simplified Chinese, or custom external TOML language packs.
+- **🪶 Ultra-Lightweight & Blazing Fast**:
+  Built purely with native Rust. The standalone portable binary is only **~1.2 MB**, consumes **< 10 MB** of background memory, and uses **0%** idle CPU.
 
 ---
 
-## ⌨️ 常用快捷操作
+## ⌨️ Common Shortcuts & Controls
 
-| 动作 | 说明 |
+| Action / Hotkey | Description |
 | :--- | :--- |
-| **自动跟随** | 在文件管理器查看文件夹后，切入“打开/另存为”对话框，系统自动秒切到该路径 |
-| **`Ctrl + Q`** | 在文件对话框中呼出现代路径选择悬浮栏 |
-| **`↑` / `↓`** | 切换候选列表中的路径 |
-| **`Enter`** | 确认并将选中的路径注入到当前对话框中 |
-| **`Esc`** | 关闭悬浮栏 |
-| **托盘图标右键** | 快速切换自动秒切状态、开机自启开关、打开设置中心或退出 |
-| **托盘图标左键** | 直接打开现代卡片式设置中心 |
+| **Auto Follow** | Browse a folder in your file manager; when an "Open/Save" dialog appears, QuickPath switches to it automatically |
+| **`Ctrl + Q`** (Customizable) | Summon the modern path picker floating bar adjacent to the active file dialog |
+| **`↑` / `↓`** | Navigate between active file manager tabs, pinned favorites, and recent history |
+| **`Enter`** | Confirm and instantly inject the selected path into the file dialog |
+| **`Esc`** | Dismiss the floating bar |
+| **Tray Icon (Left Click / Double Click)** | Open the modern card-style Settings Center |
+| **Tray Icon (Right Click)** | Context menu: toggle AutoSwitch, toggle AutoStart, summon bar, open settings, or exit |
 
 ---
 
-## ⚙️ 配置文件说明
+## 🛠️ Modern Settings Center
 
-配置持久化保存于 `%APPDATA%\QuickPath\config.json`（或与可执行文件同级的 `quickpath.json` 便携模式）。
+QuickPath includes a modern Fluent card-based Settings Center:
+- **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms).
+- **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency.
+- **Custom Hotkey**: Interactive key recording interface supporting custom modifier combinations (Ctrl, Alt, Shift, Win) with dynamic hotkey re-registration.
+- **System Startup**: Seamless Task Scheduler integration for UAC-free elevation on boot.
+- **Language Switcher**: Dynamic switching between English, Simplified Chinese, or any external `./locales/*.toml` files.
+- **About & Community**: View version info, open the official website, or visit the GitHub repository.
 
+---
+
+## ⚙️ Configuration File
+
+QuickPath features dual-mode persistence:
+1. **Portable Mode**: If `quickpath.json` exists in the same directory as the executable, all settings are saved locally (ideal for USB drives).
+2. **Standard Mode**: Defaults to `%APPDATA%\QuickPath\config.json`.
+
+Sample configuration:
 ```json
 {
   "auto_switch_enabled": true,
@@ -53,8 +95,10 @@
   "hotkey": "Ctrl+Q",
   "floating_bar_enabled": true,
   "floating_bar_auto_show": false,
+  "floating_bar_opacity": 90,
   "autostart_enabled": false,
   "autostart_task_scheduler": true,
+  "language": "en-US",
   "blacklist_processes": [
     "chrome.exe",
     "msedge.exe",
@@ -68,16 +112,47 @@
 
 ---
 
-## 🛠️ 构建与编译
+## 🏗️ Building from Source
 
-本项目基于标准 Rust 工具链开发，支持 Windows 10 (1809+) 及 Windows 11。
+QuickPath is built with the standard Rust toolchain and targets Windows 10 (1809+) and Windows 11.
 
+### Prerequisites
+- [Rust Toolchain](https://www.rust-lang.org/) (Stable channel recommended)
+- Windows 10 (1809 or higher) / Windows 11
+
+### Build Steps
 ```pwsh
-# 调试运行
+# 1. Clone the repository
+git clone https://github.com/clhome/QuickPath.git
+cd QuickPath
+
+# 2. Run in development mode
 cargo run
 
-# 构建最终优化发布版
+# 3. Build optimized release binary
 cargo build --release
 ```
 
-编译产物位于 `target/release/quickpath.exe`。
+The output binary will be located at `target/release/quickpath.exe`. It is a single, zero-dependency, portable executable.
+
+---
+
+## 📚 Detailed Documentation
+
+For in-depth usage scenarios, ecosystem configurations, and advanced customization, refer to our comprehensive manuals:
+- 📘 [English User Manual & Technical Guide](Document/User_Manual_EN.md)
+- 🇨🇳 [中文用户使用说明书 (User Manual)](Document/User_Manual_CN.md)
+
+---
+
+## 🏢 Producer & Acknowledgments
+
+- **Produced by**: Quzhou Yufeng Technology Co., Ltd. (衢州御风科技有限公司)
+- **Official Website**: [https://qp.yftec.top](https://qp.yftec.top)
+- **GitHub Repository**: [https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)
+
+---
+
+## 📄 License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

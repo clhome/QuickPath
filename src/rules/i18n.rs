@@ -131,6 +131,10 @@ pub struct AboutSection {
     pub desc: String,
     #[serde(default)]
     pub copyright: String,
+    #[serde(default)]
+    pub website: String,
+    #[serde(default)]
+    pub github: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,19 +163,25 @@ const EMBEDDED_EN_US: &str = include_str!("../../locales/en-US.toml");
 
 static LOCALES: OnceLock<HashMap<String, LocaleBundle>> = OnceLock::new();
 
+/// 将语言模板文件中的 {version} 动态注入为全局统一版本号
+fn parse_bundle_with_version(raw: &str) -> Option<LocaleBundle> {
+    let injected = raw.replace("{version}", crate::rules::version::APP_VERSION);
+    toml::from_str::<LocaleBundle>(&injected).ok()
+}
+
 pub struct I18n;
 
 impl I18n {
-    /// 获取全局语言包注册表（内置 + 外部动态扩展覆盖）
+    /// 获取全局语言包注册表（内置 + 外部动态扩展覆盖，并自动注入全局统一版本号）
     pub fn get_bundles() -> &'static HashMap<String, LocaleBundle> {
         LOCALES.get_or_init(|| {
             let mut map = HashMap::new();
 
-            // 1. 加载编译期内置官方语言
-            if let Ok(zh) = toml::from_str::<LocaleBundle>(EMBEDDED_ZH_CN) {
+            // 1. 加载编译期内置官方语言（动态注入统一版本号）
+            if let Some(zh) = parse_bundle_with_version(EMBEDDED_ZH_CN) {
                 map.insert("zh-CN".to_string(), zh);
             }
-            if let Ok(en) = toml::from_str::<LocaleBundle>(EMBEDDED_EN_US) {
+            if let Some(en) = parse_bundle_with_version(EMBEDDED_EN_US) {
                 map.insert("en-US".to_string(), en);
             }
 
@@ -191,7 +201,7 @@ impl I18n {
                             let path = entry.path();
                             if path.extension().and_then(|e| e.to_str()) == Some("toml") {
                                 if let Ok(content) = fs::read_to_string(&path) {
-                                    if let Ok(bundle) = toml::from_str::<LocaleBundle>(&content) {
+                                    if let Some(bundle) = parse_bundle_with_version(&content) {
                                         map.insert(bundle.meta.code.clone(), bundle);
                                     }
                                 }
@@ -360,6 +370,24 @@ impl I18n {
     pub fn hotkey_recording_prompt(lang: &Language) -> &str {
         &Self::get_bundle(lang).hotkey.recording_prompt
     }
+
+    pub fn about_website(lang: &Language) -> &str {
+        let b = Self::get_bundle(lang);
+        if !b.about.website.is_empty() {
+            &b.about.website
+        } else {
+            "https://qp.yftec.top"
+        }
+    }
+
+    pub fn about_github(lang: &Language) -> &str {
+        let b = Self::get_bundle(lang);
+        if !b.about.github.is_empty() {
+            &b.about.github
+        } else {
+            "https://github.com/clhome/QuickPath"
+        }
+    }
 }
 
 #[cfg(test)]
@@ -373,5 +401,16 @@ mod tests {
 
         let en_prod = I18n::floating_producer(&Language::EnUS);
         assert_eq!(en_prod, "Produced by Quzhou Yufeng Technology Co., Ltd.");
+    }
+
+    #[test]
+    fn test_dynamic_version_injection() {
+        let bundle_zh = I18n::get_bundle(&Language::ZhCN);
+        assert!(bundle_zh.about.version.contains(crate::rules::version::APP_VERSION));
+        assert!(bundle_zh.settings.version_info.contains(crate::rules::version::APP_VERSION));
+
+        let bundle_en = I18n::get_bundle(&Language::EnUS);
+        assert!(bundle_en.about.version.contains(crate::rules::version::APP_VERSION));
+        assert!(bundle_en.settings.version_info.contains(crate::rules::version::APP_VERSION));
     }
 }

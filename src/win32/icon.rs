@@ -137,3 +137,75 @@ pub unsafe fn draw_logo_png(
     }
     false
 }
+
+static GITHUB_BITMAP: OnceLock<usize> = OnceLock::new();
+
+/// 获取高清 github.png 图片句柄
+/// 优先加载本地 assets/github.png 文件；若无则自动回退加载嵌入式资源流
+pub fn get_github_png_image() -> Option<*mut GpImage> {
+    ensure_gdiplus();
+    let ptr = GITHUB_BITMAP.get_or_init(|| {
+        unsafe {
+            let mut bitmap: *mut GpBitmap = std::ptr::null_mut();
+
+            // 1. 尝试从本地 assets/github.png 加载
+            let paths = ["assets/github.png", "github.png"];
+            for p in paths {
+                if std::path::Path::new(p).exists() {
+                    let wide: Vec<u16> = p.encode_utf16().chain(Some(0)).collect();
+                    if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &mut bitmap) == Status(0) && !bitmap.is_null() {
+                        return bitmap as usize;
+                    }
+                }
+            }
+
+            // 2. 备用：从编译嵌入的 github.png 二进制流解码加载
+            let bytes = include_bytes!("../../assets/github.png");
+            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
+                if !hglobal.0.is_null() {
+                    let dest = GlobalLock(hglobal);
+                    if !dest.is_null() {
+                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest as *mut u8, bytes.len());
+                        let _ = GlobalUnlock(hglobal);
+                        if let Ok(stream) = CreateStreamOnHGlobal(hglobal, true) {
+                            if GdipCreateBitmapFromStream(&stream, &mut bitmap) == Status(0) && !bitmap.is_null() {
+                                return bitmap as usize;
+                            }
+                        }
+                    }
+                }
+            }
+
+            0
+        }
+    });
+
+    if *ptr != 0 {
+        Some(*ptr as *mut GpImage)
+    } else {
+        None
+    }
+}
+
+/// 高质量平滑绘制 github.png 图标
+/// 支持自动以双三次平滑采样（Bicubic）缩放至指定尺寸
+pub unsafe fn draw_github_png(
+    hdc: HDC,
+    dest_x: i32,
+    dest_y: i32,
+    dest_w: i32,
+    dest_h: i32,
+) -> bool {
+    if let Some(img) = get_github_png_image() {
+        unsafe {
+            let mut graphics: *mut GpGraphics = std::ptr::null_mut();
+            if GdipCreateFromHDC(hdc, &mut graphics) == Status(0) && !graphics.is_null() {
+                let _ = GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
+                let _ = GdipDrawImageRectI(graphics, img, dest_x, dest_y, dest_w, dest_h);
+                let _ = GdipDeleteGraphics(graphics);
+                return true;
+            }
+        }
+    }
+    false
+}

@@ -27,7 +27,7 @@ opacity = "弹出层半透明效果 (Opacity)"
 opacity_desc = "按住滑块左右滑动或直接点击槽位，实时调整通透程度"
 language = "界面语言 (Language)"
 language_desc = "支持简体中文、英文，或跟随系统语言自动匹配"
-version_info = "QuickPath v1.0.0 · 专为 Windows 10/11 深度打造 · 原生极速"
+version_info = "QuickPath v{version} · 专为 Windows 10/11 深度打造 · 原生极速"
 producer = "衢州御风科技有限公司出品"
 btn_ok = "确定"
 btn_cancel = "取消"
@@ -38,10 +38,12 @@ lang_auto = "自动跟随系统 (中文)"
 
 [about]
 title = "关于 QuickPath"
-version = "v1.0.0 正式版 (原生极速 · 极简轻量)"
+version = "v{version} 正式版 (原生极速 · 极简轻量)"
 company = "出品方：衢州御风科技有限公司"
 desc = "专注于新一代 Windows 现代生产力工具与原生系统增强研发"
 copyright = "Copyright © 2026 衢州御风科技有限公司. All Rights Reserved."
+website = "https://qp.yftec.top"
+github = "https://github.com/clhome/QuickPath"
 
 [tray]
 show_candidates = "呼出候选目录"
