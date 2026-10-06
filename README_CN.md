@@ -1,7 +1,8 @@
 # QuickPath 🚀
 
-<div align="center">
+![index](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/Image_index.webp)
 
+<div align="center">
 **简体中文** | [English](README.md)
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
