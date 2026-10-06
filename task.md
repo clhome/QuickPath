@@ -210,17 +210,18 @@
 - [x] **17.4 编译验证与交付**
   - [x] `cargo check` 与 `cargo build --release` 编译通过（0 警告 0 错误）
 
-## 阶段十八：语言下拉框网页风格化与精准点击区域限定
-- [x] **18.1 精确限定点击触发区域**
-  - [x] 彻底移除原卡片全域点击误触发 Bug，严格限定只有鼠标点击在右侧下拉框区域内部（`combo_left..=combo_right, combo_top..=combo_bottom`）才响应展开
-  - [x] 点击卡片左侧标题、描述及空白区域完全不弹出，光标精准保持普通箭头
-- [x] **18.2 纯原生自绘 Web 网页风格下拉浮层（Select Component）**
-  - [x] 抛弃 Windows 传统弹出菜单，改为顶层自绘 Fluent/Web 风格选项浮动面板
-  - [x] 严格贴附在下拉框正下方展开（与下拉框左对齐且同宽），边框高亮激活蓝色，箭头切换为 `▲`
-  - [x] 选项列表支持鼠标悬停高亮（`#333333`）、当前选中项对勾标记（`✔`）与手型光标切换
-- [x] **18.3 网页通用外部点击自动收起机制**
-  - [x] 展开状态下点击浮层外部任何区域均自动平滑收起
-- [x] **18.4 编译构建验证与交付**
-  - [x] `cargo check` 与 `cargo build --release` 保持 0 警告 0 错误
+## 阶段十九：悬浮条出品方文字、多语言适配与官网跳转
+- [x] **19.1 多语言配置与模型扩展 (i18n)**
+  - [x] 在 `locales/zh-CN.toml` 与 `locales/en-US.toml` 的 `[floating_bar]` 中增加出品方 `producer` 字段
+  - [x] 在 `src/rules/i18n.rs` 的 `FloatingBarSection` 中集成 `producer` 并在 `I18n` 中提供 `floating_producer` 函数
+- [x] **19.2 悬浮条顶栏右侧文本自绘与布局保护**
+  - [x] 在 `src/ui/floating_bar.rs` 中动态计算出品方文字宽度，靠右对齐展示
+  - [x] 限制左侧主标题绘制范围，防止与右侧文字重叠
+  - [x] 支持根据 DPI 动态缩放字体与间距
+- [x] **19.3 悬停交互与官网超链接跳转**
+  - [x] 增加光标手型（`IDC_HAND`）与悬停微高亮状态管理
+  - [x] 点击出品方文字调用 `ShellExecuteW` 打开 `https://qp.yftec.top` 并自动隐藏悬浮条
+- [x] **19.4 编译检查、验证与代码清理**
+  - [x] 执行 `cargo check`、`cargo test` 与 `cargo build --release` 保持 0 警告 0 错误
 
 

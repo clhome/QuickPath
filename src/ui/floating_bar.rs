@@ -19,11 +19,13 @@ use windows::Win32::Graphics::Gdi::{
     TRANSPARENT, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetSystemMetrics, RegisterClassW, SetLayeredWindowAttributes,
-    SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LWA_ALPHA,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, WM_DESTROY,
-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WNDCLASSW, WS_CLIPCHILDREN,
+    CreateWindowExW, DefWindowProcW, GetSystemMetrics, LoadCursorW, RegisterClassW,
+    SetCursor, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, CS_HREDRAW,
+    CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LWA_ALPHA, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_DESTROY, WM_ERASEBKGND,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_CLIPCHILDREN,
     WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
@@ -45,6 +47,8 @@ pub struct FloatingBarState {
     pub padding: i32,
     pub opacity: u8,
     pub language: Language,
+    pub producer_rect: RECT,
+    pub is_producer_hovered: bool,
 }
 
 pub struct FloatingBar {
@@ -55,10 +59,12 @@ impl FloatingBar {
     pub fn new() -> Result<Self, String> {
         let class_name = w!("QuickPath_FloatingBar_Class");
         unsafe {
+            let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(floating_bar_wnd_proc),
                 hInstance: HINSTANCE::default(),
+                hCursor: cursor,
                 lpszClassName: class_name,
                 hbrBackground: HBRUSH(GetStockObject(WHITE_BRUSH).0),
                 ..Default::default()
@@ -129,6 +135,8 @@ impl FloatingBar {
                 padding: 10,
                 opacity: 88,
                 language: Language::Auto,
+                producer_rect: RECT::default(),
+                is_producer_hovered: false,
             });
 
             FLOATING_BAR_INSTANCE.store(&raw mut *state, Ordering::SeqCst);
@@ -196,6 +204,7 @@ impl FloatingBar {
         self.state.candidates = candidates;
         self.state.selected_index = 0;
         self.state.hovered_index = None;
+        self.state.is_producer_hovered = false;
 
         // 单行紧凑高密度展示，最多展示 8 行
         let visible_items = self.state.candidates.len().min(8) as i32;
@@ -345,14 +354,28 @@ unsafe extern "system" fn floating_bar_wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-            handle_mouse_move(hwnd, y);
+            handle_mouse_move(hwnd, x, y);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xffff) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xffff) as i16 as i32;
-            handle_mouse_click(hwnd, y);
+            handle_mouse_click(hwnd, x, y);
             LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+            if !state_ptr.is_null() {
+                let state = unsafe { &*state_ptr };
+                let cursor_id = if state.is_producer_hovered { IDC_HAND } else { IDC_ARROW };
+                unsafe {
+                    let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
+                }
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
             let new_dpi = (wparam.0 & 0xffff) as u32;
@@ -439,19 +462,77 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
 
-        // 3. 绘制顶栏标题与快捷提示（多国语言支持）
+        let font_producer = CreateFontW(
+            (-12.0 * scale).round() as i32,
+            0,
+            0,
+            0,
+            if state.is_producer_hovered { FW_SEMIBOLD.0 as i32 } else { FW_NORMAL.0 as i32 },
+            0,
+            0,
+            0,
+            windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
+            windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
+            windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
+            windows::Win32::Graphics::Gdi::FONT_QUALITY(5),
+            0,
+            w!("Microsoft YaHei UI"),
+        );
+
+        // 3. 绘制顶栏标题与右侧出品方（多国语言适配与官网跳转支持）
         let pad = state.padding;
-        let mut header_rect = RECT {
-            left: pad + (6.0 * scale) as i32,
+        let right_edge = rect.right - pad - (6.0 * scale) as i32;
+
+        // 3.1 测算并绘制右侧出品方文字（靠右显示）
+        let producer_text = I18n::floating_producer(&state.language);
+        let mut producer_buf: Vec<u16> = producer_text.encode_utf16().collect();
+
+        SelectObject(hdc, HGDIOBJ(font_producer.0 as _));
+        let mut measure_r = RECT::default();
+        DrawTextW(hdc, &mut producer_buf, &mut measure_r, DT_CALCRECT | DT_SINGLELINE);
+        let prod_w = measure_r.right - measure_r.left;
+
+        let prod_right = right_edge;
+        let prod_left = prod_right - prod_w;
+        let mut prod_draw_rect = RECT {
+            left: prod_left,
             top: (2.0 * scale) as i32,
-            right: rect.right - pad,
+            right: prod_right,
+            bottom: state.header_height,
+        };
+
+        // 记录出品方热区（左右预留适当点击余量，垂直覆盖顶栏）
+        let state_mut = &mut *state_ptr;
+        state_mut.producer_rect = RECT {
+            left: prod_left - (4.0 * scale) as i32,
+            top: 0,
+            right: prod_right + (4.0 * scale) as i32,
+            bottom: state.header_height,
+        };
+
+        // 悬停时 Fluent Accent 高亮天蓝 #60cdff (0x00ffcd60)，普通态为优雅柔和灰白 #9c9ca4 (0x00a49c9c)
+        let prod_color = if state.is_producer_hovered {
+            COLORREF(0x00ffcd60)
+        } else {
+            COLORREF(0x00a49c9c)
+        };
+        SetTextColor(hdc, prod_color);
+        DrawTextW(hdc, &mut producer_buf, &mut prod_draw_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+        // 3.2 绘制左侧主标题与快捷提示（右边界留出安全间距，杜绝重叠）
+        let header_left = pad + (6.0 * scale) as i32;
+        let header_right = (prod_left - (16.0 * scale) as i32).max(header_left);
+        let mut header_rect = RECT {
+            left: header_left,
+            top: (2.0 * scale) as i32,
+            right: header_right,
             bottom: state.header_height,
         };
         SelectObject(hdc, HGDIOBJ(font_header.0 as _));
         SetTextColor(hdc, COLORREF(0x00e0e0e0));
         let title_text = I18n::floating_title(&state.language);
         let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
-        DrawTextW(hdc, &mut title_buf, &mut header_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut title_buf, &mut header_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // 4. 循环单行排布绘制每个候选项目
         let visible_count = state.candidates.len().min(8);
@@ -554,6 +635,7 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
         }
 
         let _ = DeleteObject(HGDIOBJ(font_header.0 as _));
+        let _ = DeleteObject(HGDIOBJ(font_producer.0 as _));
         let _ = DeleteObject(HGDIOBJ(font_item_title.0 as _));
         let _ = DeleteObject(HGDIOBJ(font_path.0 as _));
         let _ = DeleteObject(HGDIOBJ(font_tag.0 as _));
@@ -571,13 +653,33 @@ fn translate_source<'a>(source: &str, lang: &'a Language) -> &'a str {
 }
 
 
-fn handle_mouse_move(hwnd: HWND, y: i32) {
+fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
     if state_ptr.is_null() {
         return;
     }
     let state = unsafe { &mut *state_ptr };
 
+    // 1. 判断是否悬停在顶栏右侧出品方文字上
+    let in_producer = x >= state.producer_rect.left
+        && x <= state.producer_rect.right
+        && y >= state.producer_rect.top
+        && y <= state.producer_rect.bottom;
+
+    if in_producer != state.is_producer_hovered {
+        state.is_producer_hovered = in_producer;
+        unsafe {
+            let mut r = state.producer_rect;
+            let _ = InvalidateRect(Some(hwnd), Some(&mut r), false);
+        }
+    }
+
+    let cursor_id = if in_producer { IDC_HAND } else { IDC_ARROW };
+    unsafe {
+        let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
+    }
+
+    // 2. 位于顶栏范围时，取消下方候选行的高亮并直接返回
     if y < state.header_height {
         if state.hovered_index.is_some() {
             state.hovered_index = None;
@@ -586,6 +688,15 @@ fn handle_mouse_move(hwnd: HWND, y: i32) {
             }
         }
         return;
+    }
+
+    // 3. 鼠标离开顶栏进入候选项区域，确保出品方悬停状态重置
+    if state.is_producer_hovered {
+        state.is_producer_hovered = false;
+        unsafe {
+            let mut r = state.producer_rect;
+            let _ = InvalidateRect(Some(hwnd), Some(&mut r), false);
+        }
     }
 
     let rel_y = y - state.header_height;
@@ -608,13 +719,36 @@ fn handle_mouse_move(hwnd: HWND, y: i32) {
     }
 }
 
-fn handle_mouse_click(_hwnd: HWND, y: i32) {
+fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
     let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
     if state_ptr.is_null() {
         return;
     }
     let state = unsafe { &mut *state_ptr };
 
+    // 1. 点击顶栏右侧出品方文字 -> 跳转官网 https://qp.yftec.top 并隐藏浮动栏
+    if x >= state.producer_rect.left
+        && x <= state.producer_rect.right
+        && y >= state.producer_rect.top
+        && y <= state.producer_rect.bottom
+    {
+        let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
+        let op: Vec<u16> = "open\0".encode_utf16().collect();
+        unsafe {
+            ShellExecuteW(
+                None,
+                windows::core::PCWSTR(op.as_ptr()),
+                windows::core::PCWSTR(url.as_ptr()),
+                windows::core::PCWSTR::null(),
+                windows::core::PCWSTR::null(),
+                SW_SHOW,
+            );
+            let _ = ShowWindow(state.hwnd, SW_HIDE);
+        }
+        return;
+    }
+
+    // 2. 点击候选项 -> 注入路径到目标对话框
     if y >= state.header_height {
         let rel_y = y - state.header_height;
         let idx = (rel_y / state.item_height) as usize;

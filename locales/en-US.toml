@@ -4,6 +4,7 @@ name = "English (en-US)"
 
 [floating_bar]
 title = "QuickPath Jump (Click to Go · ↑↓ Select, Enter Confirm)"
+producer = "Produced by Quzhou Yufeng Technology Co., Ltd."
 tag_explorer = "Explorer"
 tag_history = "History"
 tag_pinned = "Pinned"

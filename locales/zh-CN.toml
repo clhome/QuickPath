@@ -4,6 +4,7 @@ name = "简体中文 (zh-CN)"
 
 [floating_bar]
 title = "QuickPath 路径跳转 (点击即达 · ↑↓ 键选择，Enter 确认)"
+producer = "衢州御风科技有限公司出品"
 tag_explorer = "资源管理器"
 tag_history = "最近历史"
 tag_pinned = "常用固定"

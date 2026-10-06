@@ -68,6 +68,8 @@ pub struct MetaSection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloatingBarSection {
     pub title: String,
+    #[serde(default)]
+    pub producer: String,
     pub tag_explorer: String,
     pub tag_history: String,
     pub tag_pinned: String,
@@ -258,6 +260,15 @@ impl I18n {
         &Self::get_bundle(lang).floating_bar.title
     }
 
+    pub fn floating_producer(lang: &Language) -> &str {
+        let b = Self::get_bundle(lang);
+        if !b.floating_bar.producer.is_empty() {
+            &b.floating_bar.producer
+        } else {
+            &b.settings.producer
+        }
+    }
+
     pub fn tag_explorer(lang: &Language) -> &str {
         &Self::get_bundle(lang).floating_bar.tag_explorer
     }
@@ -348,5 +359,19 @@ impl I18n {
 
     pub fn hotkey_recording_prompt(lang: &Language) -> &str {
         &Self::get_bundle(lang).hotkey.recording_prompt
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_floating_producer_i18n() {
+        let zh_prod = I18n::floating_producer(&Language::ZhCN);
+        assert_eq!(zh_prod, "衢州御风科技有限公司出品");
+
+        let en_prod = I18n::floating_producer(&Language::EnUS);
+        assert_eq!(en_prod, "Produced by Quzhou Yufeng Technology Co., Ltd.");
     }
 }
