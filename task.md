@@ -251,6 +251,13 @@
 - [x] **21.5 验证与检查中英文文档互链及格式一致性**
   - [x] 确保所有文件采用 UTF-8 (无 BOM) LF 换行，相对路径引用正确
 
-
-
+## 阶段二十二：GitHub Actions 自动化 Release 打包工作流
+- [x] **22.1 配置自动化 Release 工作流 (.github/workflows/release.yml)**
+  - [x] 监听 `v*` 格式 Git Tag 推送事件，配置 GitHub Actions 读写权限
+  - [x] 配置 `windows-latest` 环境与 Rust 稳定版工具链及编译缓存
+  - [x] 自动化执行 `cargo build --release` 编译绿色单执行文件
+  - [x] 自动化整理规范命名制品（`QuickPath-{tag}-x64.exe` 及 Zip 压缩包）
+  - [x] 集成 `softprops/action-gh-release@v2` 自动创建 Release 并上传附件
+- [x] **22.2 验证与交付**
+  - [x] 确保 YAML 格式严谨、UTF-8 (无 BOM) LF 换行，更新任务进度
 
