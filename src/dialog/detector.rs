@@ -69,8 +69,9 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
             LPARAM(&mut ctx as *mut _ as isize),
         );
 
-        // 如果既有列表视图（DirectUIHWND 或 SysListView32），或者有工具栏/面包屑导航与编辑框
-        if !(ctx.has_list_view || ctx.has_toolbar_or_breadcrumb || !ctx.edit_hwnds.is_empty()) {
+        // 文件对话框必须包含文件列表视图控件（DirectUIHWND / SysListView32 / SHELLDLL_DefView）
+        // 仅有编辑框或工具栏不足以判定，否则安装向导等 #32770 窗口会被误判
+        if !ctx.has_list_view {
             return None;
         }
 
@@ -99,7 +100,7 @@ unsafe extern "system" fn enum_children_proc(child: HWND, lparam: LPARAM) -> BOO
         let ctx = &mut *(lparam.0 as *mut ChildEnumContext);
         let class = get_window_class_name(child);
 
-        if class == "DirectUIHWND" || class == "SysListView32" {
+        if class == "DirectUIHWND" || class == "SHELLDLL_DefView" {
             ctx.has_list_view = true;
         } else if class.starts_with("ToolbarWindow32") || class.contains("Breadcrumb") {
             ctx.has_toolbar_or_breadcrumb = true;
