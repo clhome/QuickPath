@@ -24,6 +24,7 @@ pub struct FileDialogInfo {
 
 struct ChildEnumContext {
     has_list_view: bool,
+    has_file_name_combo: bool,
     has_toolbar_or_breadcrumb: bool,
     edit_hwnds: Vec<HWND>,
 }
@@ -59,6 +60,7 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
         // 枚举子控件以确认特征
         let mut ctx = ChildEnumContext {
             has_list_view: false,
+            has_file_name_combo: false,
             has_toolbar_or_breadcrumb: false,
             edit_hwnds: Vec::new(),
         };
@@ -69,9 +71,11 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
             LPARAM(&mut ctx as *mut _ as isize),
         );
 
-        // 文件对话框必须包含文件列表视图控件（DirectUIHWND / SysListView32 / SHELLDLL_DefView）
-        // 仅有编辑框或工具栏不足以判定，否则安装向导等 #32770 窗口会被误判
-        if !ctx.has_list_view {
+        // 文件对话框必须同时满足两个必要条件：
+        // 1. 文件列表视图（DirectUIHWND / SHELLDLL_DefView）
+        // 2. 文件名输入组合框（ComboBoxEx32）
+        // 属性页/安装向导/工具软件等 #32770 窗口不会同时具备这两者
+        if !ctx.has_list_view || !ctx.has_file_name_combo {
             return None;
         }
 
@@ -102,6 +106,8 @@ unsafe extern "system" fn enum_children_proc(child: HWND, lparam: LPARAM) -> BOO
 
         if class == "DirectUIHWND" || class == "SHELLDLL_DefView" {
             ctx.has_list_view = true;
+        } else if class == "ComboBoxEx32" {
+            ctx.has_file_name_combo = true;
         } else if class.starts_with("ToolbarWindow32") || class.contains("Breadcrumb") {
             ctx.has_toolbar_or_breadcrumb = true;
         } else if class.eq_ignore_ascii_case("Edit") {
