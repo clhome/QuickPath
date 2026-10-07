@@ -261,3 +261,18 @@
 - [x] **22.2 验证与交付**
   - [x] 确保 YAML 格式严谨、UTF-8 (无 BOM) LF 换行，更新任务进度
 
+## 阶段二十三：Windows 可执行程序专业化打包与详细信息元数据注入
+- [x] **23.1 补全 Cargo.toml 包元数据与 Release 编译调优**
+  - [x] 补全 `[package]` 标准元数据（`description`, `authors`, `homepage`, `repository`, `license`）
+  - [x] 增加 `[profile.release]`：启用 `strip = true`, `lto = true`, `codegen-units = 1`, `opt-level = 3`, `panic = "abort"`
+- [x] **23.2 规范与加固 app.manifest 应用程序清单**
+  - [x] 增加 `trustInfo` 声明 `asInvoker`，规范 Windows 权限等级并杜绝 UAC 虚拟化兼容提示
+- [x] **23.3 升级 build.rs 资源动态生成引擎与 quickpath.rc**
+  - [x] 动态提取 `CARGO_PKG_VERSION` 构建四段式标准 Windows 版本号（如 `1,0,1,0` 与 `"1.0.1.0"`）
+  - [x] 动态生成/写入标准 Windows `VERSIONINFO` 资源块，声明 UTF-8 代码页（`#pragma code_page(65001)`）
+  - [x] 配置完善的中英双语元数据：文件说明、产品名称、公司名、版权声明、官网备注、原始文件名
+  - [x] 引入内容哈希/比对机制避免重复写入触发构建死循环，安全调用 `embed_resource::compile`
+- [x] **23.4 编译构建、属性读取校验与交付收尾**
+  - [x] 执行 `cargo check` 与 `cargo build --release` 验证通过
+  - [x] 运行 PowerShell 脚本自动化校验 `VersionInfo` 各项字段读取结果
+  - [x] 清理测试临时文件，更新任务进度

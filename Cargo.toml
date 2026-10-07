@@ -1,7 +1,14 @@
 [package]
 name = "quickpath"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
+description = "专为 Windows 10/11 打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器"
+authors = ["衢州御风科技有限公司 <https://qp.yftec.top>"]
+homepage = "https://qp.yftec.top"
+repository = "https://github.com/clhome/QuickPath"
+license = "GPL-3.0"
+keywords = ["windows", "file-dialog", "quick-access", "fluent-design"]
+categories = ["command-line-utilities", "os::windows-apis"]
 
 [dependencies]
 directories = "6.0.0"
@@ -13,6 +20,13 @@ windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_UI_Window
 
 [build-dependencies]
 embed-resource = "3.0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 
 
 

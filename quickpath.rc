@@ -1,4 +1,51 @@
+#pragma code_page(65001)
+
 #define RT_MANIFEST 24
 1 RT_MANIFEST "app.manifest"
 1 ICON "assets/logo.ico"
 
+1 VERSIONINFO
+FILEVERSION 1,0,1,0
+PRODUCTVERSION 1,0,1,0
+FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "衢州御风科技有限公司"
+            VALUE "FileDescription", "QuickPath - 现代文件对话框快速跳转增强工具"
+            VALUE "FileVersion", "1.0.1.0"
+            VALUE "InternalName", "quickpath.exe"
+            VALUE "LegalCopyright", "Copyright (C) 2026 衢州御风科技有限公司. 保留所有权利."
+            VALUE "OriginalFilename", "quickpath.exe"
+            VALUE "ProductName", "QuickPath"
+            VALUE "ProductVersion", "1.0.1.0"
+            VALUE "Comments", "https://qp.yftec.top"
+        END
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Quzhou Yufeng Technology Co., Ltd."
+            VALUE "FileDescription", "QuickPath - Modern File Dialog Quick Switcher"
+            VALUE "FileVersion", "1.0.1.0"
+            VALUE "InternalName", "quickpath.exe"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Quzhou Yufeng Technology Co., Ltd. All rights reserved."
+            VALUE "OriginalFilename", "quickpath.exe"
+            VALUE "ProductName", "QuickPath"
+            VALUE "ProductVersion", "1.0.1.0"
+            VALUE "Comments", "https://qp.yftec.top"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 0x04b0, 0x0409, 0x04b0
+    END
+END
