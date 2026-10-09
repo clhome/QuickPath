@@ -594,26 +594,31 @@ unsafe fn update_position_and_render(hwnd: HWND) {
     let margin = (6.0 * scale).round() as i32;
 
     // 根据配置计算停靠位置：
-    // 1. TaskbarLeft：停靠在任务栏左侧（开始按钮/搜索框/小组件之后），彻底避免窗口数量过多时被任务栏任务列表挤压遮挡
-    // 2. TrayLeft：停靠在系统托盘通知区左侧
-    let target_x = match inner.config.position {
+    // 1. TaskbarLeft (方案3: 任务栏左上方独立悬浮)：
+    //    停靠在屏幕左下角、紧贴任务栏上沿，完全避免遮挡 Windows 11 左对齐时打开的底部应用程序栏目
+    // 2. TrayLeft：停靠在系统托盘通知区左侧（任务栏内部垂直居中）
+    let (target_x, target_y) = match inner.config.position {
         MonitorPosition::TaskbarLeft => {
-            let mut left_offset = (56.0 * scale).round() as i32;
-            let start_btn = FindWindowExW(Some(tray_wnd), None, w!("Start"), None).unwrap_or_default();
-            if !start_btn.0.is_null() {
-                let mut start_rect = RECT::default();
-                if GetWindowRect(start_btn, &mut start_rect).is_ok() && start_rect.right > tray_rect.left {
-                    left_offset = (start_rect.right - tray_rect.left) + margin;
-                }
-            }
-            tray_rect.left + left_offset
+            // X 轴：屏幕左下角偏移，紧靠左边缘留出精致内边距 (8px * scale)
+            let left_offset = (8.0 * scale).round() as i32;
+            let x = tray_rect.left + left_offset;
+
+            // Y 轴：若任务栏在屏幕底端 (tray_rect.top > 0)，则悬浮在任务栏顶部上沿上方 (保留 3px 悬浮微缝隙)；
+            // 若任务栏在屏幕顶端，则悬浮在任务栏下沿下方
+            let gap_y = (3.0 * scale).round() as i32;
+            let y = if tray_rect.top > 0 {
+                tray_rect.top - bar_h - gap_y
+            } else {
+                tray_rect.bottom + gap_y
+            };
+            (x, y)
         }
         MonitorPosition::TrayLeft => {
-            notify_rect.left - bar_w - margin
+            let x = notify_rect.left - bar_w - margin;
+            let y = tray_rect.top + (tray_rect.bottom - tray_rect.top - bar_h) / 2;
+            (x, y)
         }
     };
-
-    let target_y = tray_rect.top + (tray_rect.bottom - tray_rect.top - bar_h) / 2;
 
     inner.last_rect = RECT {
         left: target_x,

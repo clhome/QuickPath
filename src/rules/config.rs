@@ -47,10 +47,10 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum MonitorPosition {
-    /// 托盘左侧（紧靠系统托盘通知区左边缘，默认）
+    /// 任务栏右侧（紧靠系统托盘通知区左边缘，默认）
     #[default]
     TrayLeft,
-    /// 任务栏左侧（紧跟开始/搜索按钮之后，空间宽敞，永不与打开的窗口图标重叠）
+    /// 任务栏左上方（悬浮于任务栏左侧上边缘上方，与底部应用程序标签栏目完全物理隔离，永不重叠）
     TaskbarLeft,
 }
 

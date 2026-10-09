@@ -457,3 +457,21 @@
 - [x] **33.4 编译验证、功能测试与进度持久化**
   - [x] 执行 `cargo check` 与 `cargo test` 确保 0 警告 0 错误
   - [x] 更新 `task.md` 进度打勾
+
+## 阶段三十四：左侧监控位置升级为任务栏正上方独立悬浮方案实施 (方案3)
+- [x] **34.1 核心坐标计算引擎重构 (bar_window.rs)**
+  - [x] 将 `MonitorPosition::TaskbarLeft` 定位逻辑升级为任务栏上边缘正上方（`tray_rect.top - bar_h - gap_y`）
+  - [x] 优化 X 轴屏幕左下角微内边距对齐（`tray_rect.left + left_offset`），杜绝覆盖底部应用程序栏目
+  - [x] 增加顶部任务栏的逆向适应防护（当任务栏置顶时自动翻转到下沿悬浮）
+- [x] **34.2 硬件看板 (Tooltip) 与弹出菜单几何联动校验**
+  - [x] 验证 Tooltip 在任务栏正上方模式下的安全边界与弹出坐标无偏移
+  - [x] 验证右键菜单在任务栏正上方模式下的无缝贴合与防遮挡
+- [x] **34.3 多语言与设置界面说明同步**
+  - [x] 更新 `locales/zh-CN.toml` 与 `locales/en-US.toml` 中的停靠位置选项文案（突出“任务栏左上方 (独立悬浮)”）
+  - [x] 优化去专业化术语表达：将“托盘左侧 (默认)”统一更名为更通俗易懂的“任务栏右侧 (默认)” / “Right of Taskbar (Default)”
+  - [x] 同步更新 `config.rs` 中 `MonitorPosition::TaskbarLeft` 与 `TrayLeft` 的语义说明
+- [x] **34.4 编译检查、运行验证与清理**
+  - [x] 执行 `cargo check` 与 `cargo test` 确保 0 警告 0 错误
+  - [x] 更新 `task.md` 进度打勾并交付给用户检验实机效果
+
+
