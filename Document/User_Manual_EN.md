@@ -4,7 +4,7 @@
 
 [使用说明书 (中文)](User_Manual_CN.md) | **English Manual** · [Back to Home](../README.md)
 
-[![Version](https://img.shields.io/badge/Version-v1.0.0-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.1.0-success)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Producer](https://img.shields.io/badge/Produced%20By-Quzhou%20Yufeng%20Technology%20Co.,%20Ltd.-orange)](https://qp.yftec.top)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](../LICENSE)
@@ -27,6 +27,7 @@
   - [4.2 Modern Fluent Floating Bar](#42-modern-fluent-floating-bar)
   - [4.3 IME Guard & Filename Preservation](#43-ime-guard--filename-preservation)
   - [4.4 File Manager Ecosystem Integration](#44-file-manager-ecosystem-integration)
+  - [4.5 Taskbar Hardware Status Monitor (New in Ver 1.1.0)](#45-taskbar-hardware-status-monitor-new-in-ver-110)
 - [5. Graphical Settings Center Guide](#5-graphical-settings-center-guide)
   - [5.1 Opening the Settings Center](#51-opening-the-settings-center)
   - [5.2 Configuration Options in Detail](#52-configuration-options-in-detail)
@@ -72,7 +73,7 @@ graph TD
 | **Architecture** | x86_64 (64-bit) |
 | **Runtime Dependencies** | Built purely with native Rust; **Zero external runtime dependencies** (No .NET, VC++ Redistributable, or Python required) |
 | **Binary Footprint** | Approximately **1.2 MB** (includes embedded high-DPI branding assets and bilingual packages) |
-| **System Resource Usage** | Background RAM footprint **< 10 MB**, Idle CPU utilization **0%** |
+| **System Resource Usage** | Background RAM footprint **< 10 MB** (Incremental RAM footprint $\le 5\text{ MB}$ when Taskbar Monitor is active), Idle CPU utilization **0%** (Worker thread sampling incremental CPU $\le 0.05\%$; when disabled, worker thread and handles are fully terminated, yielding absolute 0% CPU & 0 MB overhead) |
 | **Multi-Monitor & DPI** | Full Per-Monitor V2 DPI Awareness; perfectly scales across 100%, 125%, 150%, 175%, and 200% displays |
 
 ---
@@ -141,6 +142,64 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 | **Total Commander (TC)** | Auto-detects active pane paths via window messages, restoring clipboard state seamlessly |
 | **XYplorer** | Uses `WM_COPYDATA` scripting interface for zero-delay path extraction |
 
+### 4.5 Taskbar Hardware Status Monitor (New in Ver 1.1.0)
+
+#### 4.5.1 Module Positioning & Unprivileged Lightweight Design
+Integrated as QuickPath's **built-in optional extension module** (enabled by default, fully toggleable in settings or the system tray menu), providing desktop users with a minimalistic, zero-overhead, highly reliable native Windows taskbar hardware dashboard:
+- **Unprivileged Official APIs**: Operates purely within standard user-mode Windows APIs (IP Helper API `GetIfTable2`, `GetSystemTimes`, `GlobalMemoryStatusEx`, PDH Performance Counters, DXGI `IDXGIAdapter3`), eliminating any Ring 0 kernel driver dependencies or system crash vulnerabilities;
+- **Extreme Lightweight & Zero Idle Waste**: Consumes $\le 5\text{ MB}$ additional working set RAM when active ($\le 0.05\%$ incremental CPU); **when disabled, the background worker sampling thread and all system query handles are completely released, dropping to absolute 0% CPU and 0 MB incremental footprint**.
+
+#### 4.5.2 Compact Two-Row Layout & ClearType Crisp Rendering
+Features a high-density, two-row compact grid layout (height dynamically conforms to the 32~40px taskbar, with width smoothly self-adjusting from ~40px to ~130px depending on selected metrics):
+
+```text
+┌───────────────────────────────────────────┐
+│  ↑  1.2     C: 19%    G: 32%              │  <- Row 1: Upload Mbps (Hidden Unit)   | CPU% (Mini Bar) | GPU%
+│  ↓  3.5     M: 42%    D:  3%              │  <- Row 2: Download Mbps (Hidden Unit) | RAM% (Mini Bar) | Disk Activity
+└───────────────────────────────────────────┘
+```
+
+- **Streamlined Unit-Free Network Display**: Bitrates are normalized to `Mbps` with text unit labels omitted (retaining only directional arrow prefixes `↑` and `↓`). Values $< 100$ maintain 1 decimal place, while values $\ge 100$ display as integers, saving nearly 40% taskbar width;
+- **Dynamic Column Shrink Engine**: Metrics are grouped into 3 logical columns (Network, CPU/RAM, GPU/Disk). Unselected columns collapse completely without occupying any pixels, ensuring zero unnecessary whitespace;
+- **Mini Indicator Bars & 3-Tier Dynamic Threshold Coloring**: CPU and RAM values feature a 2px dynamic gauge bar below numbers. All CMGD metrics (CPU, Memory, GPU, Disk) dynamically tint based on utilization: `< 70%` Vivid Green, `70% ~ 85%` Bright Yellow, `> 85%` Warning Red;
+- **Solid Dark Background & Win32 ClearType Rendering**: Renders via `Microsoft YaHei UI` with native ClearType smoothing and smooth alpha protection, preventing wallpaper bleeding and ragged edges;
+- **Real-Time Historical Waveform Graph Background**: Displays an optional 15~20 second rolling waveform polyline behind metric text (1000ms sampling ring buffer) to instantly visualize short-term spikes;
+- **Three Sampling Refresh Rates**: Choose between 1.0s, 3.0s (recommended default), and 5.0s.
+
+#### 4.5.3 Dual Dock Position Modes
+Freely switch docking location via Settings or the right-click menu:
+1. **Right of Taskbar (TrayLeft, Default)**: Neatly docks directly adjacent to the left edge of the system notification tray area;
+2. **Above Taskbar Left Float (TaskbarLeft)**: Floats independently directly above the upper edge of the taskbar on the left side, physically separating from running application taskbar buttons to eliminate overlap.
+
+#### 4.5.4 Full-Screen Auto-Hide (Game & Media Stealth Evasion)
+Specially engineered to protect immersive experiences during gaming and presentations:
+- Continuously monitors foreground windows. When a full-screen application is detected (e.g., 3D games, full-screen video, PowerPoint slide shows covering the primary display), the monitor window invokes `ShowWindow(SW_HIDE)` silently;
+- Instantly and smoothly reappears upon returning to the desktop or normal windowed workflows;
+- Fully synchronized with the Windows Taskbar "Auto-Hide" mode.
+
+#### 4.5.5 Fluent Hardware Dashboard (Tooltip)
+Hovering over the docked monitor bar for 400ms reveals a modern Fluent dark card dashboard with high-contrast `Microsoft YaHei UI` typography and auto-scaled dimensions:
+- **Network Bitrate & Adapter**: Displays dual units (both Mbps and MB/s) along with the active physical network adapter name (accurately filtering loopback, virtual adapters, Docker, WSL, VMware, and VPNs);
+- **Processor (CPU)**: Reports total utilization and highlights the **Top 1 resource consumer process name and percentage**;
+- **Physical Memory (RAM)**: Shows percentage and exact allocation (e.g., `Used 13.4 GB / Total 32.0 GB`);
+- **Dedicated Graphics (GPU)**: Shows composite 3D/Compute utilization and **Dedicated VRAM** allocation (e.g., `3.8 GB / 8.0 GB`, strictly filtering out inflated shared system memory);
+- **Disk I/O**: Real-time read and write throughput in MB/s;
+- **Continuous System Uptime**: Accurate boot uptime calculated via `GetTickCount64`, unaffected by Windows Fast Startup;
+- **Power & Battery**: Reports AC power connection or current battery percentage;
+- **Producer Attribution**: Displays producer branding with a clickable link to the official website, supporting seamless mouse cursor transit between the docked bar and the dashboard.
+
+#### 4.5.6 Mouse & Shortcut Controls
+- **Double-Click**: Quickly launches Windows Task Manager (`taskmgr.exe`) via `ShellExecuteW`;
+- **Right-Click**: Opens native context menu with quick controls:
+  - `Open QuickPath Settings...` (navigates directly to Taskbar Monitor tab)
+  - `Show Metrics` (independently toggle Network, CPU, RAM, GPU, Disk)
+  - `Show Historical Waveform` (toggle waveform background)
+  - `Dock Position` (toggle Right of Taskbar / Above Taskbar Left Float)
+  - `Refresh Network Adapters` (re-enumerates active interfaces)
+  - `Hide Monitor Panel` (dismisses panel)
+  - `Exit QuickPath`
+- **System Tray Integration**: Toggle taskbar monitoring on/off at any time from the tray icon's context menu.
+
 ---
 
 ## 5. Graphical Settings Center Guide
@@ -151,33 +210,49 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 
 ### 5.2 Configuration Options in Detail
 
-The Settings Center utilizes a modern Fluent card layout:
+The Settings Center utilizes a modern Fluent dual-tab card layout (freely toggle between "General Preferences" and "Taskbar Monitor" at the top):
 
+#### "General Preferences" Tab
 1. **Smart AutoSwitch**
    - **Toggle Switch**: Click or drag the toggle switch horizontally to enable or disable automatic path following;
    - **Response Delay**: Fine-tune the millisecond delay slider to balance responsiveness and stability.
-
 2. **Floating Bar Appearance**
    - **Custom Opacity Slider**: Smoothly adjust transparency between **40% and 100%**;
    - Real-time visual feedback updates the acrylic blur density dynamically.
-
 3. **Global Hotkey**
    - Displays the currently assigned shortcut badge (e.g., `Ctrl + Q`);
    - **Interactive Recording**: Click the card to enter recording mode ("Press shortcut combination..."). Press any desired key combo (e.g., `Ctrl + Shift + F`, `Alt + D`, `Win + Q`);
    - Press `Esc` to cancel recording without making changes;
    - New shortcuts are re-registered dynamically without restarting the application.
-
 4. **AutoStart on Boot**
    - Toggles Windows Task Scheduler registration for silent, UAC-free execution on startup.
-
 5. **Language Selection**
    - Select between **简体中文 (Simplified Chinese)** and **English** via a native dropdown menu;
    - All interfaces, tray menus, floating bars, and tooltips update immediately.
-
 6. **About QuickPath Card**
    - Features the high-resolution bicubic resampled QuickPath logo;
    - Displays version number, product overview, and producer branding (*Quzhou Yufeng Technology Co., Ltd.*);
    - Includes clickable hyperlinks to the official website ([https://qp.yftec.top](https://qp.yftec.top)) and the GitHub repository ([https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)).
+
+#### "Taskbar Monitor" Tab (New in Ver 1.1.0)
+
+![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
+
+1. **Hardware Monitor Master Switch**: Easily enable or completely disable taskbar hardware monitoring. When turned off, the background worker thread exits immediately with zero resource usage;
+2. **Dock Position**: Radio buttons for selecting placement:
+   - **Right of Taskbar (Default)**: Docks snugly to the left of the system notification tray;
+   - **Above Taskbar Left (Float)**: Floats independently directly above the taskbar's left edge, eliminating any overlap with running taskbar app buttons;
+3. **Metric Item Checkboxes**: Five independent toggles to customize visible metrics:
+   - Network Throughput (Upload / Download)
+   - CPU Utilization
+   - Physical Memory (RAM)
+   - GPU Utilization
+   - Disk Activity (Disk)
+   The panel dynamically shrinks or widens based on your selection;
+4. **Appearance & Sampling Parameters**:
+   - **Show Historical Waveform Graph**: Toggles the 15~20s polyline background trend;
+   - **Sampling Refresh Rate**: Fluent capsule segmented control offering `1.0s`, `3.0s (Recommended)`, and `5.0s`;
+   - **Panel Opacity Slider**: Custom slider adjusting background opacity between `50%` and `100%`.
 
 ### 5.3 Settings Draft & Apply Mechanism
 - **Draft Protection**: Modifications made inside the settings window remain in draft state until confirmed;
@@ -212,9 +287,35 @@ Settings are serialized in standard JSON format:
     "D:\\Projects",
     "C:\\Users\\Public\\Downloads"
   ],
-  "history_folders": []
+  "history_folders": [],
+  "monitor": {
+    "enabled": true,
+    "position": "TrayLeft",
+    "show_network": true,
+    "show_cpu": true,
+    "show_memory": true,
+    "show_gpu": true,
+    "show_disk": true,
+    "show_graph_bg": true,
+    "refresh_interval_ms": 3000,
+    "opacity": 95
+  }
 }
 ```
+
+#### Taskbar Hardware Monitor Configuration Properties (New in Ver 1.1.0)
+| Property | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | boolean | `true` | Master switch for taskbar hardware status monitoring (background worker thread terminates completely when false, zero overhead) |
+| `position` | string | `"TrayLeft"` | Docking location mode: `"TrayLeft"` (Right of Taskbar default) or `"TaskbarLeft"` (Above Taskbar Left Float) |
+| `show_network` | boolean | `true` | Whether to display real-time network throughput (Row 1 upload, Row 2 download) |
+| `show_cpu` | boolean | `true` | Whether to display processor utilization (CPU) and mini indicator bar |
+| `show_memory` | boolean | `true` | Whether to display physical memory utilization (RAM) and mini indicator bar |
+| `show_gpu` | boolean | `true` | Whether to display dedicated graphics utilization (GPU) |
+| `show_disk` | boolean | `true` | Whether to display disk I/O activity utilization (Disk) |
+| `show_graph_bg` | boolean | `true` | Whether to render the 15~20 second historical waveform polyline background |
+| `refresh_interval_ms` | integer | `3000` | Sampling refresh interval in milliseconds (supports 1000 / 3000 / 5000) |
+| `opacity` | integer | `95` | Monitor panel background opacity percentage (50 ~ 100) |
 
 ### 6.2 Process Blacklist Strategy (`blacklist_processes`)
 Certain applications may have specific download behaviors where automatic path switching is undesirable:
@@ -245,6 +346,20 @@ QuickPath includes embedded English and Simplified Chinese localization, while a
 
 ### Q4: Antivirus false positives?
 - QuickPath is built from clean, open-source Rust. Because it utilizes `SetWinEventHook` to monitor window focus and registers global hotkeys, rare heuristics-based antivirus engines might flag it. QuickPath contains zero telemetry, backdoors, or adware; you can safely whitelist it or inspect the source code.
+
+### Q5: Why does the monitor panel disappear during full-screen games, videos, or presentations? *(New in Ver 1.1.0)*
+- **Answer**: This is intentional behavior driven by QuickPath's built-in "Full-Screen Stealth Evasion Mechanism". Whenever the foreground window occupies full-screen resolution (e.g., 3D games, video players in full screen, PowerPoint presentations), the monitor panel automatically hides silently to prevent obstructing gameplay visuals or subtitles. It seamlessly restores once you return to windowed mode or the desktop.
+
+### Q6: Why are unit suffixes hidden on the docked network speed display? *(New in Ver 1.1.0)*
+- **Answer**: To achieve a high-density, compact layout within precious taskbar real estate, bitrates are calculated uniformly in `Mbps` while text labels are omitted (retaining only `↑` and `↓` arrow prefixes). This saves nearly 40% of taskbar width. To view comprehensive dual units (both MB/s and Mbps) as well as the active physical adapter name, simply hover over the monitor bar to inspect the Hardware Dashboard tooltip.
+
+### Q7: What does Dedicated VRAM represent, and why does it differ from total VRAM shown in some tools? *(New in Ver 1.1.0)*
+- **Answer**: QuickPath strictly measures the dedicated graphics card's physical on-board memory (**Dedicated VRAM**, e.g., 4.0 GB physical VRAM) via DXGI and PDH hardware queries. This intentionally filters out the inflated "Shared GPU Memory" pool that Windows dynamically allocates from system RAM, reflecting true hardware video memory pressure.
+
+### Q8: How can I change the docking position of the monitor on the taskbar? *(New in Ver 1.1.0)*
+- **Answer**: Right-click the monitor bar and select "Dock Position", or configure it under the "Taskbar Monitor" tab in Settings:
+  - **Right of Taskbar (Default)**: Docks snugly to the left of the notification tray icons;
+  - **Above Taskbar Left (Float)**: Floats independently directly above the taskbar's left edge, completely preventing any visual overlap with running application taskbar icons.
 
 ---
 

@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-v1.0.0-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.1.0-success)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
 
@@ -37,6 +37,8 @@
 
 - **⚡ 智能自动秒切 (AutoSwitch)**：
   在文本编辑器、IDE、办公或设计软件中弹出“打开”或“另存为”对话框时，毫秒级无感自动同步至你最后浏览的文件管理器目录，彻底告别在长目录树中重复点选和复制粘贴。
+- **📊 任务栏硬件状态监控 (Ver 1.1.0 之后新增)**：
+  超轻量内置原生任务栏硬件看板，实时显示上传/下载网速、处理器 (CPU)、物理内存 (RAM)、独立显卡 (GPU) 及磁盘 I/O。两行自适应紧凑排布，支持 ClearType 锐利文字、微型指示条与三档阈值警示着色（绿/黄/红）。提供“任务栏右侧”与“任务栏左上方独立悬浮”（物理防遮挡应用标签）双停靠模式，具备全屏游戏/影音主动隐匿避让机制；模块启用时增量常驻内存 $\le 5\text{MB}$，停用时完全退出 0 开销。
 - **🪟 Windows 11 现代 Fluent Design**：
   原生适配 Windows 11 **Mica / Acrylic（亚克力磨砂）** 材质与系统级深色/浅色自适应圆角，告别传统老旧丑陋的 Win32 弹窗。
 - **📑 Windows 11 多标签页（Tabs）原生适配**：
@@ -68,8 +70,11 @@
 | **`↑` / `↓`** | 在悬浮候选列表（打开的窗口/最近历史/常用目录）中切换高亮项 |
 | **`Enter`** | 确认并将选中的路径注入到当前对话框中瞬时跳转 |
 | **`Esc`** | 关闭悬浮栏 |
+| **监控面板左键双击** | 快速唤起 Windows 任务管理器 (`taskmgr.exe`) *(Ver 1.1.0 之后新增)* |
+| **监控面板鼠标悬停** | 呼出 Fluent 硬件详情看板 (Tooltip)，展开双计量网速、Top 1 进程、独显专有显存、运行时间与电池状态 *(Ver 1.1.0 之后新增)* |
+| **监控面板右键单击** | 弹出原生菜单：切换显示指标 (网速/CPU/RAM/GPU/Disk)、波形背景、停靠位置、刷新网卡适配器、直达设置中心 *(Ver 1.1.0 之后新增)* |
 | **托盘图标单击 / 双击** | 打开现代卡片式设置中心 |
-| **托盘图标右键** | 快捷菜单：切换自动秒切、开机自启、呼出候选、打开设置或退出 |
+| **托盘图标右键** | 快捷菜单：切换自动秒切、任务栏监控开关、开机自启、呼出候选、打开设置或退出 |
 
 ---
 
@@ -77,9 +82,12 @@
 
 ![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings.webp)
 
-QuickPath 配备了符合 Fluent 视觉的现代化卡片式设置中心：
+QuickPath 配备了符合 Fluent 视觉的现代化双选项卡卡片式设置中心：
 - **常规自动化**：一键开启或关闭“智能自动秒切”，并提供滑块调节切换触发延时（40ms ~ 500ms）；
 - **悬浮条外观**：自绘透明度滑动条，实时预览 40% ~ 100% 亚克力半透明磨砂效果；
+- **任务栏硬件监控 (Ver 1.1.0 之后新增)**：一键开启/停用状态监控、选择停靠位置（任务栏右侧 / 任务栏左上方独立悬浮）、细粒度勾选监控指标（网速/CPU/RAM/GPU/Disk）、切换 15~20秒实时历史波形图背景、选择采样刷新率（1.0s / 3.0s 推荐 / 5.0s）及调节看板透明度（50% ~ 100%）；
+![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
+
 - **自定义快捷键**：图形化点击录制模式，支持任意组合键（Ctrl / Alt / Shift / Win + 按键）动态热注册生效；
 - **系统自启动**：智能创建免 UAC 任务计划，开机静默启动；
 - **多语言切换**：支持简体中文、English 及加载外部 `./locales/*.toml` 语言包；
@@ -112,10 +120,23 @@ QuickPath 采用绿色双模式设计：
     "brave.exe"
   ],
   "pinned_folders": [],
-  "history_folders": []
+  "history_folders": [],
+  "monitor": {
+    "enabled": true,
+    "position": "TrayLeft",
+    "show_network": true,
+    "show_cpu": true,
+    "show_memory": true,
+    "show_gpu": true,
+    "show_disk": true,
+    "show_graph_bg": true,
+    "refresh_interval_ms": 3000,
+    "opacity": 95
+  }
 }
 ```
 
+> **说明 (Ver 1.1.0 之后新增)**：`monitor` 字段负责任务栏硬件监控配置，其中 `position` 支持 `"TrayLeft"`（任务栏右侧）与 `"TaskbarLeft"`（任务栏左上方独立悬浮）；`refresh_interval_ms` 支持 `1000`、`3000`（默认推荐）与 `5000` 毫秒。各指标项均支持布尔值细粒度独立开关。
 ---
 
 ## 🏗️ 源码构建与编译

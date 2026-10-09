@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-v1.0.0-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.1.0-success)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
 
@@ -37,6 +37,8 @@ When working across multiple applications, do you frequently face this frustrati
 
 - **⚡ Smart AutoSwitch**:
   When an "Open" or "Save As" dialog appears in editors, IDEs, or creative software, QuickPath synchronizes it to your most recently browsed file manager directory within milliseconds—eliminating repetitive path hunting and copy-pasting.
+- **📊 Taskbar Hardware Status Monitor (New in Ver 1.1.0)**:
+  Ultra-lightweight native hardware dashboard docked right on your Windows taskbar. Displays real-time upload/download speeds, CPU, RAM, dedicated GPU, and Disk I/O across an adaptive 2-row layout. Features crisp Win32 ClearType typography, mini indicator bars, and 3-tier dynamic threshold coloring (Green/Yellow/Red). Supports dual docking modes ("Right of Taskbar" or "Above Taskbar Left Float" to prevent blocking taskbar app buttons) and automatic stealth evasion during full-screen games/media. Consumes $\le 5\text{MB}$ additional RAM when active and drops to absolute 0% CPU & 0 MB footprint when disabled.
 - **🪟 Windows 11 Modern Fluent Design**:
   Natively integrates Windows 11 **Mica / Acrylic blur**, rounded corners, and adaptive dark/light themes. Say goodbye to dated and clunky legacy Win32 popups.
 - **📑 Windows 11 Multi-Tab Explorer Support**:
@@ -68,8 +70,11 @@ When working across multiple applications, do you frequently face this frustrati
 | **`↑` / `↓`** | Navigate between active file manager tabs, pinned favorites, and recent history |
 | **`Enter`** | Confirm and instantly inject the selected path into the file dialog |
 | **`Esc`** | Dismiss the floating bar |
+| **Monitor Double-Click** | Instantly launch Windows Task Manager (`taskmgr.exe`) *(New in Ver 1.1.0)* |
+| **Monitor Mouse Hover** | Summon Fluent Hardware Dashboard (Tooltip) showing dual-unit network speed, top consumer process, dedicated VRAM, uptime, and battery *(New in Ver 1.1.0)* |
+| **Monitor Right-Click** | Native context menu: toggle metrics (Net/CPU/RAM/GPU/Disk), waveform background, dock position, refresh network, open settings *(New in Ver 1.1.0)* |
 | **Tray Icon (Left Click / Double Click)** | Open the modern card-style Settings Center |
-| **Tray Icon (Right Click)** | Context menu: toggle AutoSwitch, toggle AutoStart, summon bar, open settings, or exit |
+| **Tray Icon (Right Click)** | Context menu: toggle AutoSwitch, toggle Taskbar Monitor, toggle AutoStart, summon bar, open settings, or exit |
 
 ---
 
@@ -77,9 +82,12 @@ When working across multiple applications, do you frequently face this frustrati
 
 ![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings_en.webp)
 
-QuickPath includes a modern Fluent card-based Settings Center:
+QuickPath includes a modern Fluent dual-tab card-based Settings Center:
 - **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms).
 - **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency.
+- **Taskbar Hardware Monitor (New in Ver 1.1.0)**: Master toggle for hardware monitoring, docking position selector ("Right of Taskbar" / "Above Taskbar Left Float"), granular metric toggles (Network/CPU/RAM/GPU/Disk), 15~20s historical waveform graph toggle, sampling refresh rate selector (1.0s / 3.0s recommended / 5.0s), and monitor panel transparency slider (50% – 100%).
+
+![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
 - **Custom Hotkey**: Interactive key recording interface supporting custom modifier combinations (Ctrl, Alt, Shift, Win) with dynamic hotkey re-registration.
 - **System Startup**: Seamless Task Scheduler integration for UAC-free elevation on boot.
 - **Language Switcher**: Dynamic switching between English, Simplified Chinese, or any external `./locales/*.toml` files.
@@ -112,9 +120,23 @@ Sample configuration:
     "brave.exe"
   ],
   "pinned_folders": [],
-  "history_folders": []
+  "history_folders": [],
+  "monitor": {
+    "enabled": true,
+    "position": "TrayLeft",
+    "show_network": true,
+    "show_cpu": true,
+    "show_memory": true,
+    "show_gpu": true,
+    "show_disk": true,
+    "show_graph_bg": true,
+    "refresh_interval_ms": 3000,
+    "opacity": 95
+  }
 }
 ```
+
+> **Note (New in Ver 1.1.0)**: The `monitor` section configures the taskbar hardware status monitor. `position` accepts `"TrayLeft"` (Right of Taskbar) or `"TaskbarLeft"` (Floating Above Taskbar Left). `refresh_interval_ms` supports `1000`, `3000` (default recommended), and `5000` ms. Each metric toggle is independently configurable.
 
 ---
 
