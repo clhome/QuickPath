@@ -26,13 +26,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, FindWindowW, GetCursorPos, GetForegroundWindow, GetWindowRect,
     KillTimer, LoadCursorW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
     SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    TrackPopupMenu, HWND_TOPMOST, IDC_ARROW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
+    TrackPopupMenu, CS_DBLCLKS, HWND_TOPMOST, IDC_ARROW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
     SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WNDCLASSW,
+    TPM_BOTTOMALIGN, TPM_TOPALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WNDCLASSW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_MOUSEMOVE, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETTINGCHANGE, WM_TIMER,
+    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP, WM_EXITMENULOOP,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER,
 };
 
 const WM_MOUSEHOVER: u32 = 0x02A1;
@@ -40,6 +40,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const TIMER_REFRESH_ID: usize = 2001;
 const TIMER_FULLSCREEN_CHECK_ID: usize = 2002;
+const TIMER_TOOLTIP_CHECK_ID: usize = 2003;
 
 // 菜单命令 ID
 const IDM_MONITOR_OPEN_SETTINGS: usize = 3001;
@@ -57,6 +58,15 @@ const IDM_POS_TASKBAR_LEFT: usize = 3012;
 
 static BAR_INSTANCE: AtomicPtr<BarWindowInner> = AtomicPtr::new(std::ptr::null_mut());
 
+pub fn get_bar_hwnd() -> Option<HWND> {
+    let ptr = BAR_INSTANCE.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        unsafe { Some((*ptr).hwnd) }
+    } else {
+        None
+    }
+}
+
 pub struct BarWindow {
     hwnd: HWND,
 }
@@ -69,6 +79,7 @@ struct BarWindowInner {
     tooltip: Option<MonitorTooltip>,
     is_fullscreen_hidden: bool,
     is_dark_theme: bool,
+    is_menu_active: bool,
     taskbar_created_msg: u32,
     last_rect: RECT,
 }
@@ -85,6 +96,7 @@ impl BarWindow {
         unsafe {
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
+                style: CS_DBLCLKS,
                 lpfnWndProc: Some(bar_wnd_proc),
                 hInstance: HINSTANCE::default(),
                 hCursor: cursor,
@@ -123,6 +135,7 @@ impl BarWindow {
                 tooltip: tooltip_res,
                 is_fullscreen_hidden: false,
                 is_dark_theme: is_dark,
+                is_menu_active: false,
                 taskbar_created_msg: taskbar_msg,
                 last_rect: RECT::default(),
             });
@@ -206,13 +219,54 @@ unsafe extern "system" fn bar_wnd_proc(
     }
 
     match msg {
+        WM_ENTERMENULOOP => {
+            inner.is_menu_active = true;
+            let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP_CHECK_ID);
+            if let Some(tooltip) = &mut inner.tooltip {
+                tooltip.hide();
+            }
+            LRESULT(0)
+        }
+        WM_EXITMENULOOP => {
+            inner.is_menu_active = false;
+            LRESULT(0)
+        }
         WM_TIMER => {
             if wparam.0 == TIMER_REFRESH_ID {
                 if !inner.is_fullscreen_hidden {
                     update_position_and_render(hwnd);
                 }
             } else if wparam.0 == TIMER_FULLSCREEN_CHECK_ID {
-                check_fullscreen_and_avoid(inner);
+                if !inner.is_menu_active {
+                    check_fullscreen_and_avoid(inner);
+                }
+            } else if wparam.0 == TIMER_TOOLTIP_CHECK_ID {
+                let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP_CHECK_ID);
+                if inner.is_menu_active {
+                    if let Some(tooltip) = &mut inner.tooltip {
+                        tooltip.hide();
+                    }
+                    return LRESULT(0);
+                }
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let in_bar = {
+                    let mut r = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut r);
+                    pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom
+                };
+                let in_tooltip = if let Some(tt) = &inner.tooltip {
+                    let mut r = RECT::default();
+                    let _ = GetWindowRect(tt.hwnd(), &mut r);
+                    pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom
+                } else {
+                    false
+                };
+                if !in_bar && !in_tooltip {
+                    if let Some(tooltip) = &mut inner.tooltip {
+                        tooltip.hide();
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -236,6 +290,10 @@ unsafe extern "system" fn bar_wnd_proc(
             LRESULT(1)
         }
         WM_MOUSEMOVE => {
+            if inner.is_menu_active {
+                return LRESULT(0);
+            }
+            let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP_CHECK_ID);
             let mut tme = TRACKMOUSEEVENT {
                 cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
                 dwFlags: TME_HOVER | TME_LEAVE,
@@ -246,6 +304,9 @@ unsafe extern "system" fn bar_wnd_proc(
             LRESULT(0)
         }
         WM_MOUSEHOVER => {
+            if inner.is_menu_active {
+                return LRESULT(0);
+            }
             // 弹出 Fluent Tooltip 硬件详情看板
             let snap = inner.snapshot_handle.load();
             let dpi = GetDpiForWindow(hwnd);
@@ -257,18 +318,12 @@ unsafe extern "system" fn bar_wnd_proc(
             LRESULT(0)
         }
         WM_MOUSELEAVE => {
-            if let Some(tooltip) = &mut inner.tooltip {
-                tooltip.hide();
-            }
+            // 延时 250ms 检测鼠标是否正平滑移入 Tooltip 硬件看板，避免鼠标刚离开任务栏条时看板瞬间消失
+            let _ = SetTimer(Some(hwnd), TIMER_TOOLTIP_CHECK_ID, 250, None);
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            // 左键单击：切换折线背景图显示
-            inner.config.show_graph_bg = !inner.config.show_graph_bg;
-            let mut cfg = crate::get_global_config();
-            cfg.monitor = inner.config.clone();
-            crate::update_global_config(cfg);
-            update_position_and_render(hwnd);
+            // 单击防误触解耦（历史折线背景开关已收拢至右键上下文菜单及设置中心）
             LRESULT(0)
         }
         WM_LBUTTONDBLCLK => {
@@ -298,6 +353,7 @@ unsafe extern "system" fn bar_wnd_proc(
         WM_DESTROY => {
             let _ = KillTimer(Some(hwnd), TIMER_REFRESH_ID);
             let _ = KillTimer(Some(hwnd), TIMER_FULLSCREEN_CHECK_ID);
+            let _ = KillTimer(Some(hwnd), TIMER_TOOLTIP_CHECK_ID);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -310,6 +366,13 @@ unsafe fn show_monitor_context_menu(inner: &mut BarWindowInner) {
         Ok(m) if !m.0.is_null() => m,
         _ => return,
     };
+
+    // 1. 立即关闭 Tooltip 硬件看板并锁定菜单激活态，杜绝 Z-Order 争夺与误触
+    let _ = KillTimer(Some(inner.hwnd), TIMER_TOOLTIP_CHECK_ID);
+    if let Some(tooltip) = &mut inner.tooltip {
+        tooltip.hide();
+    }
+    inner.is_menu_active = true;
 
     let bundle = I18n::get_bundle(&inner.language);
 
@@ -371,16 +434,37 @@ unsafe fn show_monitor_context_menu(inner: &mut BarWindowInner) {
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
 
+    // 计算屏幕工作区并智能确定菜单弹出朝向与锚点：
+    // - 任务栏在屏幕下半部（标准 Windows 任务栏）：菜单向上弹出（TPM_BOTTOMALIGN），底边对齐监控条上边界 (inner.last_rect.top)
+    // - 任务栏在屏幕上半部（顶部任务栏）：菜单向下弹出（TPM_TOPALIGN），顶边对齐监控条下边界 (inner.last_rect.bottom)
+    let hmon = MonitorFromWindow(inner.hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = GetMonitorInfoW(hmon, &mut mi);
+    let screen_mid_y = (mi.rcMonitor.top + mi.rcMonitor.bottom) / 2;
+
+    let (align_y, popup_y) = if inner.last_rect.top > screen_mid_y {
+        (TPM_BOTTOMALIGN, inner.last_rect.top)
+    } else {
+        (TPM_TOPALIGN, inner.last_rect.bottom)
+    };
+
     let _ = SetForegroundWindow(inner.hwnd);
     let _ = TrackPopupMenu(
         hmenu,
-        TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+        align_y | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
         pt.x,
-        pt.y,
+        popup_y,
         Some(0),
         inner.hwnd,
         None,
     );
+
+    // 遵循 Win32 KB135788 规范，发送 WM_NULL 使得任务栏菜单能正确释放激活上下文并响应后续点击
+    let _ = PostMessageW(Some(inner.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+    inner.is_menu_active = false;
 
     let _ = DestroyMenu(hmenu);
 }
@@ -538,16 +622,19 @@ unsafe fn update_position_and_render(hwnd: HWND) {
         bottom: target_y + bar_h,
     };
 
-    // 必须传入 HWND_TOPMOST 保持顶层，杜绝 WS_EX_TOPMOST 属性被剥夺导致窗口过多时沉降被遮挡
-    let _ = SetWindowPos(
-        hwnd,
-        Some(HWND_TOPMOST),
-        target_x,
-        target_y,
-        bar_w,
-        bar_h,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
+    // 关键：若右键菜单正处于激活展示中，绝不能调用 SetWindowPos(HWND_TOPMOST)，
+    // 否则会将监控条强行提到 Win32 原生弹出菜单（#32768）的上方，造成菜单下半截被严重遮挡！
+    if !inner.is_menu_active {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            target_x,
+            target_y,
+            bar_w,
+            bar_h,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
 
     let snap = inner.snapshot_handle.load();
     render_bar_window(hwnd, &snap, &inner.config, scale, inner.is_dark_theme);

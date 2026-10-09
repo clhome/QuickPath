@@ -362,7 +362,98 @@
   - [x] 运行 `cargo test` 与 `cargo check` 确保 0 警告 0 错误
   - [x] 更新 `task.md` 进度打勾
 
+## 阶段二十八：硬件详情看板 (Tooltip) 极清微软雅黑升级与宽度自适应
+- [x] **28.1 升级正文字体为微软雅黑与高对比度渲染**
+  - [x] 将正文字体从 Segoe UI 切换为 `Microsoft YaHei UI`（微软雅黑），字号从 -11.0 提升至 -12.0
+  - [x] 标题字号提升至 -14.0，行高放宽至 23px
+  - [x] 正文文字颜色提升为高对比度纯白/亮白 `0x00F0F0F0`，彻底消除发灰发虚
+- [x] **28.2 纯净深色不透明背景卡片 (阻绝底层透光)**
+  - [x] 将背景不透明度从 240 提升至 255（完全不透明），底色设为深炭灰 `RGB(24, 24, 26)`
+  - [x] 绘制 1px 细微精致外边框 `RGB(68, 68, 68)`，彻底阻隔底层编辑器代码与壁纸透光重影
+- [x] **28.3 文本宽度测量与看板尺寸动态自适应 (Auto Width)**
+  - [x] 调用 `DrawTextW` 配合 `DT_CALCRECT` 动态精确测量所有行（包含长网卡名称）的真实像素宽度
+  - [x] 看板宽度根据最长行自适应扩展，确保网卡名完整展示不截断
+  - [x] 看板高度根据实际行数动态收放
+- [x] **28.4 屏幕工作区防出界智能锚定**
+  - [x] 基于 `MonitorFromWindow` / `GetMonitorInfoW` 实时获取屏幕工作区
+  - [x] 当宽度扩展后，自动修正 X 坐标防屏幕右边界溢出
+- [x] **28.5 编译测试与构建交付**
+  - [x] 运行 `cargo test` 与 `cargo check`
+  - [x] 更新 `task.md` 进度打勾
 
+## 阶段二十九：独立显卡专用显存 (Dedicated VRAM) 精准识别与采集
+- [x] **29.1 独立显卡与物理专用显存总量定位**
+  - [x] 遍历 DXGI 所有物理适配器，排除软件与虚拟驱动，定位 DedicatedVideoMemory 最大的主独立显卡（如 AMD Radeon R7 430）
+  - [x] 提取其专有显存物理总量（如 2.0 GB）与适配器 LUID，彻底摒弃共享内存与操作系统预算配额 (Budget)
+- [x] **29.2 独显专用显存实时占用 (Dedicated Usage) 采集**
+  - [x] 通过 PDH `\GPU Adapter Memory(*)\Dedicated Usage` 持续采样全系统在该独显上的专用显存占用
+  - [x] 匹配目标独显 LUID 实例，计算实时 Dedicated Used 字节数
+- [x] **29.3 详情看板呈现与降级自愈**
+  - [x] 格式化为 `已用 Dedicated GB / 总 Dedicated GB`（如 `0.4 GB / 2.0 GB`），彻底告别包含共享内存的 47.1 GB
+  - [x] 提供无 PDH 时的安全降级兜底
+- [x] **29.4 测试验证与构建发布**
+  - [x] 运行 `cargo test` 验证显存采集结果
+  - [x] 编译 Release 并更新 `task.md` 进度打勾
 
+## 阶段三十：常驻看板 CMGD 数字三档动态分级着色 (<70%绿, 70~85%黄, >85%红)
+- [x] **30.1 核心颜色与阈值对齐**
+  - [x] 提取与底部色块一致的系统三色常量（鲜绿 `0x0059C734`、亮黄 `0x0000CCFF`、鲜红 `0x00303BFF`）
+  - [x] 设定三档利用率阈值：`< 70%` 鲜绿，`70% ~ 85%` 亮黄，`> 85%` 鲜红，对齐底部 `draw_gauge_bar_gdi`
+- [x] **30.2 分段 ClearType 文字渲染引擎实现**
+  - [x] 实现 `measure_text_width` 测量单行文字像素宽度（优先 `GetTextExtentPoint32W`，降级 `DrawTextW`）
+  - [x] 实现 `draw_metric_text_with_threshold` 分段绘制函数：前缀（`C: `等）原色、数值动态着色、后缀（`%`）原色不变
+- [x] **30.3 CMGD 四大硬件指标全量接入**
+  - [x] CPU：`draw_metric_text_with_threshold` 接入 `snapshot.cpu.usage_percent`
+  - [x] 内存：`draw_metric_text_with_threshold` 接入 `snapshot.memory.usage_percent`
+  - [x] GPU：`draw_metric_text_with_threshold` 接入 `snapshot.gpu.usage_percent`（支持 None 兜底）
+  - [x] 磁盘：`draw_metric_text_with_threshold` 接入 `snapshot.disk.activity_percent`
+- [x] **30.4 编译检查、测试验证与交付**
+  - [x] 运行 `cargo check` 与 `cargo test` 确保无警告无错误
+  - [x] 运行 `cargo build --release`
+  - [x] 更新 `task.md` 进度打勾
 
+## 阶段三十一：任务栏监控双击唤起任务管理器修复与单击解耦 (CS_DBLCLKS)
+- [x] **31.1 注册 Win32 CS_DBLCLKS 类样式**
+  - [x] 在 `src/monitor/window/bar_window.rs` 引入 `CS_DBLCLKS`
+  - [x] 在 `WNDCLASSW` 中赋予 `style: CS_DBLCLKS`，确保操作系统正确向窗口分发 `WM_LBUTTONDBLCLK`
+- [x] **31.2 单击交互解耦与双击极速唤起任务管理器**
+  - [x] 移除 `WM_LBUTTONDOWN` 容易导致误触的切换折线背景逻辑（背景图开关完全交由右键菜单与设置中心管理）
+  - [x] 健全 `WM_LBUTTONDBLCLK` 唤起 `taskmgr.exe` 逻辑
+- [x] **31.3 编译验证、功能测试与清理**
+  - [x] 执行 `cargo check` 与 `cargo test` 验证 0 警告 0 错误
+  - [x] 验证双击能否正常弹出任务管理器
+  - [x] 更新 `task.md` 进度打勾
 
+## 阶段三十二：硬件详情看板 (Tooltip) 标题更新、出品方外链跳转与平滑移入
+- [x] **32.1 多语言配置与标题更新**
+  - [x] 在 `locales/zh-CN.toml` 与 `locales/en-US.toml` 中将看板标题更新为「QuickPath硬件看板」/「QuickPath Hardware Dashboard」
+  - [x] 同步更新 `src/monitor/window/tooltip.rs` 中的默认兜底标题
+- [x] **32.2 顶栏右侧出品方文字排版与样式渲染**
+  - [x] 在 Tooltip 顶栏右侧测量并绘制出品方文字（「衢州御风科技有限公司出品」）
+  - [x] 动态计算自适应宽度，确保左侧标题与右侧出品方文字间距充足不遮挡
+  - [x] 支持深色/浅色模式下的常态与悬停高亮样式
+- [x] **32.3 悬停手型光标与官网链接点击跳转**
+  - [x] 在 `src/monitor/window/tooltip.rs` 中保存 `producer_rect` 命中区域与状态
+  - [x] 处理 `WM_MOUSEMOVE` 与 `WM_SETCURSOR`：移入出品方区域呈现手型光标（`IDC_HAND`）并触发重绘高亮
+  - [x] 处理 `WM_LBUTTONUP`：点击调用 `ShellExecuteW` 跳转官网 `https://qp.yftec.top` 并关闭看板
+- [x] **32.4 任务栏监控条与 Tooltip 无缝防消失联动机制**
+  - [x] 在 `src/monitor/window/bar_window.rs` 中加入 `TIMER_TOOLTIP_CHECK_ID` 延时检查
+  - [x] 在 `WM_MOUSELEAVE` 时允许鼠标平滑穿行移入 Tooltip 面板，离开两处区域后自动隐匿
+- [x] **32.5 编译验证、功能测试与交付**
+  - [x] 运行 `cargo check` 与 `cargo test` 确保 0 警告 0 错误
+  - [x] 更新 `task.md` 进度打勾
+
+## 阶段三十三：任务栏监控右键菜单置顶与遮挡消除专项修复
+- [x] **33.1 引入菜单激活态生命周期管控与 Tooltip 互斥 (is_menu_active)**
+  - [x] 在 `BarWindowInner` 中新增 `is_menu_active: bool` 标识
+  - [x] 在 `bar_wnd_proc` 中拦截 `WM_ENTERMENULOOP` (0x0211) 与 `WM_EXITMENULOOP` (0x0212)，进入菜单时即时置位并隐藏 Tooltip
+  - [x] 在 `WM_MOUSEMOVE` 与 `WM_MOUSEHOVER` 中检查 `is_menu_active`，防止光标经过菜单时激活 Tooltip 争夺焦点与 Z 序
+- [x] **33.2 彻底解除菜单激活期间对 TOPMOST Z-Order 的抢夺**
+  - [x] 在 `update_position_and_render` 中判断：若 `inner.is_menu_active` 为 true，完全跳过 `SetWindowPos(HWND_TOPMOST)`，杜绝 WM_TIMER 将监控条强制顶到右键菜单上方
+  - [x] 当位置尺寸未发生变动时避免每秒无谓提升置顶，消除 Z 序抖动
+- [x] **33.3 优化菜单弹出几何定位锚点与 Win32 消息流生命周期**
+  - [x] 将菜单底边对齐由光标 Y 轴改为监控条顶边 `inner.last_rect.top`（底部任务栏）或底边（顶部任务栏），从几何位置上杜绝下边沿伸入监控条产生物理重叠
+  - [x] 在 `TrackPopupMenu` 执行完毕后规范调用 `PostMessageW(..., WM_NULL, ...)`，确保原生系统焦点调度顺畅
+- [x] **33.4 编译验证、功能测试与进度持久化**
+  - [x] 执行 `cargo check` 与 `cargo test` 确保 0 警告 0 错误
+  - [x] 更新 `task.md` 进度打勾

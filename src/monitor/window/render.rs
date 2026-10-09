@@ -6,10 +6,11 @@ use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC,
-    DeleteObject, DrawTextW, FillRect, Polyline, SelectObject, SetBkMode, SetTextColor,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DT_LEFT,
-    DT_SINGLELINE, DT_VCENTER, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION,
-    FONT_QUALITY, FW_NORMAL, HDC, HGDIOBJ, PS_SOLID, TRANSPARENT, AC_SRC_ALPHA, AC_SRC_OVER,
+    DeleteObject, DrawTextW, FillRect, GetTextExtentPoint32W, Polyline, SelectObject, SetBkMode,
+    SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DT_CALCRECT,
+    DT_LEFT, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, FONT_CHARSET, FONT_CLIP_PRECISION,
+    FONT_OUTPUT_PRECISION, FONT_QUALITY, FW_NORMAL, HDC, HGDIOBJ, PS_SOLID, TRANSPARENT,
+    AC_SRC_ALPHA, AC_SRC_OVER,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     UpdateLayeredWindow, ULW_ALPHA,
@@ -203,11 +204,11 @@ pub unsafe fn render_bar_window(
     }
 
     if let Some(col) = &layout.col_cpu_mem {
-        draw_cpu_mem_column(mem_dc, col, snapshot, config);
+        draw_cpu_mem_column(mem_dc, col, snapshot, config, text_color_pri);
     }
 
     if let Some(col) = &layout.col_gpu_disk {
-        draw_gpu_disk_column(mem_dc, col, snapshot, config);
+        draw_gpu_disk_column(mem_dc, col, snapshot, config, text_color_pri);
     }
 
     let _ = SelectObject(mem_dc, old_font);
@@ -253,6 +254,37 @@ pub unsafe fn render_bar_window(
     let _ = windows::Win32::Graphics::Gdi::ReleaseDC(None, screen_dc);
 }
 
+// 核心状态指示三色 (与底部色块完全统一)
+const COLOR_METRIC_GREEN: COLORREF = COLORREF(0x0059C734); // 鲜绿 (< 70%)
+const COLOR_METRIC_YELLOW: COLORREF = COLORREF(0x0000CCFF); // 亮黄 (70% ~ 85%)
+const COLOR_METRIC_RED: COLORREF = COLORREF(0x00303BFF); // 鲜红 (> 85%)
+
+/// 根据百分比利用率计算动态三档状态色 (<70% 绿, 70%~85% 黄, >85% 红)
+#[inline]
+fn get_metric_status_color(percent: f32) -> COLORREF {
+    if percent > 85.0 {
+        COLOR_METRIC_RED
+    } else if percent >= 70.0 {
+        COLOR_METRIC_YELLOW
+    } else {
+        COLOR_METRIC_GREEN
+    }
+}
+
+/// 精准测量单行文本的像素行进宽度 (Win32 GDI)
+unsafe fn measure_text_width(hdc: HDC, text: &str) -> i32 {
+    let buf: Vec<u16> = text.encode_utf16().collect();
+    let mut size = SIZE::default();
+    if GetTextExtentPoint32W(hdc, &buf, &mut size).as_bool() {
+        size.cx
+    } else {
+        let mut buf_clone = buf;
+        let mut rect = RECT::default();
+        let _ = DrawTextW(hdc, &mut buf_clone, &mut rect, DT_CALCRECT | DT_SINGLELINE);
+        rect.right - rect.left
+    }
+}
+
 /// 绘制单行文字 (Win32 ClearType)
 unsafe fn draw_gdi_text(hdc: HDC, text: &str, x: i32, y: i32, w: i32, h: i32) {
     let mut buf: Vec<u16> = text.encode_utf16().collect();
@@ -265,15 +297,82 @@ unsafe fn draw_gdi_text(hdc: HDC, text: &str, x: i32, y: i32, w: i32, h: i32) {
     let _ = DrawTextW(hdc, &mut buf, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
+/// 绘制单行文字片段 (Win32 ClearType，带 DT_NOCLIP 杜绝边缘亚像素裁切)
+unsafe fn draw_gdi_text_segment(hdc: HDC, text: &str, x: i32, y: i32, h: i32) {
+    let mut buf: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT {
+        left: x,
+        top: y,
+        right: x + 200,
+        bottom: y + h,
+    };
+    let _ = DrawTextW(hdc, &mut buf, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+}
+
+/// 解析指标字符串，拆分为 (前缀, 数值部分, 后缀%)
+#[inline]
+fn parse_metric_display<'a>(display: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
+    if let Some(colon_pos) = display.find(": ") {
+        if display.ends_with('%') && colon_pos + 2 < display.len() - 1 {
+            let prefix = &display[..colon_pos + 2];
+            let num_part = &display[colon_pos + 2..display.len() - 1];
+            let suffix = "%";
+            return Some((prefix, num_part, suffix));
+        }
+    }
+    None
+}
+
+/// 绘制硬件指标单行（前缀保持基色、数值按负载动态三色分级、% 保持基色不变）
+unsafe fn draw_metric_text_with_threshold(
+    hdc: HDC,
+    display_text: &str,
+    percent: Option<f32>,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    base_color: COLORREF,
+) {
+    // 匹配如 "C: 19%"、"M: 42%"、"G: --%"、"D:  0%"
+    if let Some((prefix, num_part, suffix)) = parse_metric_display(display_text) {
+        // 计算数值颜色 (<70% 绿, 70%~85% 黄, >85% 红)
+        let num_color = if let Some(p) = percent {
+            if num_part.trim() == "--" {
+                base_color
+            } else {
+                get_metric_status_color(p)
+            }
+        } else {
+            base_color
+        };
+
+        let prefix_w = measure_text_width(hdc, prefix);
+        let num_w = measure_text_width(hdc, num_part);
+
+        // 1. 绘制前缀（原色不变）
+        SetTextColor(hdc, base_color);
+        draw_gdi_text_segment(hdc, prefix, x, y, h);
+
+        // 2. 绘制数值（动态三色分级）
+        SetTextColor(hdc, num_color);
+        draw_gdi_text_segment(hdc, num_part, x + prefix_w, y, h);
+
+        // 3. 绘制末尾 % 符号（原色一直不变）
+        SetTextColor(hdc, base_color);
+        draw_gdi_text_segment(hdc, suffix, x + prefix_w + num_w, y, h);
+
+        return;
+    }
+
+    // 格式不符合时降级全量单色渲染
+    SetTextColor(hdc, base_color);
+    draw_gdi_text(hdc, display_text, x, y, w, h);
+}
+
 /// 绘制微型警戒色块条 (GDI)
 unsafe fn draw_gauge_bar_gdi(hdc: HDC, x: i32, y: i32, w: i32, h: i32, percent: f32) {
-    let color = if percent >= 95.0 {
-        COLORREF(0x00303BFF) // 鲜红 (0x00BBGGRR)
-    } else if percent >= 85.0 {
-        COLORREF(0x0000CCFF) // 亮黄
-    } else {
-        COLORREF(0x0059C734) // 鲜绿
-    };
+    let color = get_metric_status_color(percent);
 
     let fill_w = ((w as f32 * (percent / 100.0)).round() as i32).clamp(1, w);
     let rect = RECT {
@@ -303,19 +402,38 @@ unsafe fn draw_cpu_mem_column(
     col: &RECT,
     snapshot: &MetricsSnapshot,
     config: &MonitorConfig,
+    base_color: COLORREF,
 ) {
     let row_h = (col.bottom - col.top) / 2;
     let y1 = col.top;
     let y2 = col.top + row_h;
 
     if config.show_cpu {
-        draw_gdi_text(hdc, &snapshot.cpu.display, col.left, y1, col.right - col.left, row_h - 2);
+        draw_metric_text_with_threshold(
+            hdc,
+            &snapshot.cpu.display,
+            Some(snapshot.cpu.usage_percent),
+            col.left,
+            y1,
+            col.right - col.left,
+            row_h - 2,
+            base_color,
+        );
         let bar_y = y1 + row_h - 2;
         draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.cpu.usage_percent);
     }
 
     if config.show_memory {
-        draw_gdi_text(hdc, &snapshot.memory.display, col.left, y2, col.right - col.left, row_h - 2);
+        draw_metric_text_with_threshold(
+            hdc,
+            &snapshot.memory.display,
+            Some(snapshot.memory.usage_percent as f32),
+            col.left,
+            y2,
+            col.right - col.left,
+            row_h - 2,
+            base_color,
+        );
         let bar_y = col.bottom - 2;
         draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.memory.usage_percent as f32);
     }
@@ -327,17 +445,36 @@ unsafe fn draw_gpu_disk_column(
     col: &RECT,
     snapshot: &MetricsSnapshot,
     config: &MonitorConfig,
+    base_color: COLORREF,
 ) {
     let row_h = (col.bottom - col.top) / 2;
     let y1 = col.top;
     let y2 = col.top + row_h;
 
     if config.show_gpu {
-        draw_gdi_text(hdc, &snapshot.gpu.display, col.left, y1, col.right - col.left, row_h);
+        draw_metric_text_with_threshold(
+            hdc,
+            &snapshot.gpu.display,
+            snapshot.gpu.usage_percent,
+            col.left,
+            y1,
+            col.right - col.left,
+            row_h,
+            base_color,
+        );
     }
 
     if config.show_disk {
-        draw_gdi_text(hdc, &snapshot.disk.display, col.left, y2, col.right - col.left, row_h);
+        draw_metric_text_with_threshold(
+            hdc,
+            &snapshot.disk.display,
+            Some(snapshot.disk.activity_percent),
+            col.left,
+            y2,
+            col.right - col.left,
+            row_h,
+            base_color,
+        );
     }
 }
 
@@ -380,4 +517,64 @@ unsafe fn draw_waveform_graph_gdi(
 
     let _ = SelectObject(hdc, old_pen);
     let _ = DeleteObject(HGDIOBJ(pen.0 as _));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metric_status_color_thresholds() {
+        // < 70% 为鲜绿色
+        assert_eq!(get_metric_status_color(0.0), COLOR_METRIC_GREEN);
+        assert_eq!(get_metric_status_color(50.0), COLOR_METRIC_GREEN);
+        assert_eq!(get_metric_status_color(69.9), COLOR_METRIC_GREEN);
+
+        // 70% ~ 85% 为亮黄色
+        assert_eq!(get_metric_status_color(70.0), COLOR_METRIC_YELLOW);
+        assert_eq!(get_metric_status_color(78.5), COLOR_METRIC_YELLOW);
+        assert_eq!(get_metric_status_color(85.0), COLOR_METRIC_YELLOW);
+
+        // > 85% 为鲜红色
+        assert_eq!(get_metric_status_color(85.01), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(90.0), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(100.0), COLOR_METRIC_RED);
+    }
+
+    #[test]
+    fn test_parse_metric_display() {
+        // 标准两位数
+        let (prefix, num, suffix) = parse_metric_display("C: 19%").unwrap();
+        assert_eq!(prefix, "C: ");
+        assert_eq!(num, "19");
+        assert_eq!(suffix, "%");
+
+        // 带前导补齐空格的个位数
+        let (prefix, num, suffix) = parse_metric_display("C:  9%").unwrap();
+        assert_eq!(prefix, "C: ");
+        assert_eq!(num, " 9");
+        assert_eq!(suffix, "%");
+
+        // 100% 满载
+        let (prefix, num, suffix) = parse_metric_display("M: 100%").unwrap();
+        assert_eq!(prefix, "M: ");
+        assert_eq!(num, "100");
+        assert_eq!(suffix, "%");
+
+        // GPU 占位符 "--%"
+        let (prefix, num, suffix) = parse_metric_display("G: --%").unwrap();
+        assert_eq!(prefix, "G: ");
+        assert_eq!(num, "--");
+        assert_eq!(suffix, "%");
+
+        // 磁盘 0%
+        let (prefix, num, suffix) = parse_metric_display("D:  0%").unwrap();
+        assert_eq!(prefix, "D: ");
+        assert_eq!(num, " 0");
+        assert_eq!(suffix, "%");
+
+        // 非指标文本不匹配
+        assert!(parse_metric_display("↑ 120 KB/s").is_none());
+        assert!(parse_metric_display("Invalid").is_none());
+    }
 }
