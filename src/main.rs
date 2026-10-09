@@ -2,16 +2,18 @@
 
 mod dialog;
 mod managers;
+mod monitor;
 mod rules;
 mod ui;
 mod win32;
 
 use dialog::{detect_file_dialog, inject_path_to_dialog};
 use managers::WindowTracker;
+use monitor::MonitorManager;
 use rules::AppConfig;
 use ui::tray::{
     TrayIcon, IDM_EXIT, IDM_OPEN_SETTINGS, IDM_SHOW_CANDIDATES, IDM_TOGGLE_AUTOSTART,
-    IDM_TOGGLE_AUTOSWITCH, WM_TRAY_CALLBACK,
+    IDM_TOGGLE_AUTOSWITCH, IDM_TOGGLE_MONITOR, WM_TRAY_CALLBACK,
 };
 use ui::{FloatingBar, SettingsWindow};
 use win32::autostart::set_autostart;
@@ -43,6 +45,7 @@ pub struct AppState {
     pub tracker: WindowTracker,
     pub floating_bar: Option<FloatingBar>,
     pub settings_window: Option<SettingsWindow>,
+    pub monitor_manager: Option<MonitorManager>,
     pub last_switched_dialog: Option<HWND>,
     pub last_switched_path: Option<String>,
 }
@@ -59,8 +62,9 @@ fn main() {
             return;
         }
 
-        // 2. 初始化 COM 库
+        // 2. 初始化 COM 库与 GDI+ 环境
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        crate::win32::icon::ensure_gdiplus();
 
         let config = AppConfig::load();
 
@@ -106,16 +110,18 @@ fn main() {
         let _ = win32::hotkey::register_global_hotkey(host_hwnd, HOTKEY_ID, &config.hotkey);
 
         // 5. 初始化托盘、悬浮吸附条与设置窗口
+        // 5. 初始化托盘、悬浮吸附条、设置窗口与任务栏状态监控
         let tray_res = TrayIcon::new(host_hwnd);
         let floating_bar_res = FloatingBar::new();
         let settings_window_res = SettingsWindow::new();
-
+        let monitor_mgr = MonitorManager::new(&config.monitor, config.language.clone());
 
         let state = Box::new(AppState {
             config,
             tracker: WindowTracker::new(),
             floating_bar: floating_bar_res.ok(),
             settings_window: settings_window_res.ok(),
+            monitor_manager: Some(monitor_mgr),
             last_switched_dialog: None,
             last_switched_path: None,
         });
@@ -174,6 +180,7 @@ unsafe extern "system" fn host_wnd_proc(
                             hwnd,
                             state.config.auto_switch_enabled,
                             state.config.autostart_enabled,
+                            state.config.monitor.enabled,
                             state.config.language.clone(),
                             &state.config.hotkey,
                         );
@@ -209,6 +216,19 @@ unsafe extern "system" fn host_wnd_proc(
                                 state.config.autostart_task_scheduler,
                             );
                             let _ = state.config.save();
+                        }
+                    }
+                }
+                IDM_TOGGLE_MONITOR => {
+                    let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+                    if !state_ptr.is_null() {
+                        unsafe {
+                            let state = &mut *state_ptr;
+                            state.config.monitor.enabled = !state.config.monitor.enabled;
+                            let _ = state.config.save();
+                            if let Some(mgr) = &mut state.monitor_manager {
+                                mgr.sync_config(&state.config.monitor);
+                            }
                         }
                     }
                 }
@@ -377,6 +397,11 @@ pub fn update_global_config(new_config: AppConfig) {
             let state = &mut *state_ptr;
             let old_hotkey = state.config.hotkey.clone();
             state.config = new_config.clone();
+
+            if let Some(mgr) = &mut state.monitor_manager {
+                mgr.sync_config(&new_config.monitor);
+                mgr.update_language(new_config.language.clone());
+            }
 
             if old_hotkey != new_config.hotkey {
                 let host_ptr = HOST_HWND.load(Ordering::SeqCst);

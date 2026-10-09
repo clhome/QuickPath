@@ -40,6 +40,65 @@ pub struct AppConfig {
     pub enable_xyplorer: bool,
     /// 外观主题：auto（跟随系统）, dark（深色模式）, light（浅色模式）
     pub theme: String,
+    /// 任务栏硬件状态监控模块配置
+    #[serde(default)]
+    pub monitor: MonitorConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MonitorPosition {
+    /// 托盘左侧（紧靠系统托盘通知区左边缘，默认）
+    #[default]
+    TrayLeft,
+    /// 任务栏左侧（紧跟开始/搜索按钮之后，空间宽敞，永不与打开的窗口图标重叠）
+    TaskbarLeft,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorConfig {
+    /// 任务栏状态监控总开关（默认 true，开启）
+    pub enabled: bool,
+
+    /// 任务栏停靠位置模式（默认 TrayLeft）
+    #[serde(default)]
+    pub position: MonitorPosition,
+
+    // --- 细粒度常驻指标勾选项 ---
+    /// 是否显示网络吞吐速率（上行与下行合并为一个设置项，默认 true）
+    pub show_network: bool,
+    /// 是否显示处理器利用率 (CPU，默认 true)
+    pub show_cpu: bool,
+    /// 是否显示物理内存利用率 (RAM，默认 true)
+    pub show_memory: bool,
+    /// 是否显示显卡利用率 (GPU，默认 true)
+    pub show_gpu: bool,
+    /// 是否显示磁盘利用率 (Disk，默认 true)
+    pub show_disk: bool,
+
+    // --- 外观与采样高级设置 ---
+    /// 是否显示历史折线波动背景图 (15~20秒采样，默认 true)
+    pub show_graph_bg: bool,
+    /// 采样刷新间隔（毫秒，默认 1000ms，可选 1000 / 1500 / 2000ms）
+    pub refresh_interval_ms: u64,
+    /// 界面半透明度（50 ~ 100，默认 85）
+    pub opacity: u8,
+}
+
+impl Default for MonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            position: MonitorPosition::TrayLeft,
+            show_network: true,
+            show_cpu: true,
+            show_memory: true,
+            show_gpu: true,
+            show_disk: true,
+            show_graph_bg: true,
+            refresh_interval_ms: 3000,
+            opacity: 95,
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -64,6 +123,7 @@ impl Default for AppConfig {
             enable_totalcmd: true,
             enable_xyplorer: true,
             theme: "auto".to_string(),
+            monitor: MonitorConfig::default(),
         }
     }
 }
@@ -123,6 +183,16 @@ impl AppConfig {
                         changed = true;
                     }
 
+                    // 自愈修复 4：监控面板半透明度规范化（50% ~ 100%）与刷新率规范化
+                    if config.monitor.opacity < 50 || config.monitor.opacity > 100 {
+                        config.monitor.opacity = 85;
+                        changed = true;
+                    }
+                    if config.monitor.refresh_interval_ms < 500 || config.monitor.refresh_interval_ms > 5000 {
+                        config.monitor.refresh_interval_ms = 3000;
+                        changed = true;
+                    }
+
                     if changed {
                         let _ = config.save();
                     }
@@ -171,5 +241,42 @@ impl AppConfig {
             self.history_folders.truncate(self.max_history_count);
         }
         let _ = self.save();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_monitor_position_default() {
+        let default_cfg = MonitorConfig::default();
+        assert_eq!(default_cfg.position, MonitorPosition::TrayLeft);
+        assert_eq!(default_cfg.refresh_interval_ms, 3000);
+    }
+
+    #[test]
+    fn test_monitor_config_backward_compatibility() {
+        // 模拟没有 position 字段的旧版本 JSON
+        let old_json = r#"{
+            "enabled": true,
+            "show_network": true,
+            "show_cpu": true,
+            "show_memory": true,
+            "show_gpu": true,
+            "show_disk": true,
+            "show_graph_bg": true,
+            "refresh_interval_ms": 1000,
+            "opacity": 85
+        }"#;
+        let parsed: MonitorConfig = serde_json::from_str(old_json).expect("解析旧配置必须成功");
+        assert_eq!(parsed.position, MonitorPosition::TrayLeft);
+
+        // 测试包含 TaskbarLeft 的新配置序列化与反序列化
+        let mut new_cfg = MonitorConfig::default();
+        new_cfg.position = MonitorPosition::TaskbarLeft;
+        let serialized = serde_json::to_string(&new_cfg).expect("序列化成功");
+        let deserialized: MonitorConfig = serde_json::from_str(&serialized).expect("反序列化成功");
+        assert_eq!(deserialized.position, MonitorPosition::TaskbarLeft);
     }
 }

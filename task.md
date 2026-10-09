@@ -276,3 +276,93 @@
   - [x] 执行 `cargo check` 与 `cargo build --release` 验证通过
   - [x] 运行 PowerShell 脚本自动化校验 `VersionInfo` 各项字段读取结果
   - [x] 清理测试临时文件，更新任务进度
+
+## 阶段二十四：任务栏状态监控模块 (v1.1) 研发
+- [x] **24.1 基础依赖与配置模型扩展 (Deps & Config & i18n)**
+  - [x] 在 `Cargo.toml` 中配置 `arc-swap = "1.7"` 及 `windows` crate 所需特性
+  - [x] 在 `src/rules/config.rs` 中新增 `MonitorConfig` 并在 `AppConfig` 中集成
+  - [x] 在 `locales/zh-CN.toml` 和 `locales/en-US.toml` 中增加 `[monitor]` 多语言支持并在 `src/rules/i18n.rs` 中映射
+- [x] **24.2 免特权底层指标采集引擎 (Metrics Collectors)**
+  - [x] 实现物理网卡过滤与瞬时带宽采集 (`src/monitor/collector/network.rs`)
+  - [x] 实现系统 CPU 利用率采集 (`src/monitor/collector/cpu.rs`)
+  - [x] 实现物理内存利用率与容量采集 (`src/monitor/collector/memory.rs`)
+  - [x] 实现 GPU & 磁盘利用率采集 (`src/monitor/collector/gpu.rs`, `src/monitor/collector/disk.rs`)
+  - [x] 实现 Tooltip 扩展明细采集 (`src/monitor/collector/details.rs`)
+- [x] **24.3 环形波形缓冲与后台 Worker 线程 (Worker & Waveform & ArcSwap)**
+  - [x] 定义数据快照 `MetricsSnapshot` 与历史环形缓冲区 `WaveformBuffer`
+  - [x] 实现后台采样 Worker 线程，支持无锁共享与零开销优雅休止
+- [x] **24.4 任务栏分层悬浮宿主、全屏避让与窗口管理 (Bar Window & Shell Docking)**
+  - [x] 创建任务栏依附分层窗口，实现托盘区域锚定与跟随
+  - [x] 实现全屏应用（游戏/影音/演示）主动隐匿避让机制
+  - [x] 注册并监听 `TaskbarCreated`、`WM_POWERBROADCAST` 与 `WM_DPICHANGED`
+- [x] **24.5 GDI+ 预乘 Alpha 渲染引擎与悬浮 Tooltip (Render & Fluent Tooltip)**
+  - [x] 动态列宽自适应收缩引擎（网络、CPU/内存、GPU/磁盘 1~3 列）
+  - [x] GDI+ 预乘 Alpha 紧凑两行文字、指示条微色块、历史波形折线图绘制
+  - [x] 鼠标交互（左键单击切换/双击打开任务管理器/右键上下文菜单）
+  - [x] Fluent 悬浮详情看板（Tooltip）实现
+- [x] **24.6 设置中心 Tab 切换与系统托盘深度集成 (Settings & Tray Integration)**
+  - [x] 设置中心升级支持「常规偏好」与「任务栏监控」选项卡切换
+  - [x] 任务栏监控配置卡片（总开关、指标多选、波形背景、刷新率、透明度）
+  - [x] 系统托盘右键菜单增加任务栏监控快捷开关
+  - [x] 在 `src/main.rs` 中集成 `MonitorManager` 生命周期控制
+- [x] **24.7 编译构建验证、性能开销审查与交付**
+  - [x] `cargo check`、`cargo test` 与 `cargo build --release` 达到 0 警告 0 错误
+  - [x] 验证常驻内存增量 $\le 5\text{MB}$ 与 CPU 占用 $\le 0.05\%$
+  - [x] 纯绿色单文件交付体积仅 1.01MB，更新任务进度完成交付
+
+## 阶段二十五：任务栏状态监控 Bug 修复与多位置停靠自适应
+- [x] **25.1 GDI+ 全生命周期就绪与渲染引擎修复**
+  - [x] 在 `src/main.rs`、`src/monitor/window/bar_window.rs`、`src/monitor/window/render.rs` 注入 `ensure_gdiplus()`
+  - [x] 重构文字与像素 Alpha 合成逻辑，前景文字与高亮指示条赋予完全预乘 Alpha，文字清晰呈现
+- [x] **25.2 窗口光标与 WM_SETCURSOR 响应修复**
+  - [x] 注册窗口类绑定 `LoadCursorW(None, IDC_ARROW)`
+  - [x] 在 `bar_wnd_proc` 处理 `WM_SETCURSOR`，移入即刻呈现标准箭头光标
+- [x] **25.3 Z-Order 顶层持续锁定防遮挡**
+  - [x] `SetWindowPos` 严格使用 `Some(HWND_TOPMOST)`，杜绝 `WS_EX_TOPMOST` 被剥夺
+  - [x] 确保多窗口切换与最大化时监控窗口保持顶层
+- [x] **25.4 任务栏位置模式扩展（托盘左侧 / 任务栏左侧）**
+  - [x] 在 `MonitorConfig` 中增加 `position` 字段，并在多语言中添加对应词条
+  - [x] 在 `bar_window.rs` 实现“任务栏左侧”与“托盘左侧”双向坐标锚定
+  - [x] 在监控右键菜单与设置中心中提供位置切换
+- [x] **25.5 编译验证、清理测试文件与 task.md 进度更新**
+  - [x] 执行 `cargo check` 验证 0 警告 0 错误
+  - [x] 清理 `test/` 临时排查脚本，更新根目录 `task.md`
+
+## 阶段二十六：监控文字可读性增强（微软雅黑+放大一号）与采样刷新档位调整 (1s/3s/5s)
+- [x] **26.1 监控面板字体与字号升级 (Microsoft YaHei UI & Font Scaling)**
+  - [x] 切换主渲染字体为 `"Microsoft YaHei UI"`，备用字体设为 `"Segoe UI"`
+  - [x] 字号放大一号（基础字号从 9.0 提升至 10.5）
+  - [x] 调优 `calculate_layout` 列宽与窗口高度（网卡 42px，CPU/内存 48px，GPU/磁盘 48px，高度 38px），确保大字号不截断不拥挤
+- [x] **26.2 采样刷新率 3 档调整与默认 3s (Refresh Interval & Default 3s)**
+  - [x] 修改 `MonitorConfig::default()` 的 `refresh_interval_ms` 为 `3000`
+  - [x] 更新 `config.rs` 自愈校验范围（保留合法区间，异常恢复默认 3000ms）
+  - [x] 更新 `locales/zh-CN.toml` 与 `locales/en-US.toml` 词条为 1.0s / 3.0s / 5.0s，标注 3s 为默认/推荐
+  - [x] 更新 `src/rules/i18n.rs` 中的字段定义（`interval_1s`, `interval_3s`, `interval_5s`）
+- [x] **26.3 设置中心单选胶囊与交互联动 (Settings UI Capsule & Events)**
+  - [x] 在 `src/ui/settings.rs` 将 3 段式单选胶囊选项更新为 1000ms (1s) / 3000ms (3s) / 5000ms (5s)
+  - [x] 调整胶囊宽度 `seg_w` 并按左到右递增顺序列出 (1s -> 3s -> 5s)
+  - [x] 同步更新鼠标移动悬停命中检测与鼠标左键点击切换逻辑
+- [x] **26.4 单元测试、构建验证与收尾**
+  - [x] 更新 `src/rules/config.rs` 中的配置测试用例
+  - [x] 执行 `cargo test` 与 `cargo check` 验证 0 警告 0 错误
+  - [x] 更新 `task.md` 完成进度记录
+
+## 阶段二十七：监控常驻面板深色卡片背景与 Win32 ClearType 锐利渲染重构
+- [x] **27.1 沉稳深色背景卡片与真实透明度映射**
+  - [x] 修正 `opacity` 算式为真实 0~255 映射，默认不透明度提升至 95%
+  - [x] 暗色模式下设定沉稳纯净深色底 `RGB(24, 24, 26)`，浅色模式 `RGB(245, 245, 248)`，彻底隔绝复杂壁纸杂色穿透
+- [x] **27.2 重构为 Win32 ClearType 原生文字渲染引擎**
+  - [x] 引入 `CreateFontW` 创建 `Microsoft YaHei UI` 字体并指定 `FONT_QUALITY(5)` (ClearType)
+  - [x] 实现 `draw_gdi_text` 替代原 GDI+ 灰度抗锯齿，文字在内存 DC 上以透明模式高质量绘制
+  - [x] CPU/内存微型指示条采用 GDI `FillRect` 原生绘制
+  - [x] 历史波形折线采用 GDI `Polyline` 绘制
+- [x] **27.3 平滑 Alpha 通道保护消除毛刺灰边**
+  - [x] 后处理重构为平滑底限保护：`if a < base_alpha { *p = (*p & 0x00FFFFFF) | (base_alpha << 24); }`，彻底消除硬化灰毛刺
+- [x] **27.4 编译验证与单元测试**
+  - [x] 运行 `cargo test` 与 `cargo check` 确保 0 警告 0 错误
+  - [x] 更新 `task.md` 进度打勾
+
+
+
+
+

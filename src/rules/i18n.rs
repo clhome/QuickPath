@@ -137,13 +137,125 @@ pub struct AboutSection {
     pub github: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TraySection {
     pub show_candidates: String,
     pub toggle_autoswitch: String,
     pub toggle_autostart: String,
+    #[serde(default)]
+    pub toggle_monitor: String,
     pub settings: String,
     pub exit: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MonitorSection {
+    #[serde(default)]
+    pub tab_general: String,
+    #[serde(default)]
+    pub tab_monitor: String,
+    #[serde(default)]
+    pub master_switch: String,
+    #[serde(default)]
+    pub master_switch_desc: String,
+    #[serde(default)]
+    pub metrics_title: String,
+    #[serde(default)]
+    pub metrics_desc: String,
+    #[serde(default)]
+    pub metric_net_label: String,
+    #[serde(default)]
+    pub metric_cpu_label: String,
+    #[serde(default)]
+    pub metric_mem_label: String,
+    #[serde(default)]
+    pub metric_gpu_label: String,
+    #[serde(default)]
+    pub metric_disk_label: String,
+    #[serde(default)]
+    pub visual_title: String,
+    #[serde(default)]
+    pub visual_desc: String,
+    #[serde(default)]
+    pub graph_bg_label: String,
+    #[serde(default)]
+    pub interval_label: String,
+    #[serde(default)]
+    pub interval_1s: String,
+    #[serde(default)]
+    pub interval_3s: String,
+    #[serde(default)]
+    pub interval_5s: String,
+    #[serde(default)]
+    pub opacity_label: String,
+    #[serde(default)]
+    pub opacity_desc: String,
+    #[serde(default)]
+    pub menu_settings: String,
+    #[serde(default)]
+    pub menu_metrics: String,
+    #[serde(default)]
+    pub menu_metric_net: String,
+    #[serde(default)]
+    pub menu_metric_cpu: String,
+    #[serde(default)]
+    pub menu_metric_mem: String,
+    #[serde(default)]
+    pub menu_metric_gpu: String,
+    #[serde(default)]
+    pub menu_metric_disk: String,
+    #[serde(default)]
+    pub menu_graph_bg: String,
+    #[serde(default)]
+    pub menu_refresh_net: String,
+    #[serde(default)]
+    pub menu_hide: String,
+    #[serde(default)]
+    pub menu_exit: String,
+    #[serde(default)]
+    pub menu_position: String,
+    #[serde(default)]
+    pub menu_pos_tray_left: String,
+    #[serde(default)]
+    pub menu_pos_taskbar_left: String,
+    #[serde(default)]
+    pub position_label: String,
+    #[serde(default)]
+    pub position_desc: String,
+    #[serde(default)]
+    pub tooltip_title: String,
+    #[serde(default)]
+    pub tooltip_net_speed: String,
+    #[serde(default)]
+    pub tooltip_net_adapter: String,
+    #[serde(default)]
+    pub tooltip_cpu: String,
+    #[serde(default)]
+    pub tooltip_memory: String,
+    #[serde(default)]
+    pub tooltip_gpu: String,
+    #[serde(default)]
+    pub tooltip_disk: String,
+    #[serde(default)]
+    pub tooltip_uptime: String,
+    #[serde(default)]
+    pub tooltip_power: String,
+    #[serde(default)]
+    pub tooltip_power_ac: String,
+    #[serde(default)]
+    pub tooltip_power_battery: String,
+    #[serde(default)]
+    pub tooltip_vram: String,
+    #[serde(default)]
+    pub tooltip_used: String,
+    #[serde(default)]
+    pub tooltip_total: String,
+    #[serde(default)]
+    pub tooltip_read: String,
+    #[serde(default)]
+    pub tooltip_write: String,
+    #[serde(default)]
+    pub tooltip_top: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +267,8 @@ pub struct LocaleBundle {
     #[serde(default)]
     pub about: AboutSection,
     pub tray: TraySection,
+    #[serde(default)]
+    pub monitor: MonitorSection,
 }
 
 // 编译期嵌入官方自带语言文件，确保单文件绿色分发零外部依赖
@@ -329,6 +443,13 @@ impl I18n {
     pub fn tray_toggle_autostart(lang: &Language, enabled: bool) -> String {
         let check = if enabled { "✔ " } else { "    " };
         format!("{}{}", check, Self::get_bundle(lang).tray.toggle_autostart)
+    }
+
+    pub fn tray_toggle_monitor(lang: &Language, enabled: bool) -> String {
+        let check = if enabled { "✔ " } else { "    " };
+        let text = &Self::get_bundle(lang).tray.toggle_monitor;
+        let title = if text.is_empty() { "任务栏状态监控" } else { text.as_str() };
+        format!("{}{}", check, title)
     }
 
     pub fn tray_show_candidates(lang: &Language, hotkey_display: &str) -> String {

@@ -20,6 +20,7 @@ pub const IDM_TOGGLE_AUTOSTART: usize = 1002;
 pub const IDM_SHOW_CANDIDATES: usize = 1003;
 pub const IDM_OPEN_SETTINGS: usize = 1004;
 pub const IDM_EXIT: usize = 1005;
+pub const IDM_TOGGLE_MONITOR: usize = 1006;
 
 pub struct TrayIcon {
     pub hwnd: HWND,
@@ -91,6 +92,7 @@ impl TrayIcon {
         hwnd: HWND,
         auto_switch_enabled: bool,
         autostart_enabled: bool,
+        monitor_enabled: bool,
         lang: crate::rules::Language,
         hotkey: &str,
     ) {
@@ -113,6 +115,11 @@ impl TrayIcon {
             } else {
                 MF_UNCHECKED
             };
+            let monitor_flag = if monitor_enabled {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
 
             let hotkey_disp = crate::win32::hotkey::format_hotkey_display(hotkey);
 
@@ -121,6 +128,10 @@ impl TrayIcon {
                 .chain(Some(0))
                 .collect();
             let str_autostart: Vec<u16> = format!("🚀 {}", crate::rules::I18n::tray_toggle_autostart(&lang, false))
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let str_monitor: Vec<u16> = format!("📊 {}", crate::rules::I18n::tray_toggle_monitor(&lang, false))
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
@@ -150,6 +161,12 @@ impl TrayIcon {
                 MF_STRING | autostart_flag,
                 IDM_TOGGLE_AUTOSTART,
                 PCWSTR(str_autostart.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING | monitor_flag,
+                IDM_TOGGLE_MONITOR,
+                PCWSTR(str_monitor.as_ptr()),
             );
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(

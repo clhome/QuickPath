@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::rules::{AppConfig, I18n, Language};
+use crate::rules::{AppConfig, I18n, Language, MonitorPosition};
 use crate::win32::autostart::set_autostart;
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
@@ -33,13 +33,23 @@ static SETTINGS_WINDOW_HWND: AtomicPtr<core::ffi::c_void> =
     AtomicPtr::new(std::ptr::null_mut());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    General,
+    Monitor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragMode {
     None,
     OpacitySlider,
     AutoSwitchToggle { start_x: i32, initial_state: bool, has_moved: bool },
     AutostartToggle { start_x: i32, initial_state: bool, has_moved: bool },
+    MonitorMasterToggle { start_x: i32, initial_state: bool, has_moved: bool },
+    MonitorOpacitySlider,
 }
 
+static CURRENT_TAB: Mutex<SettingsTab> = Mutex::new(SettingsTab::General);
+static HOVER_TAB: Mutex<Option<usize>> = Mutex::new(None);
 static DRAG_MODE: Mutex<DragMode> = Mutex::new(DragMode::None);
 static IS_RECORDING_HOTKEY: AtomicBool = AtomicBool::new(false);
 static HOVER_CARD_IDX: Mutex<Option<usize>> = Mutex::new(None);
@@ -93,7 +103,7 @@ impl SettingsWindow {
                 0,
                 0,
                 660,
-                720,
+                750,
                 None,
                 None,
                 None,
@@ -111,7 +121,7 @@ impl SettingsWindow {
             let dpi = GetDpiForWindow(hwnd);
             let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
             let win_w = (660.0 * scale).round() as i32;
-            let win_h = (720.0 * scale).round() as i32;
+            let win_h = (750.0 * scale).round() as i32;
 
             // 启用 Win11 圆角与深色模式
             let round_pref = DWMWCP_ROUND.0 as u32;
@@ -356,7 +366,10 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         let bundle = I18n::get_bundle(&config.language);
         let pad_x = (28.0 * scale).round() as i32;
 
-        // 1. 顶部 Header 品牌区（主标题 + 副标题 + 雅致分割线）
+        let current_tab = CURRENT_TAB.lock().map(|t| *t).unwrap_or(SettingsTab::General);
+        let hovered = HOVER_CARD_IDX.lock().ok().and_then(|h| *h);
+
+        // 1. 顶部 Header 品牌区（主标题 + 副标题）
         let header_text_x = pad_x;
         SelectObject(hdc, HGDIOBJ(font_h1.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
@@ -366,7 +379,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             left: header_text_x,
             top: (14.0 * scale).round() as i32,
             right: rect.right - pad_x,
-            bottom: (36.0 * scale).round() as i32,
+            bottom: (34.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -380,14 +393,34 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         let mut sub_buf: Vec<u16> = sub_str.encode_utf16().collect();
         let mut sub_rect = RECT {
             left: header_text_x,
-            top: (37.0 * scale).round() as i32,
+            top: (35.0 * scale).round() as i32,
             right: rect.right - pad_x,
-            bottom: (54.0 * scale).round() as i32,
+            bottom: (50.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut sub_buf, &mut sub_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+        // 顶部 Tab 选项卡栏
+        let tab_y = (56.0 * scale).round() as i32;
+        let tab_h = (30.0 * scale).round() as i32;
+        let tab_w = (116.0 * scale).round() as i32;
+        let tab_gap = (8.0 * scale).round() as i32;
+        render_segmented_tabs(
+            hdc,
+            pad_x,
+            tab_y,
+            tab_w,
+            tab_h,
+            tab_gap,
+            scale,
+            current_tab,
+            hovered,
+            font_card_title,
+            &bundle.monitor.tab_general,
+            &bundle.monitor.tab_monitor,
+        );
+
         // 细微分割线
-        let line_y = (60.0 * scale).round() as i32;
+        let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
         let line_rect = RECT {
             left: pad_x,
             top: line_y,
@@ -400,85 +433,126 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
 
         // 2. 卡片区域几何计算
         let card_w = rect.right - pad_x * 2;
-        let card_h = (56.0 * scale).round() as i32;
         let card_gap = (8.0 * scale).round() as i32;
-        let card_top_base = (70.0 * scale).round() as i32;
+        let card_top_base = line_y + (10.0 * scale).round() as i32;
 
-        let hovered = HOVER_CARD_IDX.lock().ok().and_then(|h| *h);
+        match current_tab {
+            SettingsTab::General => {
+                let card_h = (56.0 * scale).round() as i32;
 
-        // 卡片 0：自动秒切路径 (AutoSwitch) - Toggle 开关滑块
-        let card0_top = card_top_base;
-        let is_hov_0 = hovered == Some(0);
-        render_toggle_card(
-            hdc, pad_x, card0_top, pad_x + card_w, card0_top + card_h, scale,
-            font_card_title, font_text,
-            &bundle.settings.auto_switch, &bundle.settings.auto_switch_desc,
-            config.auto_switch_enabled,
-            &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-            is_hov_0,
-        );
+                // 卡片 0：自动秒切路径 (AutoSwitch) - Toggle 开关滑块
+                let card0_top = card_top_base;
+                let is_hov_0 = hovered == Some(0);
+                render_toggle_card(
+                    hdc, pad_x, card0_top, pad_x + card_w, card0_top + card_h, scale,
+                    font_card_title, font_text,
+                    &bundle.settings.auto_switch, &bundle.settings.auto_switch_desc,
+                    config.auto_switch_enabled,
+                    &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                    is_hov_0,
+                );
 
-        // 卡片 1：唤出快捷键 (Hotkey) - 录制 Badge
-        let card1_top = card0_top + card_h + card_gap;
-        let is_hov_1 = hovered == Some(1);
-        let is_recording = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
-        let hotkey_disp = crate::win32::hotkey::format_hotkey_display(&config.hotkey);
-        let card1_s = if is_recording {
-            bundle.hotkey.recording_prompt.clone()
-        } else {
-            format!("[ {} · {} ]", hotkey_disp, bundle.hotkey.click_to_record)
-        };
-        render_hotkey_card(
-            hdc, pad_x, card1_top, pad_x + card_w, card1_top + card_h, scale,
-            font_card_title, font_text,
-            &bundle.hotkey.card_title, &bundle.hotkey.card_desc,
-            &card1_s, is_recording, is_hov_1,
-        );
+                // 卡片 1：唤出快捷键 (Hotkey) - 录制 Badge
+                let card1_top = card0_top + card_h + card_gap;
+                let is_hov_1 = hovered == Some(1);
+                let is_recording = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
+                let hotkey_disp = crate::win32::hotkey::format_hotkey_display(&config.hotkey);
+                let card1_s = if is_recording {
+                    bundle.hotkey.recording_prompt.clone()
+                } else {
+                    format!("[ {} · {} ]", hotkey_disp, bundle.hotkey.click_to_record)
+                };
+                render_hotkey_card(
+                    hdc, pad_x, card1_top, pad_x + card_w, card1_top + card_h, scale,
+                    font_card_title, font_text,
+                    &bundle.hotkey.card_title, &bundle.hotkey.card_desc,
+                    &card1_s, is_recording, is_hov_1,
+                );
 
-        // 卡片 2：开机静默自启 (Autostart) - Toggle 开关滑块
-        let card2_top = card1_top + card_h + card_gap;
-        let is_hov_2 = hovered == Some(2);
-        render_toggle_card(
-            hdc, pad_x, card2_top, pad_x + card_w, card2_top + card_h, scale,
-            font_card_title, font_text,
-            &bundle.settings.autostart, &bundle.settings.autostart_desc,
-            config.autostart_enabled,
-            &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-            is_hov_2,
-        );
+                // 卡片 2：开机静默自启 (Autostart) - Toggle 开关滑块
+                let card2_top = card1_top + card_h + card_gap;
+                let is_hov_2 = hovered == Some(2);
+                render_toggle_card(
+                    hdc, pad_x, card2_top, pad_x + card_w, card2_top + card_h, scale,
+                    font_card_title, font_text,
+                    &bundle.settings.autostart, &bundle.settings.autostart_desc,
+                    config.autostart_enabled,
+                    &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                    is_hov_2,
+                );
 
-        // 卡片 3：弹出层半透明效果 (Opacity) - 调节 Slider 滑块
-        let card3_top = card2_top + card_h + card_gap;
-        let is_hov_3 = hovered == Some(3);
-        render_slider_card(
-            hdc, pad_x, card3_top, pad_x + card_w, card3_top + card_h, scale,
-            font_card_title, font_text,
-            &bundle.settings.opacity, &bundle.settings.opacity_desc,
-            config.floating_bar_opacity, is_hov_3,
-        );
+                // 卡片 3：弹出层半透明效果 (Opacity) - 调节 Slider 滑块
+                let card3_top = card2_top + card_h + card_gap;
+                let is_hov_3 = hovered == Some(3);
+                render_slider_card(
+                    hdc, pad_x, card3_top, pad_x + card_w, card3_top + card_h, scale,
+                    font_card_title, font_text,
+                    &bundle.settings.opacity, &bundle.settings.opacity_desc,
+                    config.floating_bar_opacity, is_hov_3,
+                );
 
-        // 卡片 4：界面语言 (Language) - 现代 Dropdown 下拉选择框
-        let card4_top = card3_top + card_h + card_gap;
-        let is_hov_4 = hovered == Some(4);
-        let is_dropdown_open = IS_DROPDOWN_OPEN.load(Ordering::SeqCst);
-        let lang_name = match &config.language {
-            Language::Auto => &bundle.settings.lang_auto,
-            _ => &bundle.meta.name,
-        };
-        render_dropdown_card(
-            hdc, pad_x, card4_top, pad_x + card_w, card4_top + card_h, scale,
-            font_card_title, font_text,
-            &bundle.settings.language, &bundle.settings.language_desc,
-            lang_name, is_hov_4, is_dropdown_open,
-        );
+                // 卡片 4：界面语言 (Language) - 现代 Dropdown 下拉选择框
+                let card4_top = card3_top + card_h + card_gap;
+                let is_hov_4 = hovered == Some(4);
+                let is_dropdown_open = IS_DROPDOWN_OPEN.load(Ordering::SeqCst);
+                let lang_name = match &config.language {
+                    Language::Auto => &bundle.settings.lang_auto,
+                    _ => &bundle.meta.name,
+                };
+                render_dropdown_card(
+                    hdc, pad_x, card4_top, pad_x + card_w, card4_top + card_h, scale,
+                    font_card_title, font_text,
+                    &bundle.settings.language, &bundle.settings.language_desc,
+                    lang_name, is_hov_4, is_dropdown_open,
+                );
 
-        // 卡片 5：“关于 QuickPath”现代专属信息卡片 (About Card)
-        let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-        let about_h = (104.0 * scale).round() as i32;
-        render_about_card(
-            hdc, pad_x, card5_top, pad_x + card_w, card5_top + about_h, scale,
-            &bundle, font_card_title, font_text, font_small, hovered,
-        );
+                // 卡片 5：“关于 QuickPath”现代专属信息卡片 (About Card)
+                let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
+                let about_h = (104.0 * scale).round() as i32;
+                render_about_card(
+                    hdc, pad_x, card5_top, pad_x + card_w, card5_top + about_h, scale,
+                    &bundle, font_card_title, font_text, font_small, hovered,
+                );
+            }
+            SettingsTab::Monitor => {
+                let card_m0_top = card_top_base;
+                let card_m0_h = (56.0 * scale).round() as i32;
+                let is_hov_m0 = hovered == Some(30);
+                render_toggle_card(
+                    hdc, pad_x, card_m0_top, pad_x + card_w, card_m0_top + card_m0_h, scale,
+                    font_card_title, font_text,
+                    &bundle.monitor.master_switch, &bundle.monitor.master_switch_desc,
+                    config.monitor.enabled,
+                    &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                    is_hov_m0,
+                );
+
+                let card_m1_top = card_m0_top + card_m0_h + card_gap;
+                let card_m1_h = (130.0 * scale).round() as i32;
+                render_metrics_checklist_card(
+                    hdc, pad_x, card_m1_top, pad_x + card_w, card_m1_top + card_m1_h, scale,
+                    font_card_title, font_text,
+                    &bundle.monitor.metrics_title, &bundle.monitor.metrics_desc,
+                    &bundle, &config.monitor, hovered,
+                );
+
+                let card_m2_top = card_m1_top + card_m1_h + card_gap;
+                let card_m2_h = (172.0 * scale).round() as i32;
+                render_monitor_visual_card(
+                    hdc, pad_x, card_m2_top, pad_x + card_w, card_m2_top + card_m2_h, scale,
+                    font_card_title, font_text,
+                    &bundle.monitor.visual_title, &bundle.monitor.visual_desc,
+                    &bundle, &config.monitor, hovered,
+                );
+
+                let card_m3_top = card_m2_top + card_m2_h + card_gap;
+                let card_m3_h = (68.0 * scale).round() as i32;
+                render_monitor_tips_card(
+                    hdc, pad_x, card_m3_top, pad_x + card_w, card_m3_top + card_m3_h, scale,
+                    font_card_title, font_small,
+                );
+            }
+        }
 
         // 3. 底部「确定」与「取消」按钮（沉底排布，与窗体底部保留舒缓间距）
         let bottom_pad = (22.0 * scale).round() as i32;
@@ -539,7 +613,9 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         DrawTextW(hdc, &mut ver_buf, &mut ver_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // 5. 顶层叠加渲染网页风格下拉选择选项层（展开时覆盖在关于卡片上方）
-        if is_dropdown_open {
+        if current_tab == SettingsTab::General && IS_DROPDOWN_OPEN.load(Ordering::SeqCst) {
+            let card_h = (56.0 * scale).round() as i32;
+            let card4_top = card_top_base + (card_h + card_gap) * 4;
             let combo_w = (170.0 * scale).round() as i32;
             let combo_h = (30.0 * scale).round() as i32;
             let right_pad = (16.0 * scale).round() as i32;
@@ -1155,6 +1231,462 @@ unsafe fn render_about_card(
     }
 }
 
+/// 辅助渲染 Fluent 胶囊 Tab 切换栏
+unsafe fn render_segmented_tabs(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    tab_w: i32,
+    tab_h: i32,
+    gap: i32,
+    scale: f32,
+    current_tab: SettingsTab,
+    hovered: Option<usize>,
+    font: windows::Win32::Graphics::Gdi::HFONT,
+    label_general: &str,
+    label_monitor: &str,
+) {
+    unsafe {
+        let tabs = [
+            (0usize, SettingsTab::General, label_general, 100usize),
+            (1usize, SettingsTab::Monitor, label_monitor, 101usize),
+        ];
+
+        for (idx, tab_type, label, hov_id) in tabs {
+            let tab_left = left + idx as i32 * (tab_w + gap);
+            let tab_right = tab_left + tab_w;
+            let tab_bottom = top + tab_h;
+
+            let is_active = current_tab == tab_type;
+            let is_hov = hovered == Some(hov_id);
+
+            let (bg, border, text_color) = if is_active {
+                (COLORREF(0x002e2e2e), COLORREF(0x004d4d4d), COLORREF(0x00ffffff))
+            } else if is_hov {
+                (COLORREF(0x00262626), COLORREF(0x00383838), COLORREF(0x00d0d0d0))
+            } else {
+                (COLORREF(0x001f1f1f), COLORREF(0x002a2a2a), COLORREF(0x00888888))
+            };
+
+            draw_fluent_box(hdc, tab_left, top, tab_right, tab_bottom, (6.0 * scale).round() as i32, bg, border);
+
+            // 若激活，底部绘制 Win11 Accent Blue 发光指示条 (高 3px)
+            if is_active {
+                let bar_h = (3.0 * scale).round() as i32;
+                let bar_pad = (16.0 * scale).round() as i32;
+                let bar_rect = RECT {
+                    left: tab_left + bar_pad,
+                    top: tab_bottom - bar_h - 1,
+                    right: tab_right - bar_pad,
+                    bottom: tab_bottom - 1,
+                };
+                let bar_brush = CreateSolidBrush(COLORREF(0x00d47800)); // Accent Blue
+                FillRect(hdc, &bar_rect, bar_brush);
+                let _ = DeleteObject(HGDIOBJ(bar_brush.0 as _));
+            }
+
+            SelectObject(hdc, HGDIOBJ(font.0 as _));
+            SetTextColor(hdc, text_color);
+            let mut buf: Vec<u16> = label.encode_utf16().collect();
+            let mut r = RECT {
+                left: tab_left,
+                top,
+                right: tab_right,
+                bottom: tab_bottom,
+            };
+            DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+}
+
+/// 辅助绘制复选框项 (Checkbox)
+unsafe fn draw_checkbox_item(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    font: windows::Win32::Graphics::Gdi::HFONT,
+    label: &str,
+    is_checked: bool,
+    is_hovered: bool,
+) {
+    unsafe {
+        if is_hovered {
+            let hov_brush = CreateSolidBrush(COLORREF(0x002a2a2a));
+            let r = RECT { left, top, right, bottom };
+            FillRect(hdc, &r, hov_brush);
+            let _ = DeleteObject(HGDIOBJ(hov_brush.0 as _));
+        }
+
+        let box_size = (16.0 * scale).round() as i32;
+        let cy = top + (bottom - top) / 2;
+        let box_left = left + (8.0 * scale).round() as i32;
+        let box_top = cy - box_size / 2;
+        let box_right = box_left + box_size;
+        let box_bottom = box_top + box_size;
+
+        let (box_bg, box_border) = if is_checked {
+            (COLORREF(0x00d47800), COLORREF(0x00d47800)) // Accent Blue
+        } else if is_hovered {
+            (COLORREF(0x00282828), COLORREF(0x00666666))
+        } else {
+            (COLORREF(0x00222222), COLORREF(0x00444444))
+        };
+
+        draw_fluent_box(hdc, box_left, box_top, box_right, box_bottom, (4.0 * scale).round() as i32, box_bg, box_border);
+
+        if is_checked {
+            SelectObject(hdc, HGDIOBJ(font.0 as _));
+            SetTextColor(hdc, COLORREF(0x00ffffff));
+            let mut check_buf: Vec<u16> = "✓".encode_utf16().collect();
+            let mut check_rect = RECT {
+                left: box_left,
+                top: box_top,
+                right: box_right,
+                bottom: box_bottom,
+            };
+            DrawTextW(hdc, &mut check_buf, &mut check_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        SelectObject(hdc, HGDIOBJ(font.0 as _));
+        SetTextColor(hdc, if is_checked { COLORREF(0x00f0f0f0) } else { COLORREF(0x00999999) });
+        let mut text_buf: Vec<u16> = label.encode_utf16().collect();
+        let mut text_rect = RECT {
+            left: box_right + (8.0 * scale).round() as i32,
+            top,
+            right,
+            bottom,
+        };
+        DrawTextW(hdc, &mut text_buf, &mut text_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/// 渲染常驻指标勾选卡片
+unsafe fn render_metrics_checklist_card(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    font_title: windows::Win32::Graphics::Gdi::HFONT,
+    font_desc: windows::Win32::Graphics::Gdi::HFONT,
+    title: &str,
+    desc: &str,
+    bundle: &crate::rules::LocaleBundle,
+    config: &crate::rules::MonitorConfig,
+    hovered: Option<usize>,
+) {
+    unsafe {
+        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00242424), COLORREF(0x00353535));
+
+        render_card_texts(hdc, left, top, right, top + (36.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
+
+        let items_top = top + (42.0 * scale).round() as i32;
+        let item_h = (26.0 * scale).round() as i32;
+        let col_w = (right - left - (32.0 * scale).round() as i32) / 2;
+        let col1_left = left + (16.0 * scale).round() as i32;
+        let col2_left = col1_left + col_w;
+
+        // 左列 (Net, CPU, Mem)
+        draw_checkbox_item(
+            hdc, col1_left, items_top, col1_left + col_w, items_top + item_h, scale,
+            font_desc, &bundle.monitor.metric_net_label, config.show_network, hovered == Some(31),
+        );
+        draw_checkbox_item(
+            hdc, col1_left, items_top + item_h, col1_left + col_w, items_top + item_h * 2, scale,
+            font_desc, &bundle.monitor.metric_cpu_label, config.show_cpu, hovered == Some(32),
+        );
+        draw_checkbox_item(
+            hdc, col1_left, items_top + item_h * 2, col1_left + col_w, items_top + item_h * 3, scale,
+            font_desc, &bundle.monitor.metric_mem_label, config.show_memory, hovered == Some(33),
+        );
+
+        // 右列 (GPU, Disk)
+        draw_checkbox_item(
+            hdc, col2_left, items_top, col2_left + col_w, items_top + item_h, scale,
+            font_desc, &bundle.monitor.metric_gpu_label, config.show_gpu, hovered == Some(34),
+        );
+        draw_checkbox_item(
+            hdc, col2_left, items_top + item_h, col2_left + col_w, items_top + item_h * 2, scale,
+            font_desc, &bundle.monitor.metric_disk_label, config.show_disk, hovered == Some(35),
+        );
+    }
+}
+
+/// 渲染外观与采样参数卡片
+unsafe fn render_monitor_visual_card(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    font_title: windows::Win32::Graphics::Gdi::HFONT,
+    font_desc: windows::Win32::Graphics::Gdi::HFONT,
+    title: &str,
+    desc: &str,
+    bundle: &crate::rules::LocaleBundle,
+    config: &crate::rules::MonitorConfig,
+    hovered: Option<usize>,
+) {
+    unsafe {
+        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00242424), COLORREF(0x00353535));
+
+        render_card_texts(hdc, left, top, right, top + (34.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
+
+        let row0_top = top + (36.0 * scale).round() as i32;
+        let row1_top = top + (68.0 * scale).round() as i32;
+        let row2_top = top + (100.0 * scale).round() as i32;
+        let row3_top = top + (132.0 * scale).round() as i32;
+        let inner_x = left + (16.0 * scale).round() as i32;
+        let right_pad = (18.0 * scale).round() as i32;
+
+        // 行 0: 任务栏停靠位置 (2段式单选胶囊，防遮挡)
+        SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
+        SetTextColor(hdc, COLORREF(0x00d0d0d0));
+        let mut r0_lbl: Vec<u16> = bundle.monitor.position_label.encode_utf16().collect();
+        let mut r0_rect = RECT {
+            left: inner_x,
+            top: row0_top,
+            right: inner_x + (160.0 * scale).round() as i32,
+            bottom: row0_top + (26.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut r0_lbl, &mut r0_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        let pos_w = (120.0 * scale).round() as i32;
+        let seg_h = (24.0 * scale).round() as i32;
+        let seg_gap = (6.0 * scale).round() as i32;
+        let pos_base_right = right - right_pad;
+        let pos_opts = [
+            (1, MonitorPosition::TaskbarLeft, &bundle.monitor.menu_pos_taskbar_left, 46usize),
+            (0, MonitorPosition::TrayLeft, &bundle.monitor.menu_pos_tray_left, 45usize),
+        ];
+
+        for (rev_i, pos_val, label, hov_id) in pos_opts {
+            let seg_r = pos_base_right - rev_i * (pos_w + seg_gap);
+            let seg_l = seg_r - pos_w;
+            let is_sel = config.position == pos_val;
+            let is_hov = hovered == Some(hov_id);
+
+            let (s_bg, s_bd, s_txt) = if is_sel {
+                (COLORREF(0x00d47800), COLORREF(0x00d47800), COLORREF(0x00ffffff))
+            } else if is_hov {
+                (COLORREF(0x00333333), COLORREF(0x00555555), COLORREF(0x00e0e0e0))
+            } else {
+                (COLORREF(0x00282828), COLORREF(0x003d3d3d), COLORREF(0x00909090))
+            };
+
+            let seg_rect = RECT { left: seg_l, top: row0_top, right: seg_r, bottom: row0_top + seg_h };
+            render_rounded_button(hdc, &seg_rect, label, font_desc, s_bg, s_txt, Some(s_bd), (4.0 * scale).round() as i32);
+        }
+
+        // 行 1: 采样刷新频率 (3段式单选胶囊)
+        SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
+        SetTextColor(hdc, COLORREF(0x00d0d0d0));
+        let mut r1_lbl: Vec<u16> = bundle.monitor.interval_label.encode_utf16().collect();
+        let mut r1_rect = RECT {
+            left: inner_x,
+            top: row1_top,
+            right: inner_x + (160.0 * scale).round() as i32,
+            bottom: row1_top + (26.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut r1_lbl, &mut r1_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        let seg_w = (84.0 * scale).round() as i32;
+        let seg_h = (24.0 * scale).round() as i32;
+        let seg_gap = (6.0 * scale).round() as i32;
+        let seg_base_right = right - right_pad;
+        let seg_opts = [
+            (2, 1000u64, &bundle.monitor.interval_1s, 40usize),
+            (1, 3000u64, &bundle.monitor.interval_3s, 41usize),
+            (0, 5000u64, &bundle.monitor.interval_5s, 42usize),
+        ];
+
+        for (rev_i, val, label, hov_id) in seg_opts {
+            let seg_r = seg_base_right - rev_i * (seg_w + seg_gap);
+            let seg_l = seg_r - seg_w;
+            let is_sel = config.refresh_interval_ms == val;
+            let is_hov = hovered == Some(hov_id);
+
+            let (s_bg, s_bd, s_txt) = if is_sel {
+                (COLORREF(0x00d47800), COLORREF(0x00d47800), COLORREF(0x00ffffff))
+            } else if is_hov {
+                (COLORREF(0x00333333), COLORREF(0x00555555), COLORREF(0x00e0e0e0))
+            } else {
+                (COLORREF(0x00282828), COLORREF(0x003d3d3d), COLORREF(0x00909090))
+            };
+
+            let seg_rect = RECT { left: seg_l, top: row1_top, right: seg_r, bottom: row1_top + seg_h };
+            render_rounded_button(hdc, &seg_rect, label, font_desc, s_bg, s_txt, Some(s_bd), (4.0 * scale).round() as i32);
+        }
+
+        // 行 2: 实时历史波形折线图 Toggle (ID 43)
+        SetTextColor(hdc, COLORREF(0x00d0d0d0));
+        let mut r2_lbl: Vec<u16> = bundle.monitor.graph_bg_label.encode_utf16().collect();
+        let mut r2_rect = RECT {
+            left: inner_x,
+            top: row2_top,
+            right: inner_x + (280.0 * scale).round() as i32,
+            bottom: row2_top + (24.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut r2_lbl, &mut r2_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        let sw_w = (46.0 * scale).round() as i32;
+        let sw_h = (22.0 * scale).round() as i32;
+        let sw_right = right - right_pad;
+        let sw_left = sw_right - sw_w;
+        let sw_cy = row2_top + sw_h / 2;
+        let sw_top = sw_cy - sw_h / 2;
+        let sw_bottom = sw_top + sw_h;
+
+        let is_on = config.show_graph_bg;
+        let (sw_bg, sw_border) = if is_on {
+            (COLORREF(0x00d47800), COLORREF(0x00d47800))
+        } else {
+            (COLORREF(0x00323232), COLORREF(0x00525252))
+        };
+        draw_fluent_box(hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border);
+
+        let thumb_margin = (2.0 * scale).round() as i32;
+        let thumb_radius = (sw_h - thumb_margin * 2) / 2;
+        let thumb_cx = if is_on {
+            sw_right - thumb_margin - thumb_radius
+        } else {
+            sw_left + thumb_margin + thumb_radius
+        };
+        let thumb_brush = CreateSolidBrush(COLORREF(0x00ffffff));
+        let thumb_pen = CreatePen(PS_NULL, 0, COLORREF(0));
+        let old_b = SelectObject(hdc, HGDIOBJ(thumb_brush.0 as _));
+        let old_p = SelectObject(hdc, HGDIOBJ(thumb_pen.0 as _));
+        let _ = RoundRect(
+            hdc, thumb_cx - thumb_radius, sw_cy - thumb_radius,
+            thumb_cx + thumb_radius + 1, sw_cy + thumb_radius + 1,
+            thumb_radius * 2, thumb_radius * 2,
+        );
+        let _ = SelectObject(hdc, old_b);
+        let _ = SelectObject(hdc, old_p);
+        let _ = DeleteObject(HGDIOBJ(thumb_brush.0 as _));
+        let _ = DeleteObject(HGDIOBJ(thumb_pen.0 as _));
+
+        // 行 3: 监控面板透明度 Slider (ID 44)
+        SetTextColor(hdc, COLORREF(0x00d0d0d0));
+        let mut r3_lbl: Vec<u16> = bundle.monitor.opacity_label.encode_utf16().collect();
+        let mut r3_rect = RECT {
+            left: inner_x,
+            top: row3_top,
+            right: inner_x + (160.0 * scale).round() as i32,
+            bottom: row3_top + (24.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut r3_lbl, &mut r3_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        let slider_w = (140.0 * scale).round() as i32;
+        let track_right = right - right_pad;
+        let track_left = track_right - slider_w;
+
+        let pct = config.opacity.clamp(50, 100);
+        let pct_str = format!("{}%", pct);
+        let mut pct_buf: Vec<u16> = pct_str.encode_utf16().collect();
+        let mut pct_rect = RECT {
+            left: track_left - (50.0 * scale).round() as i32,
+            top: row3_top,
+            right: track_left - (8.0 * scale).round() as i32,
+            bottom: row3_top + (24.0 * scale).round() as i32,
+        };
+        SetTextColor(hdc, COLORREF(0x0050d268));
+        DrawTextW(hdc, &mut pct_buf, &mut pct_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+        let track_cy = row3_top + (12.0 * scale).round() as i32;
+        let track_h = (4.0 * scale).round() as i32;
+        let track_rect = RECT {
+            left: track_left,
+            top: track_cy - track_h / 2,
+            right: track_right,
+            bottom: track_cy + track_h / 2,
+        };
+        let bg_track_brush = CreateSolidBrush(COLORREF(0x00404040));
+        FillRect(hdc, &track_rect, bg_track_brush);
+        let _ = DeleteObject(HGDIOBJ(bg_track_brush.0 as _));
+
+        let ratio = ((pct as f32 - 50.0) / 50.0).clamp(0.0, 1.0);
+        let thumb_x = track_left + (ratio * slider_w as f32).round() as i32;
+
+        let active_track_rect = RECT {
+            left: track_left,
+            top: track_cy - track_h / 2,
+            right: thumb_x,
+            bottom: track_cy + track_h / 2,
+        };
+        let active_brush = CreateSolidBrush(COLORREF(0x00d47800));
+        FillRect(hdc, &active_track_rect, active_brush);
+        let _ = DeleteObject(HGDIOBJ(active_brush.0 as _));
+
+        let thumb_r = (6.0 * scale).round() as i32;
+        let thumb_rect = RECT {
+            left: thumb_x - thumb_r,
+            top: track_cy - thumb_r,
+            right: thumb_x + thumb_r,
+            bottom: track_cy + thumb_r,
+        };
+        let thumb_brush = CreateSolidBrush(COLORREF(0x00ffffff));
+        FillRect(hdc, &thumb_rect, thumb_brush);
+        let _ = DeleteObject(HGDIOBJ(thumb_brush.0 as _));
+    }
+}
+
+/// 渲染交互快捷操作与特性说明卡片
+unsafe fn render_monitor_tips_card(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    font_bold: windows::Win32::Graphics::Gdi::HFONT,
+    font_small: windows::Win32::Graphics::Gdi::HFONT,
+) {
+    unsafe {
+        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00212121), COLORREF(0x00343434));
+
+        let inner_x = left + (16.0 * scale).round() as i32;
+
+        SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
+        SetTextColor(hdc, COLORREF(0x0050d268));
+        let mut title_buf: Vec<u16> = "💡 高效交互与智能特性指南".encode_utf16().collect();
+        let mut title_rect = RECT {
+            left: inner_x,
+            top: top + (8.0 * scale).round() as i32,
+            right: right - (16.0 * scale).round() as i32,
+            bottom: top + (26.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        SetTextColor(hdc, COLORREF(0x009e9e9e));
+
+        let tips = [
+            "• 双击直接调出系统任务管理器；右键菜单可快速切换常驻指标与停靠位置",
+            "• 鼠标悬停弹出 Fluent 硬件详情看板；全屏应用与 3D 游戏智能避让隐匿",
+        ];
+
+        let line_h = (18.0 * scale).round() as i32;
+        let mut tip_top = top + (30.0 * scale).round() as i32;
+        for tip in tips {
+            let mut buf: Vec<u16> = tip.encode_utf16().collect();
+            let mut r = RECT {
+                left: inner_x,
+                top: tip_top,
+                right: right - (16.0 * scale).round() as i32,
+                bottom: tip_top + line_h,
+            };
+            DrawTextW(hdc, &mut buf, &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            tip_top += line_h + (2.0 * scale).round() as i32;
+        }
+    }
+}
+
 /// 鼠标悬停位置探测与手型光标切换
 fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
@@ -1167,17 +1699,15 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let pad_x = (28.0 * scale).round() as i32;
 
     let card_w = rect.right - pad_x * 2;
-    let card_h = (56.0 * scale).round() as i32;
     let card_gap = (8.0 * scale).round() as i32;
-    let card_top_base = (70.0 * scale).round() as i32;
 
-    let card0_top = card_top_base;
-    let card1_top = card0_top + card_h + card_gap;
-    let card2_top = card1_top + card_h + card_gap;
-    let card3_top = card2_top + card_h + card_gap;
-    let card4_top = card3_top + card_h + card_gap;
-    let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-    let about_h = (104.0 * scale).round() as i32;
+    // 顶部 Tab 栏坐标
+    let tab_y = (56.0 * scale).round() as i32;
+    let tab_h = (30.0 * scale).round() as i32;
+    let tab_w = (116.0 * scale).round() as i32;
+    let tab_gap = (8.0 * scale).round() as i32;
+    let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
+    let card_top_base = line_y + (10.0 * scale).round() as i32;
 
     let bottom_pad = (22.0 * scale).round() as i32;
     let btn_h = (34.0 * scale).round() as i32;
@@ -1191,8 +1721,12 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let btn_ok_right = btn_cancel_left - btn_gap;
     let btn_ok_left = btn_ok_right - btn_w;
 
-    // 如果下拉层处于展开状态，优先处理下拉列表项的悬停检测
-    if IS_DROPDOWN_OPEN.load(Ordering::SeqCst) {
+    let current_tab = CURRENT_TAB.lock().map(|t| *t).unwrap_or(SettingsTab::General);
+
+    // 如果下拉层处于展开状态（仅在 General Tab），优先处理下拉列表项的悬停检测
+    if current_tab == SettingsTab::General && IS_DROPDOWN_OPEN.load(Ordering::SeqCst) {
+        let card_h = (56.0 * scale).round() as i32;
+        let card4_top = card_top_base + (card_h + card_gap) * 4;
         let combo_w = (170.0 * scale).round() as i32;
         let combo_h = (30.0 * scale).round() as i32;
         let right_pad = (16.0 * scale).round() as i32;
@@ -1316,6 +1850,48 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
+            DragMode::MonitorMasterToggle { start_x, initial_state, ref mut has_moved } => {
+                let dx = x - start_x;
+                if dx.abs() > 4 {
+                    *has_moved = true;
+                }
+                let mut config = get_draft_config();
+                let new_state = if dx > 8 {
+                    true
+                } else if dx < -8 {
+                    false
+                } else {
+                    initial_state
+                };
+                if config.monitor.enabled != new_state {
+                    config.monitor.enabled = new_state;
+                    set_draft_config(config);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+                return;
+            }
+            DragMode::MonitorOpacitySlider => {
+                let slider_w = (140.0 * scale).round() as i32;
+                let right_pad = (18.0 * scale).round() as i32;
+                let track_right = rect.right - pad_x - right_pad;
+                let track_left = track_right - slider_w;
+
+                let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
+                let new_val = (50.0 + ratio * 50.0).round() as u8;
+
+                let mut config = get_draft_config();
+                if config.monitor.opacity != new_val {
+                    config.monitor.opacity = new_val;
+                    set_draft_config(config);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        let _ = UpdateWindow(hwnd);
+                    }
+                }
+                return;
+            }
             DragMode::None => {}
         }
     }
@@ -1324,53 +1900,175 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let mut new_hover = None;
     let mut is_pointer = false;
 
-    if x >= pad_x && x <= pad_x + card_w {
-        if y >= card0_top && y <= card0_top + card_h {
-            new_hover = Some(0);
+    // 1. 顶部 Tab 选项卡检测
+    if y >= tab_y && y <= tab_y + tab_h {
+        let tab0_r = pad_x + tab_w;
+        let tab1_l = tab0_r + tab_gap;
+        let tab1_r = tab1_l + tab_w;
+        if x >= pad_x && x <= tab0_r {
+            new_hover = Some(100);
             is_pointer = true;
-        } else if y >= card1_top && y <= card1_top + card_h {
-            new_hover = Some(1);
+        } else if x >= tab1_l && x <= tab1_r {
+            new_hover = Some(101);
             is_pointer = true;
-        } else if y >= card2_top && y <= card2_top + card_h {
-            new_hover = Some(2);
-            is_pointer = true;
-        } else if y >= card3_top && y <= card3_top + card_h {
-            new_hover = Some(3);
-            is_pointer = true;
-        } else if y >= card4_top && y <= card4_top + card_h {
-            let combo_w = (170.0 * scale).round() as i32;
-            let combo_h = (30.0 * scale).round() as i32;
-            let right_pad = (16.0 * scale).round() as i32;
-            let combo_right = pad_x + card_w - right_pad;
-            let combo_left = combo_right - combo_w;
-            let combo_cy = card4_top + card_h / 2;
-            let combo_top = combo_cy - combo_h / 2;
-            let combo_bottom = combo_top + combo_h;
+        }
+    }
 
-            if x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom {
-                new_hover = Some(4);
-                is_pointer = true;
+    // 2. 根据 Tab 内容检测卡片与交互控件
+    match current_tab {
+        SettingsTab::General => {
+            let card_h = (56.0 * scale).round() as i32;
+            let card0_top = card_top_base;
+            let card1_top = card0_top + card_h + card_gap;
+            let card2_top = card1_top + card_h + card_gap;
+            let card3_top = card2_top + card_h + card_gap;
+            let card4_top = card3_top + card_h + card_gap;
+            let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
+            let about_h = (104.0 * scale).round() as i32;
+
+            if x >= pad_x && x <= pad_x + card_w {
+                if y >= card0_top && y <= card0_top + card_h {
+                    new_hover = Some(0);
+                    is_pointer = true;
+                } else if y >= card1_top && y <= card1_top + card_h {
+                    new_hover = Some(1);
+                    is_pointer = true;
+                } else if y >= card2_top && y <= card2_top + card_h {
+                    new_hover = Some(2);
+                    is_pointer = true;
+                } else if y >= card3_top && y <= card3_top + card_h {
+                    new_hover = Some(3);
+                    is_pointer = true;
+                } else if y >= card4_top && y <= card4_top + card_h {
+                    let combo_w = (170.0 * scale).round() as i32;
+                    let combo_h = (30.0 * scale).round() as i32;
+                    let right_pad = (16.0 * scale).round() as i32;
+                    let combo_right = pad_x + card_w - right_pad;
+                    let combo_left = combo_right - combo_w;
+                    let combo_cy = card4_top + card_h / 2;
+                    let combo_top = combo_cy - combo_h / 2;
+                    let combo_bottom = combo_top + combo_h;
+
+                    if x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom {
+                        new_hover = Some(4);
+                        is_pointer = true;
+                    }
+                } else if y >= card5_top && y <= card5_top + about_h {
+                    let logo_w = ((about_h as f32) * 0.8).round() as i32;
+                    let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
+                    let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
+
+                    let web_top = card5_top + (32.0 * scale).round() as i32;
+                    let web_bottom = card5_top + (50.0 * scale).round() as i32;
+                    let gh_top = card5_top + (53.0 * scale).round() as i32;
+                    let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+
+                    if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
+                        new_hover = Some(20);
+                        is_pointer = true;
+                    } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
+                        new_hover = Some(21);
+                        is_pointer = true;
+                    }
+                }
             }
-        } else if y >= card5_top && y <= card5_top + about_h {
-            let logo_w = ((about_h as f32) * 0.8).round() as i32;
-            let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
-            let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
+        }
+        SettingsTab::Monitor => {
+            let card_m0_top = card_top_base;
+            let card_m0_h = (56.0 * scale).round() as i32;
+            let card_m1_top = card_m0_top + card_m0_h + card_gap;
+            let card_m1_h = (130.0 * scale).round() as i32;
+            let card_m2_top = card_m1_top + card_m1_h + card_gap;
+            let card_m2_h = (140.0 * scale).round() as i32;
 
-            let web_top = card5_top + (32.0 * scale).round() as i32;
-            let web_bottom = card5_top + (50.0 * scale).round() as i32;
-            let gh_top = card5_top + (53.0 * scale).round() as i32;
-            let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+            if x >= pad_x && x <= pad_x + card_w {
+                if y >= card_m0_top && y <= card_m0_top + card_m0_h {
+                    new_hover = Some(30);
+                    is_pointer = true;
+                } else if y >= card_m1_top && y <= card_m1_top + card_m1_h {
+                    let items_top = card_m1_top + (42.0 * scale).round() as i32;
+                    let item_h = (26.0 * scale).round() as i32;
+                    let col_w = (card_w - (32.0 * scale).round() as i32) / 2;
+                    let col1_left = pad_x + (16.0 * scale).round() as i32;
+                    let col2_left = col1_left + col_w;
 
-            if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
-                new_hover = Some(20);
-                is_pointer = true;
-            } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
-                new_hover = Some(21);
-                is_pointer = true;
+                    if y >= items_top && y <= items_top + item_h * 3 {
+                        let row = ((y - items_top) / item_h) as usize;
+                        if x >= col1_left && x <= col1_left + col_w {
+                            match row {
+                                0 => { new_hover = Some(31); is_pointer = true; }
+                                1 => { new_hover = Some(32); is_pointer = true; }
+                                2 => { new_hover = Some(33); is_pointer = true; }
+                                _ => {}
+                            }
+                        } else if x >= col2_left && x <= col2_left + col_w {
+                            match row {
+                                0 => { new_hover = Some(34); is_pointer = true; }
+                                1 => { new_hover = Some(35); is_pointer = true; }
+                                _ => {}
+                            }
+                        }
+                    }
+                } else if y >= card_m2_top && y <= card_m2_top + card_m2_h {
+                    let row0_top = card_m2_top + (36.0 * scale).round() as i32;
+                    let row1_top = card_m2_top + (68.0 * scale).round() as i32;
+                    let row2_top = card_m2_top + (100.0 * scale).round() as i32;
+                    let row3_top = card_m2_top + (132.0 * scale).round() as i32;
+                    let right_pad = (18.0 * scale).round() as i32;
+
+                    // 行 0: 2个停靠位置胶囊 (ID 45 / 46)
+                    if y >= row0_top && y <= row0_top + (24.0 * scale).round() as i32 {
+                        let pos_w = (120.0 * scale).round() as i32;
+                        let seg_gap = (6.0 * scale).round() as i32;
+                        let pos_base_right = pad_x + card_w - right_pad;
+                        let pos_opts = [(1, 46usize), (0, 45usize)];
+                        for (rev_i, hov_id) in pos_opts {
+                            let seg_r = pos_base_right - rev_i * (pos_w + seg_gap);
+                            let seg_l = seg_r - pos_w;
+                            if x >= seg_l && x <= seg_r {
+                                new_hover = Some(hov_id);
+                                is_pointer = true;
+                                break;
+                            }
+                        }
+                    }
+                    // 行 1: 3个单选胶囊 (ID 40 / 41 / 42)
+                    else if y >= row1_top && y <= row1_top + (24.0 * scale).round() as i32 {
+                        let seg_w = (84.0 * scale).round() as i32;
+                        let seg_gap = (6.0 * scale).round() as i32;
+                        let seg_base_right = pad_x + card_w - right_pad;
+                        let seg_opts = [(2, 40usize), (1, 41usize), (0, 42usize)];
+                        for (rev_i, hov_id) in seg_opts {
+                            let seg_r = seg_base_right - rev_i * (seg_w + seg_gap);
+                            let seg_l = seg_r - seg_w;
+                            if x >= seg_l && x <= seg_r {
+                                new_hover = Some(hov_id);
+                                is_pointer = true;
+                                break;
+                            }
+                        }
+                    }
+                    // 行 2: 波形 Toggle
+                    else if y >= row2_top && y <= row2_top + (24.0 * scale).round() as i32 {
+                        new_hover = Some(43);
+                        is_pointer = true;
+                    }
+                    // 行 3: 透明度 Slider
+                    else if y >= row3_top && y <= row3_top + (24.0 * scale).round() as i32 {
+                        let slider_w = (140.0 * scale).round() as i32;
+                        let track_right = pad_x + card_w - right_pad;
+                        let track_left = track_right - slider_w;
+                        if x >= track_left - (10.0 * scale) as i32 && x <= track_right + (10.0 * scale) as i32 {
+                            new_hover = Some(44);
+                            is_pointer = true;
+                        }
+                    }
+                }
             }
         }
     }
 
+    // 3. 底部确定与取消按钮检测
     if y >= btn_top && y <= btn_bottom {
         if x >= btn_ok_left && x <= btn_ok_right {
             new_hover = Some(10);
@@ -1426,244 +2124,422 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
     let pad_x = (28.0 * scale).round() as i32;
 
     let card_w = rect.right - pad_x * 2;
-    let card_h = (56.0 * scale).round() as i32;
     let card_gap = (8.0 * scale).round() as i32;
-    let card_top_base = (70.0 * scale).round() as i32;
 
-    let card0_top = card_top_base;
-    let card1_top = card0_top + card_h + card_gap;
-    let card2_top = card1_top + card_h + card_gap;
-    let card3_top = card2_top + card_h + card_gap;
-    let card4_top = card3_top + card_h + card_gap;
-    let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-    let about_h = (104.0 * scale).round() as i32;
+    let tab_y = (56.0 * scale).round() as i32;
+    let tab_h = (30.0 * scale).round() as i32;
+    let tab_w = (116.0 * scale).round() as i32;
+    let tab_gap = (8.0 * scale).round() as i32;
+    let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
+    let card_top_base = line_y + (10.0 * scale).round() as i32;
 
-    let is_dropdown_open = IS_DROPDOWN_OPEN.load(Ordering::SeqCst);
-    let combo_w = (170.0 * scale).round() as i32;
-    let combo_h = (30.0 * scale).round() as i32;
-    let right_pad = (16.0 * scale).round() as i32;
-    let combo_right = pad_x + card_w - right_pad;
-    let combo_left = combo_right - combo_w;
-    let combo_cy = card4_top + card_h / 2;
-    let combo_top = combo_cy - combo_h / 2;
-    let combo_bottom = combo_top + combo_h;
+    let current_tab = CURRENT_TAB.lock().map(|t| *t).unwrap_or(SettingsTab::General);
 
-    // 如果下拉选项层处于展开状态，优先处理其点击或外部点击收起
-    if is_dropdown_open {
-        let avail = I18n::get_available_languages();
-        let mut lang_options = vec![("auto".to_string(), "自动跟随系统 (Auto)".to_string())];
-        for (code, name) in avail {
-            if !lang_options.iter().any(|(c, _)| c == &code) {
-                lang_options.push((code, name));
+    // 1. 顶部 Tab 选项卡点击
+    if y >= tab_y && y <= tab_y + tab_h {
+        let tab0_r = pad_x + tab_w;
+        let tab1_l = tab0_r + tab_gap;
+        let tab1_r = tab1_l + tab_w;
+        if x >= pad_x && x <= tab0_r {
+            if let Ok(mut t) = CURRENT_TAB.lock() {
+                *t = SettingsTab::General;
             }
-        }
-
-        let item_h = (28.0 * scale).round() as i32;
-        let list_pad = (4.0 * scale).round() as i32;
-        let list_top = combo_bottom + (3.0 * scale).round() as i32;
-        let list_h = item_h * lang_options.len() as i32 + list_pad * 2;
-        let list_bottom = list_top + list_h;
-        let list_left = combo_left;
-        let list_right = list_left + combo_w;
-
-        // 1. 点击在选项列表中
-        if x >= list_left && x <= list_right && y >= list_top && y <= list_bottom {
-            let offset_y = y - list_top - list_pad;
-            if offset_y >= 0 {
-                let clicked_idx = (offset_y / item_h) as usize;
-                if let Some((code, _)) = lang_options.get(clicked_idx) {
-                    config.language = Language::from_code(code);
-                    set_draft_config(config);
-                }
-            }
-            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                let _ = UpdateWindow(hwnd);
-            }
-            return;
-        }
-
-        // 2. 点击在下拉框本身：切换收起
-        if x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom {
-            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                let _ = UpdateWindow(hwnd);
-            }
-            return;
-        }
-
-        // 3. 点击外部任何区域：自动收起
-        IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
-        unsafe {
-            let _ = InvalidateRect(Some(hwnd), None, false);
-            let _ = UpdateWindow(hwnd);
-        }
-        return;
-    }
-
-    // 点击卡片 0: 自动秒切路径（支持点击与拖拽左右滑块）
-    if x >= pad_x && x <= pad_x + card_w && y >= card0_top && y <= card0_top + card_h {
-        let old_state = config.auto_switch_enabled;
-        config.auto_switch_enabled = !old_state;
-        set_draft_config(config);
-        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-        need_redraw = true;
-
-        if let Ok(mut drag) = DRAG_MODE.lock() {
-            *drag = DragMode::AutoSwitchToggle {
-                start_x: x,
-                initial_state: old_state,
-                has_moved: false,
-            };
-        }
-        unsafe {
-            let _ = SetCapture(hwnd);
-        }
-    }
-    // 点击卡片 1: 唤出快捷键（开启/取消按键录制）
-    else if x >= pad_x && x <= pad_x + card_w && y >= card1_top && y <= card1_top + card_h {
-        let is_rec = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
-        IS_RECORDING_HOTKEY.store(!is_rec, Ordering::SeqCst);
-        need_redraw = true;
-    }
-    // 点击卡片 2: 开机静默自启（支持点击与拖拽左右滑块）
-    else if x >= pad_x && x <= pad_x + card_w && y >= card2_top && y <= card2_top + card_h {
-        let old_state = config.autostart_enabled;
-        config.autostart_enabled = !old_state;
-        set_draft_config(config);
-        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-        need_redraw = true;
-
-        if let Ok(mut drag) = DRAG_MODE.lock() {
-            *drag = DragMode::AutostartToggle {
-                start_x: x,
-                initial_state: old_state,
-                has_moved: false,
-            };
-        }
-        unsafe {
-            let _ = SetCapture(hwnd);
-        }
-    }
-    // 点击卡片 3: 透明度调节滑块
-    else if x >= pad_x && x <= pad_x + card_w && y >= card3_top && y <= card3_top + card_h {
-        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-        let slider_w = (140.0 * scale).round() as i32;
-        let track_right = rect.right - pad_x - (18.0 * scale).round() as i32;
-        let track_left = track_right - slider_w;
-
-        if x >= track_left - (20.0 * scale) as i32 && x <= track_right + (20.0 * scale) as i32 {
-            let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
-            let new_val = (40.0 + ratio * 60.0).round() as u8;
-            config.floating_bar_opacity = new_val;
-            set_draft_config(config);
-            need_redraw = true;
-
-            if let Ok(mut drag) = DRAG_MODE.lock() {
-                *drag = DragMode::OpacitySlider;
-            }
-            unsafe {
-                let _ = SetCapture(hwnd);
-            }
-        }
-    }
-    // 点击卡片 4: 界面语言下拉菜单 (Dropdown)
-    else if y >= card4_top && y <= card4_top + card_h {
-        // 严格限定：只有点击在右侧下拉框区域内才展开！
-        if x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom {
             IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-            IS_DROPDOWN_OPEN.store(true, Ordering::SeqCst);
-            need_redraw = true;
-        }
-    }
-    // 点击卡片 5: 关于卡片内的官网链接与 GitHub 开源主页链接
-    else if y >= card5_top && y <= card5_top + about_h {
-        let logo_w = ((about_h as f32) * 0.8).round() as i32;
-        let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
-        let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
-
-        let web_top = card5_top + (32.0 * scale).round() as i32;
-        let web_bottom = card5_top + (50.0 * scale).round() as i32;
-        let gh_top = card5_top + (53.0 * scale).round() as i32;
-        let gh_bottom = card5_top + (72.0 * scale).round() as i32;
-
-        if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
-            let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
-            let op: Vec<u16> = "open\0".encode_utf16().collect();
+            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
             unsafe {
-                ShellExecuteW(
-                    None,
-                    windows::core::PCWSTR(op.as_ptr()),
-                    windows::core::PCWSTR(url.as_ptr()),
-                    windows::core::PCWSTR::null(),
-                    windows::core::PCWSTR::null(),
-                    SW_SHOW,
-                );
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                let _ = UpdateWindow(hwnd);
             }
             return;
-        } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
-            let url: Vec<u16> = "https://github.com/clhome/QuickPath\0".encode_utf16().collect();
-            let op: Vec<u16> = "open\0".encode_utf16().collect();
+        } else if x >= tab1_l && x <= tab1_r {
+            if let Ok(mut t) = CURRENT_TAB.lock() {
+                *t = SettingsTab::Monitor;
+            }
+            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
             unsafe {
-                ShellExecuteW(
-                    None,
-                    windows::core::PCWSTR(op.as_ptr()),
-                    windows::core::PCWSTR(url.as_ptr()),
-                    windows::core::PCWSTR::null(),
-                    windows::core::PCWSTR::null(),
-                    SW_SHOW,
-                );
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                let _ = UpdateWindow(hwnd);
             }
             return;
         }
     }
-    else {
-        // 按钮区域点击判定（使用沉底坐标）
-        let bottom_pad = (22.0 * scale).round() as i32;
-        let btn_h = (34.0 * scale).round() as i32;
-        let btn_bottom = rect.bottom - bottom_pad;
-        let btn_top = btn_bottom - btn_h;
-        let btn_w = (98.0 * scale).round() as i32;
-        let btn_gap = (12.0 * scale).round() as i32;
 
-        let btn_cancel_right = rect.right - pad_x;
-        let btn_cancel_left = btn_cancel_right - btn_w;
-        let btn_ok_right = btn_cancel_left - btn_gap;
-        let btn_ok_left = btn_ok_right - btn_w;
+    // 2. 根据 Tab 内容分流处理
+    match current_tab {
+        SettingsTab::General => {
+            let card_h = (56.0 * scale).round() as i32;
+            let card0_top = card_top_base;
+            let card1_top = card0_top + card_h + card_gap;
+            let card2_top = card1_top + card_h + card_gap;
+            let card3_top = card2_top + card_h + card_gap;
+            let card4_top = card3_top + card_h + card_gap;
+            let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
+            let about_h = (104.0 * scale).round() as i32;
 
-        if y >= btn_top && y <= btn_bottom {
-            if x >= btn_ok_left && x <= btn_ok_right {
-                // 点击「确定」：执行保存与全局热同步
-                let old_config = crate::get_global_config();
-                if config.autostart_enabled != old_config.autostart_enabled
-                    || config.autostart_task_scheduler != old_config.autostart_task_scheduler
-                {
-                    let _ = set_autostart(config.autostart_enabled, config.autostart_task_scheduler);
+            let is_dropdown_open = IS_DROPDOWN_OPEN.load(Ordering::SeqCst);
+            let combo_w = (170.0 * scale).round() as i32;
+            let combo_h = (30.0 * scale).round() as i32;
+            let right_pad = (16.0 * scale).round() as i32;
+            let combo_right = pad_x + card_w - right_pad;
+            let combo_left = combo_right - combo_w;
+            let combo_cy = card4_top + card_h / 2;
+            let combo_top = combo_cy - combo_h / 2;
+            let combo_bottom = combo_top + combo_h;
+
+            if is_dropdown_open {
+                let avail = I18n::get_available_languages();
+                let mut lang_options = vec![("auto".to_string(), "自动跟随系统 (Auto)".to_string())];
+                for (code, name) in avail {
+                    if !lang_options.iter().any(|(c, _)| c == &code) {
+                        lang_options.push((code, name));
+                    }
                 }
-                let _ = config.save();
-                crate::update_global_config(config);
-                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-                if let Ok(mut drag) = DRAG_MODE.lock() {
-                    *drag = DragMode::None;
+
+                let item_h = (28.0 * scale).round() as i32;
+                let list_pad = (4.0 * scale).round() as i32;
+                let list_top = combo_bottom + (3.0 * scale).round() as i32;
+                let list_h = item_h * lang_options.len() as i32 + list_pad * 2;
+                let list_bottom = list_top + list_h;
+                let list_left = combo_left;
+                let list_right = list_left + combo_w;
+
+                if x >= list_left && x <= list_right && y >= list_top && y <= list_bottom {
+                    let offset_y = y - list_top - list_pad;
+                    if offset_y >= 0 {
+                        let clicked_idx = (offset_y / item_h) as usize;
+                        if let Some((code, _)) = lang_options.get(clicked_idx) {
+                            config.language = Language::from_code(code);
+                            set_draft_config(config);
+                        }
+                    }
+                    IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        let _ = UpdateWindow(hwnd);
+                    }
+                    return;
                 }
+
+                if x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom {
+                    IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        let _ = UpdateWindow(hwnd);
+                    }
+                    return;
+                }
+
+                IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
                 unsafe {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                }
-                return;
-            } else if x >= btn_cancel_left && x <= btn_cancel_right {
-                // 点击「取消」：恢复生效配置
-                set_draft_config(crate::get_global_config());
-                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-                if let Ok(mut drag) = DRAG_MODE.lock() {
-                    *drag = DragMode::None;
-                }
-                unsafe {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    let _ = UpdateWindow(hwnd);
                 }
                 return;
             }
+
+            if x >= pad_x && x <= pad_x + card_w && y >= card0_top && y <= card0_top + card_h {
+                let old_state = config.auto_switch_enabled;
+                config.auto_switch_enabled = !old_state;
+                set_draft_config(config.clone());
+                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                need_redraw = true;
+
+                if let Ok(mut drag) = DRAG_MODE.lock() {
+                    *drag = DragMode::AutoSwitchToggle {
+                        start_x: x,
+                        initial_state: old_state,
+                        has_moved: false,
+                    };
+                }
+                unsafe {
+                    let _ = SetCapture(hwnd);
+                }
+            } else if x >= pad_x && x <= pad_x + card_w && y >= card1_top && y <= card1_top + card_h {
+                let is_rec = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
+                IS_RECORDING_HOTKEY.store(!is_rec, Ordering::SeqCst);
+                need_redraw = true;
+            } else if x >= pad_x && x <= pad_x + card_w && y >= card2_top && y <= card2_top + card_h {
+                let old_state = config.autostart_enabled;
+                config.autostart_enabled = !old_state;
+                set_draft_config(config.clone());
+                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                need_redraw = true;
+
+                if let Ok(mut drag) = DRAG_MODE.lock() {
+                    *drag = DragMode::AutostartToggle {
+                        start_x: x,
+                        initial_state: old_state,
+                        has_moved: false,
+                    };
+                }
+                unsafe {
+                    let _ = SetCapture(hwnd);
+                }
+            } else if x >= pad_x && x <= pad_x + card_w && y >= card3_top && y <= card3_top + card_h {
+                IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                let slider_w = (140.0 * scale).round() as i32;
+                let track_right = rect.right - pad_x - (18.0 * scale).round() as i32;
+                let track_left = track_right - slider_w;
+
+                if x >= track_left - (20.0 * scale) as i32 && x <= track_right + (20.0 * scale) as i32 {
+                    let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
+                    let new_val = (40.0 + ratio * 60.0).round() as u8;
+                    config.floating_bar_opacity = new_val;
+                    set_draft_config(config.clone());
+                    need_redraw = true;
+
+                    if let Ok(mut drag) = DRAG_MODE.lock() {
+                        *drag = DragMode::OpacitySlider;
+                    }
+                    unsafe {
+                        let _ = SetCapture(hwnd);
+                    }
+                }
+            } else if y >= card4_top && y <= card4_top + card_h {
+                if x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom {
+                    IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                    IS_DROPDOWN_OPEN.store(true, Ordering::SeqCst);
+                    need_redraw = true;
+                }
+            } else if y >= card5_top && y <= card5_top + about_h {
+                let logo_w = ((about_h as f32) * 0.8).round() as i32;
+                let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
+                let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
+
+                let web_top = card5_top + (32.0 * scale).round() as i32;
+                let web_bottom = card5_top + (50.0 * scale).round() as i32;
+                let gh_top = card5_top + (53.0 * scale).round() as i32;
+                let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+
+                if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
+                    let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
+                    let op: Vec<u16> = "open\0".encode_utf16().collect();
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            windows::core::PCWSTR(op.as_ptr()),
+                            windows::core::PCWSTR(url.as_ptr()),
+                            windows::core::PCWSTR::null(),
+                            windows::core::PCWSTR::null(),
+                            SW_SHOW,
+                        );
+                    }
+                    return;
+                } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
+                    let url: Vec<u16> = "https://github.com/clhome/QuickPath\0".encode_utf16().collect();
+                    let op: Vec<u16> = "open\0".encode_utf16().collect();
+                    unsafe {
+                        ShellExecuteW(
+                            None,
+                            windows::core::PCWSTR(op.as_ptr()),
+                            windows::core::PCWSTR(url.as_ptr()),
+                            windows::core::PCWSTR::null(),
+                            windows::core::PCWSTR::null(),
+                            SW_SHOW,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+        SettingsTab::Monitor => {
+            let card_m0_top = card_top_base;
+            let card_m0_h = (56.0 * scale).round() as i32;
+            let card_m1_top = card_m0_top + card_m0_h + card_gap;
+            let card_m1_h = (130.0 * scale).round() as i32;
+            let card_m2_top = card_m1_top + card_m1_h + card_gap;
+            let card_m2_h = (140.0 * scale).round() as i32;
+
+            // 点击 M0: 任务栏监控总开关
+            if x >= pad_x && x <= pad_x + card_w && y >= card_m0_top && y <= card_m0_top + card_m0_h {
+                let old_state = config.monitor.enabled;
+                config.monitor.enabled = !old_state;
+                set_draft_config(config.clone());
+                need_redraw = true;
+
+                if let Ok(mut drag) = DRAG_MODE.lock() {
+                    *drag = DragMode::MonitorMasterToggle {
+                        start_x: x,
+                        initial_state: old_state,
+                        has_moved: false,
+                    };
+                }
+                unsafe {
+                    let _ = SetCapture(hwnd);
+                }
+            }
+            // 点击 M1: 常驻指标勾选面板
+            else if x >= pad_x && x <= pad_x + card_w && y >= card_m1_top && y <= card_m1_top + card_m1_h {
+                let items_top = card_m1_top + (42.0 * scale).round() as i32;
+                let item_h = (26.0 * scale).round() as i32;
+                let col_w = (card_w - (32.0 * scale).round() as i32) / 2;
+                let col1_left = pad_x + (16.0 * scale).round() as i32;
+                let col2_left = col1_left + col_w;
+
+                if y >= items_top && y <= items_top + item_h * 3 {
+                    let row = ((y - items_top) / item_h) as usize;
+                    if x >= col1_left && x <= col1_left + col_w {
+                        match row {
+                            0 => config.monitor.show_network = !config.monitor.show_network,
+                            1 => config.monitor.show_cpu = !config.monitor.show_cpu,
+                            2 => config.monitor.show_memory = !config.monitor.show_memory,
+                            _ => {}
+                        }
+                        // 防呆保护：至少保留 1 项开启
+                        if !config.monitor.show_network && !config.monitor.show_cpu && !config.monitor.show_memory && !config.monitor.show_gpu && !config.monitor.show_disk {
+                            match row {
+                                0 => config.monitor.show_network = true,
+                                1 => config.monitor.show_cpu = true,
+                                2 => config.monitor.show_memory = true,
+                                _ => {}
+                            }
+                        }
+                        set_draft_config(config.clone());
+                        need_redraw = true;
+                    } else if x >= col2_left && x <= col2_left + col_w {
+                        match row {
+                            0 => config.monitor.show_gpu = !config.monitor.show_gpu,
+                            1 => config.monitor.show_disk = !config.monitor.show_disk,
+                            _ => {}
+                        }
+                        if !config.monitor.show_network && !config.monitor.show_cpu && !config.monitor.show_memory && !config.monitor.show_gpu && !config.monitor.show_disk {
+                            match row {
+                                0 => config.monitor.show_gpu = true,
+                                1 => config.monitor.show_disk = true,
+                                _ => {}
+                            }
+                        }
+                        set_draft_config(config.clone());
+                        need_redraw = true;
+                    }
+                }
+            }
+            // 点击 M2: 外观与采样参数面板
+            else if x >= pad_x && x <= pad_x + card_w && y >= card_m2_top && y <= card_m2_top + card_m2_h {
+                let row0_top = card_m2_top + (36.0 * scale).round() as i32;
+                let row1_top = card_m2_top + (68.0 * scale).round() as i32;
+                let row2_top = card_m2_top + (100.0 * scale).round() as i32;
+                let row3_top = card_m2_top + (132.0 * scale).round() as i32;
+                let seg_h = (24.0 * scale).round() as i32;
+                let right_pad = (18.0 * scale).round() as i32;
+
+                // 行 0: 任务栏停靠位置单选胶囊 (防遮挡)
+                if y >= row0_top && y <= row0_top + seg_h {
+                    let pos_w = (120.0 * scale).round() as i32;
+                    let seg_gap = (6.0 * scale).round() as i32;
+                    let pos_base_right = pad_x + card_w - right_pad;
+                    let pos_opts = [
+                        (1, MonitorPosition::TaskbarLeft),
+                        (0, MonitorPosition::TrayLeft),
+                    ];
+                    for (rev_i, pos_val) in pos_opts {
+                        let seg_r = pos_base_right - rev_i * (pos_w + seg_gap);
+                        let seg_l = seg_r - pos_w;
+                        if x >= seg_l && x <= seg_r {
+                            if config.monitor.position != pos_val {
+                                config.monitor.position = pos_val;
+                                set_draft_config(config.clone());
+                                need_redraw = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+                // 行 1: 刷新采样频率胶囊单选
+                else if y >= row1_top && y <= row1_top + seg_h {
+                    let seg_w = (84.0 * scale).round() as i32;
+                    let seg_gap = (6.0 * scale).round() as i32;
+                    let seg_base_right = pad_x + card_w - right_pad;
+                    let seg_opts = [
+                        (2, 1000u64),
+                        (1, 3000u64),
+                        (0, 5000u64),
+                    ];
+                    for (rev_i, val) in seg_opts {
+                        let seg_r = seg_base_right - rev_i * (seg_w + seg_gap);
+                        let seg_l = seg_r - seg_w;
+                        if x >= seg_l && x <= seg_r {
+                            config.monitor.refresh_interval_ms = val;
+                            set_draft_config(config.clone());
+                            need_redraw = true;
+                            break;
+                        }
+                    }
+                }
+                // 行 2: 实时历史波形折线图 Toggle
+                else if y >= row2_top && y <= row2_top + (24.0 * scale).round() as i32 {
+                    config.monitor.show_graph_bg = !config.monitor.show_graph_bg;
+                    set_draft_config(config.clone());
+                    need_redraw = true;
+                }
+                // 行 3: 监控面板透明度 Slider
+                else if y >= row3_top && y <= row3_top + (24.0 * scale).round() as i32 {
+                    let slider_w = (140.0 * scale).round() as i32;
+                    let track_right = pad_x + card_w - right_pad;
+                    let track_left = track_right - slider_w;
+                    if x >= track_left - (20.0 * scale) as i32 && x <= track_right + (20.0 * scale) as i32 {
+                        let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
+                        let new_val = (50.0 + ratio * 50.0).round() as u8;
+                        config.monitor.opacity = new_val;
+                        set_draft_config(config.clone());
+                        need_redraw = true;
+
+                        if let Ok(mut drag) = DRAG_MODE.lock() {
+                            *drag = DragMode::MonitorOpacitySlider;
+                        }
+                        unsafe {
+                            let _ = SetCapture(hwnd);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. 底部「确定」与「取消」按钮点击处理（通用）
+    let bottom_pad = (22.0 * scale).round() as i32;
+    let btn_h = (34.0 * scale).round() as i32;
+    let btn_bottom = rect.bottom - bottom_pad;
+    let btn_top = btn_bottom - btn_h;
+    let btn_w = (98.0 * scale).round() as i32;
+    let btn_gap = (12.0 * scale).round() as i32;
+
+    let btn_cancel_right = rect.right - pad_x;
+    let btn_cancel_left = btn_cancel_right - btn_w;
+    let btn_ok_right = btn_cancel_left - btn_gap;
+    let btn_ok_left = btn_ok_right - btn_w;
+
+    if y >= btn_top && y <= btn_bottom {
+        if x >= btn_ok_left && x <= btn_ok_right {
+            // 点击「确定」：执行保存与全局热同步
+            let old_config = crate::get_global_config();
+            if config.autostart_enabled != old_config.autostart_enabled
+                || config.autostart_task_scheduler != old_config.autostart_task_scheduler
+            {
+                let _ = set_autostart(config.autostart_enabled, config.autostart_task_scheduler);
+            }
+            let _ = config.save();
+            crate::update_global_config(config);
+            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+            if let Ok(mut drag) = DRAG_MODE.lock() {
+                *drag = DragMode::None;
+            }
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            return;
+        } else if x >= btn_cancel_left && x <= btn_cancel_right {
+            // 点击「取消」：恢复生效配置
+            set_draft_config(crate::get_global_config());
+            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+            if let Ok(mut drag) = DRAG_MODE.lock() {
+                *drag = DragMode::None;
+            }
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+            return;
         }
     }
 
