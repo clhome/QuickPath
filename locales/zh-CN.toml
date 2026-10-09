@@ -35,6 +35,8 @@ status_enabled = "已开启"
 status_disabled = "已关闭"
 status_all_ready = "全部适配就绪"
 lang_auto = "自动跟随系统 (中文)"
+debug_mode = "启用调试日志模式 (Debug Logging)"
+debug_mode_desc = "临时排错使用，每次重新打开自动关闭"
 
 [about]
 title = "关于 QuickPath"

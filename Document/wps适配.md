@@ -43,8 +43,8 @@ graph TD
 ```
 
 1. **顶层窗口类名**：
-   - 现代版本统一为：**`KcfdFileDialog`**（即 Kingsoft Common File Dialog，金山通用文件对话框）。
-   - 少数旧版或特定模块可能采用标准 Qt 类名（如 `Qt5QWindowIcon` / `QFileDialog`）。
+   - 现场实测与跨版本验证：WPS 在不同版本或安装渠道下，另存为/打开窗口类名主要呈现为 **`Qt5QWindowIcon`**（如 WPS 12.8.2.18205 现场实测，标题为空自绘，子控件为 0 个）或 **`KcfdFileDialog`**（金山通用文件对话框定制类名），部分早期版本可能使用定制 `#32770`。
+   - 主文档窗口类名：WPS 文字为 `OpusApp`、表格为 `XLMAIN`、演示为 `PP9FrameClass`，需精准过滤排除，不可作为对话框。
 2. **无 HWND 子控件（Windowless Controls）**：
    - Qt 等现代自绘框架内部的控件（如文本框、按钮、列表）**没有独立的 Win32 HWND 句柄**。
    - 使用 Win32 原生的 `EnumChildWindows` 或 `FindWindowEx` 无法枚举出内部输入框。

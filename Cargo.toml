@@ -1,6 +1,6 @@
 [package]
 name = "quickpath"
-version = "1.1.0"
+version = "1.1.1"
 edition = "2024"
 description = "专为 Windows 10/11 打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器"
 authors = ["衢州御风科技有限公司 <https://qp.yftec.top>"]

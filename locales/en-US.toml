@@ -35,6 +35,8 @@ status_enabled = "Enabled"
 status_disabled = "Disabled"
 status_all_ready = "All Ready"
 lang_auto = "Auto (System)"
+debug_mode = "Enable Debug Logging"
+debug_mode_desc = "For diagnostic use only; automatically resets on reopen"
 
 [about]
 title = "About QuickPath"

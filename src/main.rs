@@ -53,14 +53,17 @@ pub struct AppState {
 fn main() {
     unsafe {
         // 1. 单实例互斥体防护，避免多个 QuickPath 驻留冲突
+        crate::dialog::detector::log_debug("=== QuickPath Instance Checking ===");
         let mutex_name = w!("Global\\QuickPath_SingleInstance_Mutex");
         let mutex = CreateMutexW(None, true, mutex_name);
         if mutex.is_err()
             || windows::Win32::Foundation::GetLastError()
                 == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
         {
+            crate::dialog::detector::log_debug("=== QuickPath Exiting: Mutex already exists (another instance is running!) ===");
             return;
         }
+        crate::dialog::detector::log_debug("=== QuickPath Started Successfully (Singleton Acquired) ===");
 
         // 2. 初始化 COM 库与 GDI+ 环境
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -254,6 +257,10 @@ unsafe extern "system" fn host_wnd_proc(
 }
 
 fn on_foreground_window_changed(fg_hwnd: HWND) {
+    on_foreground_window_changed_impl(fg_hwnd, false);
+}
+
+fn on_foreground_window_changed_impl(fg_hwnd: HWND, is_retry: bool) {
     let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
     if state_ptr.is_null() {
         return;
@@ -281,6 +288,11 @@ fn on_foreground_window_changed(fg_hwnd: HWND) {
 
         let candidates = state.tracker.get_all_candidates(&state.config);
 
+        crate::dialog::detector::log_debug(&format!(
+            "MAIN: Dlg detected! hwnd=0x{:X} title='{}' bar_is_some={} candidates={}",
+            dlg_info.hwnd.0 as usize, dlg_info.window_title, state.floating_bar.is_some(), candidates.len()
+        ));
+
         // 3. 需求 3：无论何时打开文件对话框，悬浮吸附条均直接自动展示！
         if let Some(bar) = &mut state.floating_bar {
             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
@@ -302,10 +314,15 @@ fn on_foreground_window_changed(fg_hwnd: HWND) {
         // 4. 执行自动秒切逻辑 (AutoSwitch)
         if state.config.auto_switch_enabled {
             if let Some(target_folder) = state.tracker.get_auto_switch_target(&state.config) {
-                if let Some(edit_hwnd) = dlg_info.file_name_edit_hwnd {
+                let should_inject = match dlg_info.kind {
+                    dialog::DialogKind::StandardWin32 => dlg_info.file_name_edit_hwnd.is_some(),
+                    dialog::DialogKind::WpsOffice => true,
+                };
+
+                if should_inject {
                     let delay_ms = state.config.auto_switch_delay_ms;
                     let dlg_raw = dlg_info.hwnd.0 as usize;
-                    let edit_raw = edit_hwnd.0 as usize;
+                    let edit_raw = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd).0 as usize;
                     let target = target_folder.clone();
 
                     state.last_switched_dialog = Some(dlg_info.hwnd);
@@ -325,21 +342,33 @@ fn on_foreground_window_changed(fg_hwnd: HWND) {
             }
         }
     } else {
-        // 如果检测未立即命中，但当前窗口或其顶层为 #32770，很可能是子控件正在创建，短延时重试
-        if class_name == "#32770" {
-            let hwnd_raw = fg_hwnd.0 as usize;
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(40));
-                let target_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
-                if !target_ptr.is_null() {
-                    let h = HWND(hwnd_raw as *mut _);
-                    on_foreground_window_changed(h);
-                }
-            });
-            return;
+        // 如果检测未立即命中，但当前窗口可能是对话框正在初始化绘制，且未曾重试过，进行单次短延时重试
+        if !is_retry {
+            let (_pid, process_name) = dialog::detector::get_window_process_info(fg_hwnd);
+            let is_wps = dialog::detector::is_wps_process_name(&process_name);
+            let is_wps_main_doc = class_name == "OpusApp" || class_name == "XLMAIN" || class_name == "PP9FrameClass";
+
+            let is_potential_dialog = class_name == "#32770"
+                || class_name == "KcfdFileDialog"
+                || class_name == "Qt5QWindowIcon"
+                || class_name.contains("Kcfd")
+                || (is_wps && !is_wps_main_doc);
+
+            if is_potential_dialog {
+                let hwnd_raw = fg_hwnd.0 as usize;
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(60));
+                    let target_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+                    if !target_ptr.is_null() {
+                        let h = HWND(hwnd_raw as *mut _);
+                        on_foreground_window_changed_impl(h, true);
+                    }
+                });
+                return;
+            }
         }
 
-        // 明确离开对话框时，隐藏悬浮吸附条
+        // 明确离开对话框或重试后仍非对话框时，隐藏悬浮吸附条
         if let Some(bar) = &state.floating_bar {
             bar.hide();
         }

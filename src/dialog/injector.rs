@@ -22,6 +22,17 @@ pub fn inject_path_to_dialog(dialog_hwnd: HWND, edit_hwnd: HWND, target_path: &s
         return false;
     }
 
+    // 针对 WPS Office 自绘对话框或无独立 Edit 句柄的窗口，通过 UI Automation 引擎进行注入
+    let class_name = crate::dialog::detector::get_window_class_name(dialog_hwnd);
+    let has_valid_edit = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(edit_hwnd)).as_bool()
+            && edit_hwnd != dialog_hwnd
+    };
+
+    if class_name == "KcfdFileDialog" || class_name == "Qt5QWindowIcon" || !has_valid_edit {
+        return crate::win32::uia::inject_path_to_wps_dialog(dialog_hwnd, target_path);
+    }
+
     // 格式化为带有单斜杠结尾的目录字符串（用于告知系统对话框进入该目录而非将其当做文件名保存）
     let folder_with_slash = format!("{}\\", clean_path);
 

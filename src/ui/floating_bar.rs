@@ -324,13 +324,18 @@ impl FloatingBar {
     pub fn confirm_selection(&mut self, index: usize) {
         if let Some(target) = self.state.candidates.get(index) {
             let path = target.path.clone();
+            let dlg_hwnd = self.state.target_dialog_hwnd;
+            let edit_hwnd = self.state.target_edit_hwnd;
+            self.hide();
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
+            }
             inject_path_to_dialog(
-                self.state.target_dialog_hwnd,
-                self.state.target_edit_hwnd,
+                dlg_hwnd,
+                edit_hwnd,
                 &path,
             );
         }
-        self.hide();
     }
 }
 
@@ -757,14 +762,17 @@ fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
         if idx < visible_count {
             if let Some(target) = state.candidates.get(idx) {
                 let path = target.path.clone();
+                let dlg_hwnd = state.target_dialog_hwnd;
+                let edit_hwnd = state.target_edit_hwnd;
+                unsafe {
+                    let _ = ShowWindow(state.hwnd, SW_HIDE);
+                    let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
+                }
                 inject_path_to_dialog(
-                    state.target_dialog_hwnd,
-                    state.target_edit_hwnd,
+                    dlg_hwnd,
+                    edit_hwnd,
                     &path,
                 );
-            }
-            unsafe {
-                let _ = ShowWindow(state.hwnd, SW_HIDE);
             }
         }
     }

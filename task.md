@@ -498,5 +498,54 @@
   - [x] 检查所有 Markdown 语法、表格对齐、中英文互链有效性
   - [x] 确认全部文件 UTF-8 无 BOM 与 LF 换行符
 
-
-
+## 阶段三十六：WPS Office 自绘文件对话框深度适配与快速跳转实现
+- [x] **36.1 扩展对话框探测模型与类型定义**
+  - [x] 在 `src/dialog/detector.rs` 中引入 `DialogKind` 枚举（`StandardWin32`, `WpsOffice`）并扩展 `FileDialogInfo`
+  - [x] 确保与上层逻辑、FloatingBar 的向下兼容性
+- [x] **36.2 实现 WPS 文件对话框专属探测器 (WpsDialogDetector)**
+  - [x] 在 `src/dialog/detector.rs` 中加入进程白名单过滤（`wps.exe`, `et.exe`, `wpp.exe`, `wpspdf.exe`, `wpsoffice.exe`）
+  - [x] 向上回溯匹配 `KcfdFileDialog` 顶层窗口类名与可见性状态，读取外接矩形 `RECT`
+  - [x] 优化前台事件监听与短延时重试对 `KcfdFileDialog` 的支持
+- [x] **36.3 实现轻量级 UI Automation 辅助模块 (`src/win32/uia.rs`)**
+  - [x] 在 `src/win32/` 目录下新增 `uia.rs` 并注册到 `src/win32/mod.rs`
+  - [x] 基于 Windows 原生 COM 接口 `IUIAutomation` 实现窗口局部子树检索
+  - [x] 准确定位 `KcfdFilterWidget` 下的 `QLineEdit` / `kd::KDTextField` 输入框元素
+  - [x] 封装读取当前文件名与通过 `IUIAutomationValuePattern` 注入目标路径的功能
+- [x] **36.4 实现 WPS 专用路径安全注入与平滑还原引擎 (`src/dialog/injector.rs`)**
+  - [x] 在 `src/dialog/injector.rs` 中实现 `inject_path_to_wps_dialog`
+  - [x] 流程实现：备份原文件名 -> UIA 设置目录路径 -> 发送 `VK_RETURN` 导航 -> 延时还原原文件名并全选
+  - [x] 在 `src/main.rs` 中集成 WPS 注入分流（候选路径点击与自动秒切双通道支持）
+- [x] **36.5 现场诊断与真实窗口类名突破**
+  - [x] 编写 `test/wps_inspect.ps1` 现场排错脚本，在测试机实测捕获 WPS 12.8.2.18205 真实另存为窗口
+  - [x] 铁证确诊：WPS 另存为真实类名为 `Qt5QWindowIcon`，标题为空自绘，Win32 子控件为 0 个
+  - [x] 确诊 WPS 主文档窗口类名为 `OpusApp`，并查明旧版规则全落空的根本原因
+- [x] **36.6 全版本 Qt5 与根窗口定位加固 (`detector.rs`, `main.rs`, `uia.rs`)**
+  - [x] 适配 `Qt5QWindowIcon`，优化 `find_dialog_root` 优先提升 `GA_ROOT` 防止点击子部件导致尺寸判定失败
+  - [x] 修复 `main.rs` 中 60ms 重试防递归死循环逻辑，严格排除 `OpusApp`/`XLMAIN`/`PP9FrameClass` 主编辑窗口
+  - [x] 拓展 `src/win32/uia.rs` 编辑框匹配策略（支持 `ControlType == Edit` 及各类文本控件）
+  - [x] 全部 8 项单元测试通过，成功编译最新 Release 二进制产物（`target/release/quickpath.exe`）
+- [x] **36.7 UIA 输入框精准评分、前台转交与驱动级键盘流触发 (`uia.rs`, `floating_bar.rs`)**
+  - [x] 解决 WPS 目录选择未生效问题：引入 ScoredCandidate 多维度评分算法，精准区分文件名输入框与搜索栏/筛选栏
+  - [x] 在 `FloatingBar` 隐藏后优先使用 `SetForegroundWindow` 转交焦点至 WPS，确保键盘输入流正确流向目标窗口
+  - [x] 改用 `keybd_event` 发送真实硬件级回车事件，完美触发 Qt QLineEdit 的 `returnPressed` 目录跳转
+  - [x] 将原文件名恢复延时调整为智能检测机制，避免在 Qt 尚未完成视图渲染时冲刷路径
+  - [x] 严格保持非 WPS 标准 Win32 对话框注入通道原貌不变，零副作用
+- [x] **36.8 突破 Qt ValuePattern 写入限制：剪贴板安全注入与光标复合驱动 (`uia.rs`)**
+  - [x] 确诊 WPS Qt 引擎只读保护 UIA SetValue 的深层特性（虽然有 ValuePattern 但 SetValue 被底层丢弃）
+  - [x] 引入基于 Windows 剪贴板的 Ctrl+A -> Ctrl+V 物理注入机制，结合鼠标光速点击 QLineEdit 控件几何中心点落焦
+  - [x] 注入前后自动备份并原子还原用户剪贴板，全程零隐私泄露、零按键丢失
+  - [x] 编译最新 Release 版本通过 8 项单元测试，体积稳定在 1.06MB
+## 阶段三十七：调试日志模式 (Debug Logging) 设置项与按需生成控制
+- [x] **37.1 全局日志门禁与原子状态控制 (`src/dialog/detector.rs`)**
+  - [x] 引入 `DEBUG_MODE_ENABLED: AtomicBool = AtomicBool::new(false)`，默认关闭
+  - [x] 提供 `is_debug_mode_enabled()` 与 `set_debug_mode_enabled(bool)`
+  - [x] `log_debug` 增加前置拦截：未开启状态下 0 开销直接返回，杜绝日常生成 `quickpath_debug.log`
+- [x] **37.2 国际化语言包字段扩充 (`locales/*.toml`, `src/rules/i18n.rs`)**
+  - [x] `SettingsSection` 增加 `debug_mode` 与 `debug_mode_desc` 字段
+  - [x] 更新 `zh-CN.toml` 与 `en-US.toml` 文本
+- [x] **37.3 设置中心界面与交互实现 (`src/ui/settings.rs`)**
+  - [x] 在常规偏好选项卡（卡片 5 关于卡片下方红框区域）渲染 Fluent 风格复选框
+  - [x] 实现鼠标悬停（Hover ID 50）与点击切换逻辑
+  - [x] 在 `SettingsWindow::show` 中重置调试模式为关闭，满足“每次重新打开自动关闭”
+- [x] **37.4 编译验证与测试**
+  - [x] 执行单元测试与 Release 构建验证

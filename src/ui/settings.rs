@@ -162,6 +162,7 @@ impl SettingsWindow {
     }
 
     pub fn show(&self) {
+        crate::dialog::detector::set_debug_mode_enabled(false);
         let current = crate::get_global_config();
         set_draft_config(current);
         IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
@@ -512,6 +513,31 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 render_about_card(
                     hdc, pad_x, card5_top, pad_x + card_w, card5_top + about_h, scale,
                     &bundle, font_card_title, font_text, font_small, hovered,
+                );
+
+                // 卡片 5 下方：排错调试模式复选框（居中排布于关于卡片与底部区域之间）
+                let card5_bottom = card5_top + about_h;
+                let bottom_pad = (22.0 * scale).round() as i32;
+                let btn_h = (34.0 * scale).round() as i32;
+                let btn_bottom = rect.bottom - bottom_pad;
+                let btn_top = btn_bottom - btn_h;
+                let debug_cy = card5_bottom + (btn_top - card5_bottom) / 2;
+                let debug_h = (26.0 * scale).round() as i32;
+                let debug_top = debug_cy - debug_h / 2;
+                let debug_w = (320.0 * scale).round() as i32;
+                let is_debug = crate::dialog::detector::is_debug_mode_enabled();
+                let is_hov_debug = hovered == Some(50);
+                draw_checkbox_item(
+                    hdc,
+                    pad_x,
+                    debug_top,
+                    pad_x + debug_w,
+                    debug_top + debug_h,
+                    scale,
+                    font_text,
+                    &bundle.settings.debug_mode,
+                    is_debug,
+                    is_hov_debug,
                 );
             }
             SettingsTab::Monitor => {
@@ -1314,10 +1340,7 @@ unsafe fn draw_checkbox_item(
 ) {
     unsafe {
         if is_hovered {
-            let hov_brush = CreateSolidBrush(COLORREF(0x002a2a2a));
-            let r = RECT { left, top, right, bottom };
-            FillRect(hdc, &r, hov_brush);
-            let _ = DeleteObject(HGDIOBJ(hov_brush.0 as _));
+            draw_fluent_box(hdc, left, top, right, bottom, (4.0 * scale).round() as i32, COLORREF(0x00282828), COLORREF(0x003a3a3a));
         }
 
         let box_size = (16.0 * scale).round() as i32;
@@ -1970,6 +1993,20 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                         new_hover = Some(21);
                         is_pointer = true;
                     }
+                } else {
+                    let card5_bottom = card5_top + about_h;
+                    let bottom_pad = (22.0 * scale).round() as i32;
+                    let btn_h = (34.0 * scale).round() as i32;
+                    let btn_bottom = rect.bottom - bottom_pad;
+                    let btn_top = btn_bottom - btn_h;
+                    let debug_cy = card5_bottom + (btn_top - card5_bottom) / 2;
+                    let debug_h = (26.0 * scale).round() as i32;
+                    let debug_top = debug_cy - debug_h / 2;
+                    let debug_w = (320.0 * scale).round() as i32;
+                    if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h {
+                        new_hover = Some(50);
+                        is_pointer = true;
+                    }
                 }
             }
         }
@@ -2340,6 +2377,21 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                         );
                     }
                     return;
+                }
+            } else {
+                let card5_bottom = card5_top + about_h;
+                let bottom_pad = (22.0 * scale).round() as i32;
+                let btn_h = (34.0 * scale).round() as i32;
+                let btn_bottom = rect.bottom - bottom_pad;
+                let btn_top = btn_bottom - btn_h;
+                let debug_cy = card5_bottom + (btn_top - card5_bottom) / 2;
+                let debug_h = (26.0 * scale).round() as i32;
+                let debug_top = debug_cy - debug_h / 2;
+                let debug_w = (320.0 * scale).round() as i32;
+                if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h {
+                    let cur = crate::dialog::detector::is_debug_mode_enabled();
+                    crate::dialog::detector::set_debug_mode_enabled(!cur);
+                    need_redraw = true;
                 }
             }
         }

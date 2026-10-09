@@ -117,6 +117,10 @@ pub struct SettingsSection {
     pub status_all_ready: String,
     #[serde(default)]
     pub lang_auto: String,
+    #[serde(default)]
+    pub debug_mode: String,
+    #[serde(default)]
+    pub debug_mode_desc: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
