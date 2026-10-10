@@ -10,8 +10,9 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+    EnumChildWindows, GetClassNameW, GetSystemMetrics, GetWindow, GetWindowLongW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+    IsZoomed, GWL_STYLE, GW_OWNER, SM_CXSCREEN, SM_CYSCREEN, WS_POPUP,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +99,50 @@ pub fn is_wps_process_name(name: &str) -> bool {
         || lower == "wpp.exe"
 }
 
+/// 检查是否为 WPS Office 的主程序窗口或文档编辑主窗口（一票否决排除非对话框）
+pub fn is_wps_main_window(hwnd: HWND, class_name: &str, title: &str) -> bool {
+    let lower_title = title.to_lowercase();
+    let lower_class = class_name.to_lowercase();
+
+    // 1. 经典主文档/主框架类名排除
+    if lower_class == "opusapp"
+        || lower_class == "xlmain"
+        || lower_class == "pp9frameclass"
+        || lower_class == "kxpdfmainwindow"
+    {
+        return true;
+    }
+
+    // 2. 标题为主程序启动台或主文档标题排除：
+    // - 精确为 "WPS Office" 或 "WPS"
+    // - 结尾包含 " - wps office" 或 " - wps pdf" 或 " - wps 文字" 或 " - wps 表格" 或 " - wps 演示" 等
+    // - 包含 "wps office" / "wps pdf" 且不属于明确的文件对话框标题
+    if title == "WPS Office"
+        || title == "WPS"
+        || lower_title.ends_with(" - wps office")
+        || lower_title.ends_with(" - wps pdf")
+        || lower_title.ends_with(" - wps 文字")
+        || lower_title.ends_with(" - wps 表格")
+        || lower_title.ends_with(" - wps 演示")
+        || (lower_title.contains("wps office") && !is_file_dialog_title(title))
+        || (lower_title.contains("wps pdf") && !is_file_dialog_title(title))
+    {
+        return true;
+    }
+
+    // 3. 状态与尺寸判定：若窗口为最大化状态，且标题不包含明确文件对话框语义，绝非文件对话框
+    unsafe {
+        if IsWindow(Some(hwnd)).as_bool()
+            && IsZoomed(hwnd).as_bool()
+            && !is_file_dialog_title(title)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// 向上查找文件对话框顶层根窗口句柄
 pub fn find_dialog_root(raw_hwnd: HWND) -> HWND {
     unsafe {
@@ -177,6 +222,15 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
         let class_name = get_window_class_name(hwnd);
         let window_title = get_window_title(hwnd);
 
+        // 1. 核心防御：若当前窗口判定为 WPS 主窗口，一票否决，直接拦截
+        if is_wps_main_window(hwnd, &class_name, &window_title) {
+            log_debug(&format!(
+                "detect_wps REJECT: hwnd=0x{:X} is WPS main window (cls='{}' title='{}')",
+                hwnd.0 as usize, class_name, window_title
+            ));
+            return None;
+        }
+
         // 枚举子控件以确认特征
         let mut ctx = ChildEnumContext {
             has_list_view: false,
@@ -196,27 +250,67 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
 
-        // WPS 核心特征匹配：
-        // 1. Qt5 自绘独立弹窗（Qt5QWindowIcon），且具有正常对话框尺寸（排除微小浮窗）
-        let is_qt5_dialog = class_name == "Qt5QWindowIcon" && width >= 300 && height >= 200;
-        // 2. Kcfd 自绘类名
+        // WPS 核心特征精准匹配：
+        // 规则 1：Kcfd 自绘专用类名（WPS 企业版自绘对话框，如 KcfdFileDialog）
         let is_kcfd = class_name == "KcfdFileDialog" || class_name.contains("Kcfd");
-        // 3. 标准模态对话框 #32770
-        let is_32770 = class_name == "#32770";
-        // 4. 显式对话框标题匹配
-        let is_dialog_title = !window_title.is_empty() && is_file_dialog_title(&window_title);
 
+        // 规则 2：标准模态对话框 #32770（需具备子控件特征）
+        let is_32770 = class_name == "#32770";
         let has_dialog_feature = ctx.has_list_view
             || ctx.has_file_name_combo
             || ctx.has_toolbar_or_breadcrumb
             || !ctx.edit_hwnds.is_empty();
 
-        let is_valid = is_qt5_dialog
-            || is_kcfd
+        // 规则 3：Qt5QWindowIcon（WPS 个人版自绘对话框）精准判别
+        let is_qt5 = class_name == "Qt5QWindowIcon";
+        let is_dialog_title = !window_title.is_empty() && is_file_dialog_title(&window_title);
+
+        let is_qt5_dialog = if is_qt5 {
+            if is_dialog_title {
+                // 分支 3.1：标题明确带有“另存为/打开/Save As/Open”，且已排除主窗口
+                width >= 300 && height >= 200
+            } else if window_title.is_empty() {
+                // 分支 3.2：自绘无标题弹窗。必须严格验证弹窗属性以防误判无标题的主窗口
+                let owner = GetWindow(hwnd, GW_OWNER);
+                let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                let is_popup = (style & WS_POPUP.0) != 0;
+                let has_owner = if let Ok(owner_hwnd) = owner {
+                    !owner_hwnd.0.is_null() && IsWindow(Some(owner_hwnd)).as_bool()
+                } else {
+                    false
+                };
+                let is_zoomed = IsZoomed(hwnd).as_bool();
+
+                let screen_w = GetSystemMetrics(SM_CXSCREEN);
+                let screen_h = GetSystemMetrics(SM_CYSCREEN);
+                let not_full_screen = (screen_w <= 0 || width < screen_w - 60)
+                    && (screen_h <= 0 || height < screen_h - 100);
+
+                // 必须满足：拥有 Owner 或具有 WS_POPUP 弹窗样式，且非最大化、非全屏尺寸、符合合理对话框区间
+                (is_popup || has_owner)
+                    && !is_zoomed
+                    && not_full_screen
+                    && width >= 400
+                    && width <= 1600
+                    && height >= 250
+                    && height <= 1100
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        let is_valid = is_kcfd
+            || is_qt5_dialog
             || (is_32770 && has_dialog_feature)
             || (is_dialog_title && (has_dialog_feature || is_32770));
 
         if !is_valid {
+            log_debug(&format!(
+                "detect_wps REJECT: hwnd=0x{:X} cls='{}' title='{}' w={} h={} kcfd={} qt5_dlg={} 32770={}",
+                hwnd.0 as usize, class_name, window_title, width, height, is_kcfd, is_qt5_dialog, is_32770
+            ));
             return None;
         }
 
@@ -498,6 +592,58 @@ mod tests {
 
         for t in titles_miss {
             assert!(!is_file_dialog_title(t), "Should NOT match dialog title: {}", t);
+        }
+    }
+
+    #[test]
+    fn test_is_wps_main_window() {
+        let dummy_hwnd = HWND(std::ptr::null_mut());
+
+        // 1. 应当被精准排除的 WPS 主窗口/文档窗口标题
+        let main_titles = [
+            "WPS Office",
+            "WPS",
+            "关于给予杨浩同学通报批评的决定2026.09.pdf - WPS Office",
+            "关于给予杨浩同学通报批评的决定2026.09.pdf - WPS PDF",
+            "新建文本文档.docx - WPS Office",
+            "新建文本文档.docx - wps office",
+            "工作簿1.xlsx - WPS 表格",
+            "演示1.pptx - WPS 演示",
+        ];
+
+        for title in main_titles {
+            assert!(
+                is_wps_main_window(dummy_hwnd, "Qt5QWindowIcon", title),
+                "Should identify as WPS main window: {}",
+                title
+            );
+        }
+
+        // 2. 应当被排除的经典主文档窗口类名
+        let doc_classes = ["OpusApp", "XLMAIN", "PP9FrameClass", "KxPdfMainWindow"];
+        for cls in doc_classes {
+            assert!(
+                is_wps_main_window(dummy_hwnd, cls, "未命名"),
+                "Should identify doc class as main window: {}",
+                cls
+            );
+        }
+
+        // 3. 应当放行的真正另存为/打开对话框标题与空自绘标题
+        let dialog_titles = [
+            "另存为",
+            "打开",
+            "Save As",
+            "Open",
+            "",
+        ];
+
+        for title in dialog_titles {
+            assert!(
+                !is_wps_main_window(dummy_hwnd, "Qt5QWindowIcon", title),
+                "Should NOT identify dialog as main window: '{}'",
+                title
+            );
         }
     }
 }

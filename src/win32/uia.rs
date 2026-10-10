@@ -174,7 +174,13 @@ fn find_wps_edit_element(
                 if lower_class.contains("combobox") || ctrl_type == 50003 {
                     score -= 800;
                 }
-                if lower_class.contains("button") || lower_class.contains("label") || lower_class.contains("splitter") {
+                if lower_class.contains("button")
+                    || lower_class.contains("label")
+                    || lower_class.contains("splitter")
+                    || lower_class.contains("scrollbar")
+                    || lower_class.contains("slider")
+                    || lower_class.contains("progressbar")
+                {
                     score -= 800;
                 }
                 if lower_name.contains("搜索") || lower_name.contains("search") || lower_id.contains("search") {
@@ -239,6 +245,16 @@ fn find_wps_edit_element(
         // 选取评分最高的候选元素
         candidates.sort_by(|a, b| b.score.cmp(&a.score));
         let best = candidates.remove(0);
+
+        // 防御性安全检查：真正的文件名编辑框（QLineEdit / kd::KDTextField / Edit）得分至少在 200 分以上
+        // 若最高分依然过低（例如 <= 100），说明窗口内根本不存在合法的文件名编辑框，绝不盲目注入
+        if best.score <= 100 {
+            log_debug(&format!(
+                "UIA_REJECT: Best candidate score too low ({}) name='{}' cls='{}' id='{}'",
+                best.score, best.name, best.class_name, best.auto_id
+            ));
+            return None;
+        }
 
         log_debug(&format!(
             "UIA_CHOSEN: name='{}' cls='{}' id='{}' val='{}' score={} rect={:?}",

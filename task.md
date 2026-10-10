@@ -582,9 +582,24 @@
   - [x] 重试前校验窗口存活与前台有效性，一旦命中即刻终止重试，切走窗口即刻中止
   - [x] 重试潜在候选判断增加 Root 提升，兼容焦点在子控件时的对话框判定
   - [x] 单实例 Mutex 优化为 Local 命名空间，自启动设置异步化消除主线程阻塞
-- [x] **39.4 单元测试、编译与运行验证**
-  - [x] 运行 `cargo test` 确保所有 12 项单元测试 100% 通过
-  - [x] 编译 Release 版本并在 Windows 11 环境下部署常驻运行（PID 26332）
-  - [x] 更新 `task.md` 打勾完成交付
+## 阶段四十：WPS 个人版主窗口与另存为弹窗精准判决修复
+- [x] **40.1 根因定位与排查确认**
+  - [x] 确认日志中 `wps.exe` / `wpspdf.exe` 主窗口（类名 `Qt5QWindowIcon`，标题为 `WPS Office` 或 `xxx - WPS Office`）因规则仅校验尺寸 >= 300x200 被无条件命中误判为对话框
+  - [x] 确认主窗口误判后引发 UIA 检索误选滚动条 `KPdfScrollBarWheelFixed` 并注入路径
+- [x] **40.2 WPS 主窗口特征否定排除机制构建 (`detector.rs`)**
+  - [x] 实现 `is_wps_main_window`：覆盖经典主文档类名、主界面标题（精确 `WPS Office`、结尾 ` - WPS Office`/` - WPS PDF`/` - WPS 文字` 等）、最大化状态
+  - [x] 在 `detect_wps_dialog` 顶层增加主窗口一票否决拦截
+- [x] **40.3 WPS 个人版自绘对话框精确准入规则重构 (`detector.rs`)**
+  - [x] 区分有标题对话框（明确包含另存为/打开语义）与无标题自绘对话框
+  - [x] 针对自绘无标题 `Qt5QWindowIcon` 增加底层 Win32 `WS_POPUP` 样式与 `GW_OWNER` 模态弹窗从属校验，限制非最大化及合规对话框尺寸区间
+- [x] **40.4 重试引擎与 UIA 注入安全拦截加固 (`main.rs`, `uia.rs`)**
+  - [x] 在 `main.rs` 的 `is_potential_dialog` 中接入 `is_wps_main_window`，切至 WPS 主窗口时立即终止重试并收起吸附条
+  - [x] 在 `uia.rs` 中对滚动条/滑块等控件施加严重负分，并设定正分安全阈值截断，杜绝误改非输入控件
+- [x] **40.5 单元测试验证、构建与部署**
+  - [x] 编写测试覆盖 WPS 主窗口标题排除与对话框放行边界
+  - [x] 运行 `cargo test` 确保全部 13 项单元测试 100% 通过
+  - [x] 编译 Release 并部署常驻运行（PID 34296）
+
+
 
 

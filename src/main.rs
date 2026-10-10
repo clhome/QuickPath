@@ -350,18 +350,24 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
             let root_hwnd = dialog::detector::find_dialog_root(fg_hwnd);
             let root_class = dialog::detector::get_window_class_name(root_hwnd);
             let root_title = dialog::detector::get_window_title(root_hwnd);
+            let fg_title = dialog::detector::get_window_title(fg_hwnd);
             let (_pid, process_name) = dialog::detector::get_window_process_info(root_hwnd);
 
             let is_wps = dialog::detector::is_wps_process_name(&process_name);
-            let is_wps_main_doc = root_class == "OpusApp" || root_class == "XLMAIN" || root_class == "PP9FrameClass";
+            let is_wps_main = is_wps && (
+                dialog::detector::is_wps_main_window(root_hwnd, &root_class, &root_title)
+                || dialog::detector::is_wps_main_window(fg_hwnd, &class_name, &fg_title)
+            );
 
-            let is_potential_dialog = root_class == "#32770"
+            let is_potential_dialog = !is_wps_main && (
+                root_class == "#32770"
                 || class_name == "#32770"
                 || root_class == "KcfdFileDialog"
-                || root_class == "Qt5QWindowIcon"
                 || root_class.contains("Kcfd")
                 || dialog::detector::is_file_dialog_title(&root_title)
-                || (is_wps && !is_wps_main_doc);
+                || dialog::detector::is_file_dialog_title(&fg_title)
+                || (is_wps && (root_class == "Qt5QWindowIcon" || class_name == "Qt5QWindowIcon"))
+            );
 
             if is_potential_dialog {
                 let hwnd_raw = fg_hwnd.0 as usize;
