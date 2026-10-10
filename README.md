@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-v1.1.0-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.1.1-success)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
 
@@ -23,7 +23,7 @@
 ## 💡 Why QuickPath?
 
 When working across multiple applications, do you frequently face this frustration?
-- You just navigated to a deeply nested project folder in **File Explorer** or **Directory Opus**, but when invoking "Open" or "Save As" in your code editor, IDE, Photoshop, or Office suite, the file dialog defaults back to "Downloads" or "Documents";
+- You just navigated to a deeply nested project folder in **File Explorer** or **Directory Opus**, but when invoking "Open" or "Save As" in your code editor, IDE, Photoshop, Office, or **WPS Office**, the file dialog defaults back to "Downloads" or "Documents";
 - You are forced to traverse through long directory trees again or manually copy and paste folder paths into the dialog address bar;
 - Outdated legacy switcher tools often trigger your Input Method Editor (IME) unintentionally during path injection, causing typos, candidate popups, or accidentally overwriting your desired filename.
 
@@ -37,6 +37,8 @@ When working across multiple applications, do you frequently face this frustrati
 
 - **⚡ Smart AutoSwitch**:
   When an "Open" or "Save As" dialog appears in editors, IDEs, or creative software, QuickPath synchronizes it to your most recently browsed file manager directory within milliseconds—eliminating repetitive path hunting and copy-pasting.
+- **📑 WPS Office Deep Adaptation (New in Ver 1.1.1)**:
+  Overcomes the longstanding technical barrier of intercepting custom Qt-based owner-drawn file dialogs in WPS Office (Writer, Spreadsheets, Presentation, and PDF across both Personal and Enterprise editions). Features an intelligent main window negation filter to avoid false triggers, combined with native Windows UI Automation (UIA) heuristic scoring and atomic clipboard injection to achieve instant folder switching while flawlessly preserving the user's typed filename and extension.
 - **📊 Taskbar Hardware Status Monitor (New in Ver 1.1.0)**:
   Ultra-lightweight native hardware dashboard docked right on your Windows taskbar. Displays real-time upload/download speeds, CPU, RAM, dedicated GPU, and Disk I/O across an adaptive 2-row layout. Features crisp Win32 ClearType typography, mini indicator bars, and 3-tier dynamic threshold coloring (Green/Yellow/Red). Supports dual docking modes ("Right of Taskbar" or "Above Taskbar Left Float" to prevent blocking taskbar app buttons) and automatic stealth evasion during full-screen games/media. Consumes $\le 5\text{MB}$ additional RAM when active and drops to absolute 0% CPU & 0 MB footprint when disabled.
 - **🪟 Windows 11 Modern Fluent Design**:
@@ -50,6 +52,11 @@ When working across multiple applications, do you frequently face this frustrati
   - Directory Opus (DOpus)
   - Total Commander (TC)
   - XYplorer
+- **💼 Comprehensive Productivity & Creative Suite Compatibility**:
+  - WPS Office (Writer, Spreadsheets, Presentation, PDF, Personal & Enterprise editions, **New in Ver 1.1.1**)
+  - Microsoft Office (Word, Excel, PowerPoint)
+  - Popular IDEs & Code Editors (VS Code, Visual Studio, JetBrains IDEs, Sublime Text, Notepad++, etc.)
+  - Creative Applications (Photoshop, Illustrator, etc.)
 - **🚀 UAC-Free Silent AutoStart**:
   Built-in Windows Task Scheduler integration allows the application to launch silently with highest privileges at system startup, eliminating annoying UAC prompts while communicating seamlessly with elevated applications.
 - **🎈 Modern Floating Bar**:

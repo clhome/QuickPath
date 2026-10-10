@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-v1.1.0-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.1.1-success)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
 
@@ -23,7 +23,7 @@
 ## 💡 为什么选择 QuickPath？
 
 在日常使用电脑时，您是否常常遇到这样的繁琐场景：
-- 刚刚在**文件资源管理器**或 **Directory Opus** 中找到了深层工作目录，打开文本编辑器、IDE、Photoshop 或 Office 点击“另存为”或“打开文件”时，对话框却停留在默认的“下载”或“文档”目录；
+- 刚刚在**文件资源管理器**或 **Directory Opus** 中找到了深层工作目录，打开文本编辑器、IDE、Photoshop、Office 或 **WPS** 点击“另存为”或“打开文件”时，对话框却停留在默认的“下载”或“文档”目录；
 - 您不得不一层层重新点选繁琐的目录树，或者手动复制文件管理器地址栏路径再粘贴到对话框中；
 - 某些老旧辅助工具在粘贴路径时经常误触发中文输入法，导致文件名被拼音顶词覆盖破坏。
 
@@ -37,6 +37,8 @@
 
 - **⚡ 智能自动秒切 (AutoSwitch)**：
   在文本编辑器、IDE、办公或设计软件中弹出“打开”或“另存为”对话框时，毫秒级无感自动同步至你最后浏览的文件管理器目录，彻底告别在长目录树中重复点选和复制粘贴。
+- **📑 WPS Office 深度适配 (Ver 1.1.1 新增)**：
+  攻克 WPS（文字、表格、演示、PDF 全套件，全面涵盖个人版与企业版）基于 Qt 框架自绘无原生 Win32 控件句柄文件对话框的行业难题。建立主窗口特征否定排除机制，杜绝主编辑界面误判；结合 Windows 原生 UI Automation (UIA) 启发式多维评分算法与安全剪贴板原子注入驱动，毫秒级感知 WPS 另存为/打开弹窗并实现瞬时秒切跳转，100% 完整保留用户敲入的文件名与扩展名。
 - **📊 任务栏硬件状态监控 (Ver 1.1.0 之后新增)**：
   超轻量内置原生任务栏硬件看板，实时显示上传/下载网速、处理器 (CPU)、物理内存 (RAM)、独立显卡 (GPU) 及磁盘 I/O。两行自适应紧凑排布，支持 ClearType 锐利文字、微型指示条与三档阈值警示着色（绿/黄/红）。提供“任务栏右侧”与“任务栏左上方独立悬浮”（物理防遮挡应用标签）双停靠模式，具备全屏游戏/影音主动隐匿避让机制；模块启用时增量常驻内存 $\le 5\text{MB}$，停用时完全退出 0 开销。
 - **🪟 Windows 11 现代 Fluent Design**：
@@ -50,6 +52,11 @@
   - Directory Opus (DOpus)
   - Total Commander (TC)
   - XYplorer
+- **💼 办公与创作生态全兼容**：
+  - WPS Office (文字/表格/演示/PDF 全套件，个人版与企业版，**Ver 1.1.1 深度适配**)
+  - Microsoft Office (Word, Excel, PowerPoint)
+  - 常用 IDE 与编辑器 (VS Code, Visual Studio, JetBrains 系列, Sublime Text, Notepad++ 等)
+  - 图像设计套件 (Photoshop 等)
 - **🚀 免 UAC 静默开机自启**：
   内置 Windows 任务计划程序管理，支持开机以最高权限静默启动，与任何以管理员权限运行的软件无缝通信，开机零弹窗打扰。
 - **🎈 现代悬浮吸附条 (Floating Bar)**：
