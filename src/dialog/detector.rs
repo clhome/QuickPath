@@ -156,6 +156,15 @@ pub fn find_dialog_root(raw_hwnd: HWND) -> HWND {
     }
 }
 
+/// 检查窗口标题是否属于常见的文件选择/保存对话框标题（支持中英文、大小写不敏感）
+pub fn is_file_dialog_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    title.contains("另存为")
+        || title.contains("打开")
+        || lower.contains("save as")
+        || lower.contains("open")
+}
+
 /// 探测 WPS Office 专用的文件对话框（涵盖自绘 Qt5QWindowIcon、KcfdFileDialog 与换肤定制的 #32770）
 fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<FileDialogInfo> {
     unsafe {
@@ -195,14 +204,7 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
         // 3. 标准模态对话框 #32770
         let is_32770 = class_name == "#32770";
         // 4. 显式对话框标题匹配
-        let is_dialog_title = !window_title.is_empty() && (
-            window_title == "另存为"
-            || window_title == "打开"
-            || window_title.contains("另存为")
-            || window_title.contains("打开")
-            || window_title.contains("Save As")
-            || window_title.contains("Open")
-        );
+        let is_dialog_title = !window_title.is_empty() && is_file_dialog_title(&window_title);
 
         let has_dialog_feature = ctx.has_list_view
             || ctx.has_file_name_combo
@@ -244,6 +246,7 @@ fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Opt
         let hwnd = find_dialog_root(raw_hwnd);
 
         if !IsWindowVisible(hwnd).as_bool() {
+            log_debug(&format!("detect_std REJECT: hwnd=0x{:X} not visible", hwnd.0 as usize));
             return None;
         }
 
@@ -252,10 +255,7 @@ fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Opt
 
         // 大多数标准与通用文件对话框的类名均为 #32770
         let is_32770 = class_name == "#32770";
-        let is_dialog_title = window_title.contains("另存为")
-            || window_title.contains("打开")
-            || window_title.contains("Save As")
-            || window_title.contains("Open");
+        let is_dialog_title = is_file_dialog_title(&window_title);
 
         if !is_32770 && !is_dialog_title {
             return None;
@@ -275,14 +275,25 @@ fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Opt
             LPARAM(&mut ctx as *mut _ as isize),
         );
 
-        // 放宽判定条件：
-        // 1. 具备文件列表（DirectUIHWND / SHELLDLL_DefView），且具备输入控件（ComboBoxEx32 / ComboBox / 可见 Edit）
-        // 2. 或具备面包屑导航栏与可见 Edit 控件，且标题为另存为/打开
+        // 标准 Win32 对话框判定条件：
+        // 1. 具有输入控件 (ComboBoxEx32 / ComboBox / 可见 Edit)
         let has_input = ctx.has_file_name_combo || !ctx.edit_hwnds.is_empty();
+
+        // 2. 具有列表或工具栏导航
+        let has_navigation_or_list = ctx.has_list_view || ctx.has_toolbar_or_breadcrumb;
+
+        // 3. 判定准则：
+        // 准则 A：若标题明确为“另存为/打开/Save As/Open”，且窗口类名为 #32770：
+        // 只要具备输入控件 (has_input) 或具备浏览导航列表 (has_navigation_or_list)，即认定为文件对话框
+        // 准则 B：若具备文件列表且具备输入控件 (has_list_view && has_input)，无条件认定为标准文件对话框
         let is_standard_dialog = (ctx.has_list_view && has_input)
-            || (is_dialog_title && (ctx.has_list_view || ctx.has_toolbar_or_breadcrumb) && has_input);
+            || (is_dialog_title && (has_navigation_or_list || has_input));
 
         if !is_standard_dialog {
+            log_debug(&format!(
+                "detect_std REJECT: hwnd=0x{:X} list={} combo={} bar={} edits={} title='{}'",
+                hwnd.0 as usize, ctx.has_list_view, ctx.has_file_name_combo, ctx.has_toolbar_or_breadcrumb, ctx.edit_hwnds.len(), window_title
+            ));
             return None;
         }
 
@@ -344,7 +355,7 @@ unsafe extern "system" fn enum_children_proc(child: HWND, lparam: LPARAM) -> BOO
         let ctx = &mut *(lparam.0 as *mut ChildEnumContext);
         let class = get_window_class_name(child);
 
-        if class == "DirectUIHWND" || class == "SHELLDLL_DefView" {
+        if class == "DirectUIHWND" || class == "SHELLDLL_DefView" || class == "SysListView32" {
             ctx.has_list_view = true;
         } else if class == "ComboBoxEx32" || class.eq_ignore_ascii_case("ComboBox") {
             ctx.has_file_name_combo = true;
@@ -474,5 +485,19 @@ mod tests {
 
         set_debug_mode_enabled(false);
         assert!(!is_debug_mode_enabled());
+    }
+
+    #[test]
+    fn test_standard_dialog_title_matching() {
+        let titles_hit = ["另存为", "另存为...", "打开", "打开文件", "Save As", "Save as file", "Open", "Open File"];
+        let titles_miss = ["属性", "关于 Notepad3", "确认删除", "设置", "Settings", "Preferences"];
+
+        for t in titles_hit {
+            assert!(is_file_dialog_title(t), "Should match dialog title: {}", t);
+        }
+
+        for t in titles_miss {
+            assert!(!is_file_dialog_title(t), "Should NOT match dialog title: {}", t);
+        }
     }
 }

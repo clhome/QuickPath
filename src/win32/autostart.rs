@@ -21,7 +21,7 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
                     "/tn",
                     TASK_NAME,
                     "/tr",
-                    &format!("\"{}\"", exe_path_str),
+                    &exe_path_str,
                     "/sc",
                     "onlogon",
                     "/rl",

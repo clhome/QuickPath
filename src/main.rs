@@ -53,17 +53,15 @@ pub struct AppState {
 fn main() {
     unsafe {
         // 1. 单实例互斥体防护，避免多个 QuickPath 驻留冲突
-        crate::dialog::detector::log_debug("=== QuickPath Instance Checking ===");
-        let mutex_name = w!("Global\\QuickPath_SingleInstance_Mutex");
+        let mutex_name = w!("Local\\QuickPath_SingleInstance_Mutex");
         let mutex = CreateMutexW(None, true, mutex_name);
-        if mutex.is_err()
-            || windows::Win32::Foundation::GetLastError()
+        if let Ok(_m) = mutex {
+            if windows::Win32::Foundation::GetLastError()
                 == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
-        {
-            crate::dialog::detector::log_debug("=== QuickPath Exiting: Mutex already exists (another instance is running!) ===");
-            return;
+            {
+                return;
+            }
         }
-        crate::dialog::detector::log_debug("=== QuickPath Started Successfully (Singleton Acquired) ===");
 
         // 2. 初始化 COM 库与 GDI+ 环境
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -71,9 +69,12 @@ fn main() {
 
         let config = AppConfig::load();
 
-        // 同步自启动设置
+        // 异步同步自启动设置，杜绝阻塞主线程 UI 初始化
         if config.autostart_enabled {
-            let _ = set_autostart(true, config.autostart_task_scheduler);
+            let use_sched = config.autostart_task_scheduler;
+            thread::spawn(move || {
+                let _ = set_autostart(true, use_sched);
+            });
         }
 
         // 3. 注册主事件接收宿主隐藏窗口
@@ -113,7 +114,6 @@ fn main() {
         let _ = win32::hotkey::register_global_hotkey(host_hwnd, HOTKEY_ID, &config.hotkey);
 
         // 5. 初始化托盘、悬浮吸附条与设置窗口
-        // 5. 初始化托盘、悬浮吸附条、设置窗口与任务栏状态监控
         let tray_res = TrayIcon::new(host_hwnd);
         let floating_bar_res = FloatingBar::new();
         let settings_window_res = SettingsWindow::new();
@@ -257,10 +257,10 @@ unsafe extern "system" fn host_wnd_proc(
 }
 
 fn on_foreground_window_changed(fg_hwnd: HWND) {
-    on_foreground_window_changed_impl(fg_hwnd, false);
+    on_foreground_window_changed_impl(fg_hwnd, 0);
 }
 
-fn on_foreground_window_changed_impl(fg_hwnd: HWND, is_retry: bool) {
+fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
     let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
     if state_ptr.is_null() {
         return;
@@ -342,33 +342,48 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, is_retry: bool) {
             }
         }
     } else {
-        // 如果检测未立即命中，但当前窗口可能是对话框正在初始化绘制，且未曾重试过，进行单次短延时重试
-        if !is_retry {
-            let (_pid, process_name) = dialog::detector::get_window_process_info(fg_hwnd);
-            let is_wps = dialog::detector::is_wps_process_name(&process_name);
-            let is_wps_main_doc = class_name == "OpusApp" || class_name == "XLMAIN" || class_name == "PP9FrameClass";
+        // 如果检测未立即命中，分析当前窗口或其顶层根窗口是否属于潜在对话框（可能子控件尚未完成异步绘制）
+        const MAX_RETRIES: u32 = 8;
+        const RETRY_INTERVAL_MS: u64 = 40;
 
-            let is_potential_dialog = class_name == "#32770"
-                || class_name == "KcfdFileDialog"
-                || class_name == "Qt5QWindowIcon"
-                || class_name.contains("Kcfd")
+        if retry_count < MAX_RETRIES {
+            let root_hwnd = dialog::detector::find_dialog_root(fg_hwnd);
+            let root_class = dialog::detector::get_window_class_name(root_hwnd);
+            let root_title = dialog::detector::get_window_title(root_hwnd);
+            let (_pid, process_name) = dialog::detector::get_window_process_info(root_hwnd);
+
+            let is_wps = dialog::detector::is_wps_process_name(&process_name);
+            let is_wps_main_doc = root_class == "OpusApp" || root_class == "XLMAIN" || root_class == "PP9FrameClass";
+
+            let is_potential_dialog = root_class == "#32770"
+                || class_name == "#32770"
+                || root_class == "KcfdFileDialog"
+                || root_class == "Qt5QWindowIcon"
+                || root_class.contains("Kcfd")
+                || dialog::detector::is_file_dialog_title(&root_title)
                 || (is_wps && !is_wps_main_doc);
 
             if is_potential_dialog {
                 let hwnd_raw = fg_hwnd.0 as usize;
+                let next_retry = retry_count + 1;
                 thread::spawn(move || {
-                    thread::sleep(Duration::from_millis(60));
+                    thread::sleep(Duration::from_millis(RETRY_INTERVAL_MS));
                     let target_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
                     if !target_ptr.is_null() {
                         let h = HWND(hwnd_raw as *mut _);
-                        on_foreground_window_changed_impl(h, true);
+                        // 确认当前前台窗口依然是该窗口或其派生窗口，若用户已切走则提前终止轮询
+                        let current_fg = win32::events::get_active_foreground_window();
+                        let current_root = dialog::detector::find_dialog_root(current_fg);
+                        if current_fg == h || current_root == dialog::detector::find_dialog_root(h) {
+                            on_foreground_window_changed_impl(h, next_retry);
+                        }
                     }
                 });
                 return;
             }
         }
 
-        // 明确离开对话框或重试后仍非对话框时，隐藏悬浮吸附条
+        // 明确离开对话框或多次重试超时后仍非对话框时，隐藏悬浮吸附条
         if let Some(bar) = &state.floating_bar {
             bar.hide();
         }
