@@ -200,7 +200,7 @@ pub unsafe fn render_bar_window(
 
     // 4. 绘制各列指标
     if let Some(col) = &layout.col_net {
-        draw_network_column(mem_dc, col, snapshot);
+        draw_network_column(mem_dc, col, snapshot, text_color_pri);
     }
 
     if let Some(col) = &layout.col_cpu_mem {
@@ -254,20 +254,36 @@ pub unsafe fn render_bar_window(
     let _ = windows::Win32::Graphics::Gdi::ReleaseDC(None, screen_dc);
 }
 
-// 核心状态指示三色 (与底部色块完全统一)
-const COLOR_METRIC_GREEN: COLORREF = COLORREF(0x0059C734); // 鲜绿 (< 70%)
-const COLOR_METRIC_YELLOW: COLORREF = COLORREF(0x0000CCFF); // 亮黄 (70% ~ 85%)
-const COLOR_METRIC_RED: COLORREF = COLORREF(0x00303BFF); // 鲜红 (> 85%)
+// 核心状态指示多色 (与底部色块完全统一)
+const COLOR_METRIC_GREEN: COLORREF = COLORREF(0x0059C734); // 鲜绿 (20% ~ 70% / 10 ~ 50 Mbps)
+const COLOR_METRIC_YELLOW: COLORREF = COLORREF(0x0000CCFF); // 亮黄 (70% ~ 85% / 50 ~ 80 Mbps)
+const COLOR_METRIC_RED: COLORREF = COLORREF(0x00303BFF); // 鲜红 (> 85% / > 80 Mbps)
 
-/// 根据百分比利用率计算动态三档状态色 (<70% 绿, 70%~85% 黄, >85% 红)
+/// 根据百分比利用率计算动态四档状态色 (<20% 基色/白, 20%~70% 绿, 70%~85% 黄, >85% 红)
 #[inline]
-fn get_metric_status_color(percent: f32) -> COLORREF {
+fn get_metric_status_color(percent: f32, base_color: COLORREF) -> COLORREF {
     if percent > 85.0 {
         COLOR_METRIC_RED
     } else if percent >= 70.0 {
         COLOR_METRIC_YELLOW
-    } else {
+    } else if percent >= 20.0 {
         COLOR_METRIC_GREEN
+    } else {
+        base_color
+    }
+}
+
+/// 根据实时网络速率 (Mbps) 计算动态四档状态色 (<10 基色/白, 10~50 绿, 50~80 黄, >80 红)
+#[inline]
+fn get_network_status_color(speed_mbps: f64, base_color: COLORREF) -> COLORREF {
+    if speed_mbps > 80.0 {
+        COLOR_METRIC_RED
+    } else if speed_mbps >= 50.0 {
+        COLOR_METRIC_YELLOW
+    } else if speed_mbps >= 10.0 {
+        COLOR_METRIC_GREEN
+    } else {
+        base_color
     }
 }
 
@@ -323,7 +339,25 @@ fn parse_metric_display<'a>(display: &'a str) -> Option<(&'a str, &'a str, &'a s
     None
 }
 
-/// 绘制硬件指标单行（前缀保持基色、数值按负载动态三色分级、% 保持基色不变）
+/// 解析网速显示字符串，拆分为 (前缀箭头, 速率数值部分)
+#[inline]
+fn parse_network_display<'a>(display: &'a str) -> Option<(&'a str, &'a str)> {
+    let mut chars = display.char_indices();
+    if let Some((_, first_char)) = chars.next() {
+        if (first_char == '↑' || first_char == '↓') && chars.next().is_some() {
+            // 前缀为箭头与紧随的1个标准空格 (例如 "↑ " 或 "↓ ")
+            let prefix_end = first_char.len_utf8() + 1;
+            if display.len() >= prefix_end {
+                let prefix = &display[..prefix_end];
+                let num_part = &display[prefix_end..];
+                return Some((prefix, num_part));
+            }
+        }
+    }
+    None
+}
+
+/// 绘制硬件指标单行（前缀保持基色、数值按负载动态多色分级、% 保持基色不变）
 unsafe fn draw_metric_text_with_threshold(
     hdc: HDC,
     display_text: &str,
@@ -336,12 +370,12 @@ unsafe fn draw_metric_text_with_threshold(
 ) {
     // 匹配如 "C: 19%"、"M: 42%"、"G: --%"、"D:  0%"
     if let Some((prefix, num_part, suffix)) = parse_metric_display(display_text) {
-        // 计算数值颜色 (<70% 绿, 70%~85% 黄, >85% 红)
+        // 计算数值颜色 (<20% 基色, 20%~70% 绿, 70%~85% 黄, >85% 红)
         let num_color = if let Some(p) = percent {
             if num_part.trim() == "--" {
                 base_color
             } else {
-                get_metric_status_color(p)
+                get_metric_status_color(p, base_color)
             }
         } else {
             base_color
@@ -354,7 +388,7 @@ unsafe fn draw_metric_text_with_threshold(
         SetTextColor(hdc, base_color);
         draw_gdi_text_segment(hdc, prefix, x, y, h);
 
-        // 2. 绘制数值（动态三色分级）
+        // 2. 绘制数值（动态多色分级）
         SetTextColor(hdc, num_color);
         draw_gdi_text_segment(hdc, num_part, x + prefix_w, y, h);
 
@@ -371,8 +405,8 @@ unsafe fn draw_metric_text_with_threshold(
 }
 
 /// 绘制微型警戒色块条 (GDI)
-unsafe fn draw_gauge_bar_gdi(hdc: HDC, x: i32, y: i32, w: i32, h: i32, percent: f32) {
-    let color = get_metric_status_color(percent);
+unsafe fn draw_gauge_bar_gdi(hdc: HDC, x: i32, y: i32, w: i32, h: i32, percent: f32, base_color: COLORREF) {
+    let color = get_metric_status_color(percent, base_color);
 
     let fill_w = ((w as f32 * (percent / 100.0)).round() as i32).clamp(1, w);
     let rect = RECT {
@@ -386,14 +420,68 @@ unsafe fn draw_gauge_bar_gdi(hdc: HDC, x: i32, y: i32, w: i32, h: i32, percent: 
     let _ = DeleteObject(HGDIOBJ(brush.0 as _));
 }
 
-/// 绘制网络列 (两行：上传 / 下载)
-unsafe fn draw_network_column(hdc: HDC, col: &RECT, snapshot: &MetricsSnapshot) {
+/// 绘制网络指标单行（前缀箭头保持基色、数值按网速动态多色分级）
+unsafe fn draw_network_text_with_threshold(
+    hdc: HDC,
+    display_text: &str,
+    speed_mbps: f64,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    base_color: COLORREF,
+) {
+    if let Some((prefix, num_part)) = parse_network_display(display_text) {
+        let num_color = get_network_status_color(speed_mbps, base_color);
+        let prefix_w = measure_text_width(hdc, prefix);
+
+        // 1. 绘制前缀箭头（保持基色不变）
+        SetTextColor(hdc, base_color);
+        draw_gdi_text_segment(hdc, prefix, x, y, h);
+
+        // 2. 绘制速率数值（动态按网速分级变色）
+        SetTextColor(hdc, num_color);
+        draw_gdi_text_segment(hdc, num_part, x + prefix_w, y, h);
+
+        return;
+    }
+
+    // 格式不符合时降级全量单色渲染
+    SetTextColor(hdc, base_color);
+    draw_gdi_text(hdc, display_text, x, y, w, h);
+}
+
+/// 绘制网络列 (两行：上传 / 下载 + 动态速率分档着色)
+unsafe fn draw_network_column(
+    hdc: HDC,
+    col: &RECT,
+    snapshot: &MetricsSnapshot,
+    base_color: COLORREF,
+) {
     let row_h = (col.bottom - col.top) / 2;
     let y1 = col.top;
     let y2 = col.top + row_h;
 
-    draw_gdi_text(hdc, &snapshot.network.upload_display, col.left, y1, col.right - col.left, row_h);
-    draw_gdi_text(hdc, &snapshot.network.download_display, col.left, y2, col.right - col.left, row_h);
+    draw_network_text_with_threshold(
+        hdc,
+        &snapshot.network.upload_display,
+        snapshot.network.upload_mbps,
+        col.left,
+        y1,
+        col.right - col.left,
+        row_h,
+        base_color,
+    );
+    draw_network_text_with_threshold(
+        hdc,
+        &snapshot.network.download_display,
+        snapshot.network.download_mbps,
+        col.left,
+        y2,
+        col.right - col.left,
+        row_h,
+        base_color,
+    );
 }
 
 /// 绘制算力/内存列 (两行：CPU / 内存 + 2px 警戒指示条)
@@ -420,7 +508,7 @@ unsafe fn draw_cpu_mem_column(
             base_color,
         );
         let bar_y = y1 + row_h - 2;
-        draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.cpu.usage_percent);
+        draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.cpu.usage_percent, base_color);
     }
 
     if config.show_memory {
@@ -435,7 +523,7 @@ unsafe fn draw_cpu_mem_column(
             base_color,
         );
         let bar_y = col.bottom - 2;
-        draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.memory.usage_percent as f32);
+        draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.memory.usage_percent as f32, base_color);
     }
 }
 
@@ -525,20 +613,84 @@ mod tests {
 
     #[test]
     fn test_metric_status_color_thresholds() {
-        // < 70% 为鲜绿色
-        assert_eq!(get_metric_status_color(0.0), COLOR_METRIC_GREEN);
-        assert_eq!(get_metric_status_color(50.0), COLOR_METRIC_GREEN);
-        assert_eq!(get_metric_status_color(69.9), COLOR_METRIC_GREEN);
+        let base = COLORREF(0x00FFFFFF);
+
+        // < 20% 为基准色 (白色)
+        assert_eq!(get_metric_status_color(0.0, base), base);
+        assert_eq!(get_metric_status_color(10.0, base), base);
+        assert_eq!(get_metric_status_color(19.9, base), base);
+
+        // 20% ~ 70% 为鲜绿色
+        assert_eq!(get_metric_status_color(20.0, base), COLOR_METRIC_GREEN);
+        assert_eq!(get_metric_status_color(50.0, base), COLOR_METRIC_GREEN);
+        assert_eq!(get_metric_status_color(69.9, base), COLOR_METRIC_GREEN);
 
         // 70% ~ 85% 为亮黄色
-        assert_eq!(get_metric_status_color(70.0), COLOR_METRIC_YELLOW);
-        assert_eq!(get_metric_status_color(78.5), COLOR_METRIC_YELLOW);
-        assert_eq!(get_metric_status_color(85.0), COLOR_METRIC_YELLOW);
+        assert_eq!(get_metric_status_color(70.0, base), COLOR_METRIC_YELLOW);
+        assert_eq!(get_metric_status_color(78.5, base), COLOR_METRIC_YELLOW);
+        assert_eq!(get_metric_status_color(85.0, base), COLOR_METRIC_YELLOW);
 
         // > 85% 为鲜红色
-        assert_eq!(get_metric_status_color(85.01), COLOR_METRIC_RED);
-        assert_eq!(get_metric_status_color(90.0), COLOR_METRIC_RED);
-        assert_eq!(get_metric_status_color(100.0), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(85.01, base), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(90.0, base), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(100.0, base), COLOR_METRIC_RED);
+    }
+
+    #[test]
+    fn test_network_status_color_thresholds() {
+        let base = COLORREF(0x00FFFFFF);
+
+        // < 10 Mbps 为基准色 (白色)
+        assert_eq!(get_network_status_color(0.0, base), base);
+        assert_eq!(get_network_status_color(5.2, base), base);
+        assert_eq!(get_network_status_color(9.99, base), base);
+
+        // 10 ~ 50 Mbps 为鲜绿色
+        assert_eq!(get_network_status_color(10.0, base), COLOR_METRIC_GREEN);
+        assert_eq!(get_network_status_color(25.0, base), COLOR_METRIC_GREEN);
+        assert_eq!(get_network_status_color(49.9, base), COLOR_METRIC_GREEN);
+
+        // 50 ~ 80 Mbps 为亮黄色
+        assert_eq!(get_network_status_color(50.0, base), COLOR_METRIC_YELLOW);
+        assert_eq!(get_network_status_color(65.5, base), COLOR_METRIC_YELLOW);
+        assert_eq!(get_network_status_color(80.0, base), COLOR_METRIC_YELLOW);
+
+        // > 80 Mbps 为鲜红色
+        assert_eq!(get_network_status_color(80.01, base), COLOR_METRIC_RED);
+        assert_eq!(get_network_status_color(120.0, base), COLOR_METRIC_RED);
+        assert_eq!(get_network_status_color(999.0, base), COLOR_METRIC_RED);
+    }
+
+    #[test]
+    fn test_parse_network_display() {
+        // 带前导空格的个位数速率
+        let (prefix, num) = parse_network_display("↑  0.0").unwrap();
+        assert_eq!(prefix, "↑ ");
+        assert_eq!(num, " 0.0");
+
+        // 两位数速率
+        let (prefix, num) = parse_network_display("↓ 12.3").unwrap();
+        assert_eq!(prefix, "↓ ");
+        assert_eq!(num, "12.3");
+
+        // 紧凑百兆速率
+        let (prefix, num) = parse_network_display("↑  120").unwrap();
+        assert_eq!(prefix, "↑ ");
+        assert_eq!(num, " 120");
+
+        // 四位数速率
+        let (prefix, num) = parse_network_display("↑ 1200").unwrap();
+        assert_eq!(prefix, "↑ ");
+        assert_eq!(num, "1200");
+
+        // 溢出文本
+        let (prefix, num) = parse_network_display("↓ 999+").unwrap();
+        assert_eq!(prefix, "↓ ");
+        assert_eq!(num, "999+");
+
+        // 异常格式不匹配
+        assert!(parse_network_display("C: 19%").is_none());
+        assert!(parse_network_display("Invalid").is_none());
     }
 
     #[test]

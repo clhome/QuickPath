@@ -549,3 +549,22 @@
   - [x] 在 `SettingsWindow::show` 中重置调试模式为关闭，满足“每次重新打开自动关闭”
 - [x] **37.4 编译验证与测试**
   - [x] 执行单元测试与 Release 构建验证
+
+## 阶段三十八：监控指标与网速多档动态状态色升级
+- [x] **38.1 扩展百分比利用率动态四档状态色判定 (`render.rs`)**
+  - [x] 重构 `get_metric_status_color` 支持 `< 20%` 返回基准色（深色纯白/浅色深炭黑）
+  - [x] 保持 20%~70% 绿色、70%~85% 黄色、>85% 红色
+  - [x] 联动更新 CPU/内存底部微型 2px 警戒进度条在低于 20% 时的颜色同步
+- [x] **38.2 实现网速动态四档状态色判定与前缀/数值分段渲染 (`render.rs`)**
+  - [x] 新增 `get_network_status_color`（<10 Mbps 基色，10~50 绿色，50~80 黄色，>80 红色）
+  - [x] 新增 `parse_network_display` 提取前缀箭头与速率数值
+  - [x] 改造 `draw_network_column` 与 `draw_network_text_with_threshold`，前缀保持基色、数值按网速动态分级变色
+- [x] **38.3 单元测试更新与扩充 (`render.rs`)**
+  - [x] 更新 `test_metric_status_color_thresholds` 覆盖全部 4 档百分比边界
+  - [x] 新增 `test_network_status_color_thresholds` 与 `test_parse_network_display` 测试用例
+- [x] **38.4 编译验证与任务验收**
+  - [x] 运行 `cargo test` 确保全部单元测试通过（11 项测试通过）
+  - [x] 运行 `cargo check` 确保零错误零警告
+  - [x] 更新 `task.md` 进度打勾
+
+
