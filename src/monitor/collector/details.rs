@@ -23,6 +23,12 @@ pub struct DetailMetrics {
     pub vram_display: Option<String>,
     /// 供电状态 (如 "98% (接通电源)")，台式机无电池为 None
     pub power_display: Option<String>,
+    /// 电池电量百分比 (0..=100)，台式机无电池为 None
+    pub battery_percent: Option<u8>,
+    /// 是否接通交流电源
+    pub is_ac_online: bool,
+    /// 系统连续运行秒数
+    pub uptime_seconds: u64,
     /// 系统连续运行时间 (如 "3天 14小时 32分")
     pub uptime_display: String,
     /// 资源消耗最高的进程 (如 "chrome.exe")
@@ -34,6 +40,9 @@ impl Default for DetailMetrics {
         Self {
             vram_display: None,
             power_display: None,
+            battery_percent: None,
+            is_ac_online: false,
+            uptime_seconds: 0,
             uptime_display: "0天 0小时 0分".to_string(),
             top_process_display: "--".to_string(),
         }
@@ -231,13 +240,16 @@ impl DetailsCollector {
 
     pub fn sample(&mut self) -> DetailMetrics {
         let vram_display = self.vram_collector.sample();
-        let power_display = query_power_status();
-        let uptime_display = query_system_uptime();
+        let (battery_percent, is_ac_online, power_display) = query_power_status();
+        let (uptime_seconds, uptime_display) = query_system_uptime();
         let top_process_display = self.query_top_process();
 
         DetailMetrics {
             vram_display,
             power_display,
+            battery_percent,
+            is_ac_online,
+            uptime_seconds,
             uptime_display,
             top_process_display,
         }
@@ -310,41 +322,44 @@ impl DetailsCollector {
     }
 }
 
-/// 查询电池电量与供电状态
-fn query_power_status() -> Option<String> {
+/// 查询电池电量与供电状态：返回 (Option<battery_percent>, is_ac_online, Option<display_string>)
+fn query_power_status() -> (Option<u8>, bool, Option<String>) {
     unsafe {
         let mut status = SYSTEM_POWER_STATUS::default();
         if GetSystemPowerStatus(&mut status).is_ok() {
             // 检查是否有电池：BatteryFlag 128 代表 No system battery
             if status.BatteryFlag != 128 && status.BatteryLifePercent <= 100 {
                 let percent = status.BatteryLifePercent;
-                let state_str = if status.ACLineStatus == 1 {
+                let is_ac = status.ACLineStatus == 1;
+                let state_str = if is_ac {
                     "接通电源"
                 } else {
                     "电池供电"
                 };
-                return Some(format!("{}% ({})", percent, state_str));
+                return (Some(percent), is_ac, Some(format!("{}% ({})", percent, state_str)));
             }
         }
-        None
+        (None, false, None)
     }
 }
 
-/// 查询系统连续运行总时长 (不受快速启动假关机影响)
-fn query_system_uptime() -> String {
+/// 查询系统连续运行总时长 (不受快速启动假关机影响)，返回 (总秒数, 默认中文字符串)
+fn query_system_uptime() -> (u64, String) {
     let ms = unsafe { GetTickCount64() };
     let total_secs = ms / 1000;
     let days = total_secs / (3600 * 24);
     let hours = (total_secs / 3600) % 24;
     let minutes = (total_secs / 60) % 60;
 
-    if days > 0 {
+    let display = if days > 0 {
         format!("{}天 {}小时 {}分", days, hours, minutes)
     } else if hours > 0 {
         format!("{}小时 {}分", hours, minutes)
     } else {
         format!("{}分", minutes.max(1))
-    }
+    };
+
+    (total_secs, display)
 }
 
 fn filetime_to_u64(ft: &FILETIME) -> u64 {

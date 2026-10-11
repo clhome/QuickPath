@@ -260,6 +260,14 @@ pub struct MonitorSection {
     pub tooltip_write: String,
     #[serde(default)]
     pub tooltip_top: String,
+    #[serde(default)]
+    pub tooltip_session_total: String,
+    #[serde(default)]
+    pub tooltip_days: String,
+    #[serde(default)]
+    pub tooltip_hours: String,
+    #[serde(default)]
+    pub tooltip_minutes: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

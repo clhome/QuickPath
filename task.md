@@ -618,6 +618,25 @@
   - [x] 运行 `cargo test` 确保所有 13 项单元测试 100% 通过
   - [x] 编译 Release 版本并在 Windows 11 环境下验证通过
 
+## 阶段四十二：硬件悬浮看板 (Hardware Dashboard) 全语言 i18n 本地化适配
+- [x] **42.1 语言包配置与多语言字典扩充 (`locales/zh-CN.toml`, `locales/en-US.toml`, `src/rules/i18n.rs`)**
+  - [x] 在 `MonitorSection` 与语言文件中补充 `tooltip_session_total`（本次累计/Session）
+  - [x] 在 `MonitorSection` 与语言文件中补充运行时间单位 `tooltip_days`、`tooltip_hours`、`tooltip_minutes`
+  - [x] 规范统一 `zh-CN.toml` 与 `en-US.toml` 中 `tooltip_power_ac`（接通电源/Plugged In）、`tooltip_vram` 等字典条目
+- [x] **42.2 硬件采集器原始数值字段扩展与展现解耦 (`details.rs`)**
+  - [x] 在 `DetailMetrics` 中扩充 `battery_percent`、`is_ac_online`、`uptime_seconds` 原生数值
+  - [x] 重构 `query_power_status` 与 `query_system_uptime`，解耦底层硬编码中文
+- [x] **42.3 悬浮看板全量指标动态本地化重构 (`tooltip.rs`)**
+  - [x] 网速与网络接口全面应用多语言与本次累计词条
+  - [x] CPU、内存（已用/共）、独立显卡（VRAM）全面应用多语言
+  - [x] 磁盘 I/O 读写带宽基于原始速率动态本地化渲染（Read/Write）
+  - [x] 连续运行时间根据语言包时间单位自适应本地化呈现（支持 6d 22h 14m / 6天 22小时 14分）
+  - [x] 供电状态基于电源和电量原生数值动态映射本地化状态
+- [x] **42.4 单元测试验证、多语言断言与构建校验**
+  - [x] 增加中英文状态下 `TooltipData` 多语言生成的单元测试覆盖
+  - [x] 运行 `cargo test` 确保全量测试 100% 通过
+  - [x] 运行 `cargo check` 确保无编译错误与警告
+
 
 
 

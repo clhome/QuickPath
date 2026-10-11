@@ -66,8 +66,14 @@ impl TooltipData {
             bundle.floating_bar.producer.clone()
         };
 
+        let net_lbl = if bundle.monitor.tooltip_net_speed.is_empty() {
+            "实时网速"
+        } else {
+            &bundle.monitor.tooltip_net_speed
+        };
         let net_line = format!(
-            "实时网速: ↑ {:.1} Mbps ({:.2} MB/s)  ↓ {:.1} Mbps ({:.2} MB/s)",
+            "{}: ↑ {:.1} Mbps ({:.2} MB/s)  ↓ {:.1} Mbps ({:.2} MB/s)",
+            net_lbl,
             snapshot.network.upload_mbps,
             snapshot.network.upload_mb_s,
             snapshot.network.download_mbps,
@@ -75,9 +81,19 @@ impl TooltipData {
         );
 
         let total_mb = snapshot.network.total_bytes_session as f64 / (1024.0 * 1024.0);
+        let adapter_lbl = if bundle.monitor.tooltip_net_adapter.is_empty() {
+            "网络接口"
+        } else {
+            &bundle.monitor.tooltip_net_adapter
+        };
+        let session_lbl = if bundle.monitor.tooltip_session_total.is_empty() {
+            "本次累计"
+        } else {
+            &bundle.monitor.tooltip_session_total
+        };
         let adapter_line = format!(
-            "网络接口: {} (本次累计: {:.1} MB)",
-            snapshot.network.adapter_name, total_mb
+            "{}: {} ({}: {:.1} MB)",
+            adapter_lbl, snapshot.network.adapter_name, session_lbl, total_mb
         );
 
         let cpu_top = if !snapshot.details.top_process_display.is_empty() && snapshot.details.top_process_display != "--" {
@@ -85,23 +101,101 @@ impl TooltipData {
         } else {
             "".to_string()
         };
-        let cpu_line = format!("处 理 器: {:.0}%{}", snapshot.cpu.usage_percent, cpu_top);
+        let cpu_lbl = if bundle.monitor.tooltip_cpu.is_empty() {
+            "处 理 器"
+        } else {
+            &bundle.monitor.tooltip_cpu
+        };
+        let cpu_line = format!("{}: {:.0}%{}", cpu_lbl, snapshot.cpu.usage_percent, cpu_top);
 
+        let mem_lbl = if bundle.monitor.tooltip_memory.is_empty() {
+            "物 理 内 存"
+        } else {
+            &bundle.monitor.tooltip_memory
+        };
+        let used_lbl = if bundle.monitor.tooltip_used.is_empty() {
+            "已用"
+        } else {
+            &bundle.monitor.tooltip_used
+        };
+        let total_lbl = if bundle.monitor.tooltip_total.is_empty() {
+            "共"
+        } else {
+            &bundle.monitor.tooltip_total
+        };
         let mem_line = format!(
-            "物 理 内存: {}% (已用 {:.1} GB / 共 {:.1} GB)",
-            snapshot.memory.usage_percent, snapshot.memory.used_gb, snapshot.memory.total_gb
+            "{}: {}% ({} {:.1} GB / {} {:.1} GB)",
+            mem_lbl,
+            snapshot.memory.usage_percent,
+            used_lbl,
+            snapshot.memory.used_gb,
+            total_lbl,
+            snapshot.memory.total_gb
         );
 
-        let gpu_vram = snapshot.details.vram_display.as_deref().unwrap_or("显存: --");
+        let vram_lbl = if bundle.monitor.tooltip_vram.is_empty() {
+            "显存"
+        } else {
+            &bundle.monitor.tooltip_vram
+        };
+        let fallback_vram = format!("{}: --", vram_lbl);
+        let gpu_vram = snapshot.details.vram_display.as_deref().unwrap_or(&fallback_vram);
         let gpu_val = snapshot.gpu.usage_percent.map(|v| format!("{:.0}%", v)).unwrap_or_else(|| "--%".to_string());
-        let gpu_line = format!("独 立 显卡: {} ({})", gpu_val, gpu_vram);
+        let gpu_lbl = if bundle.monitor.tooltip_gpu.is_empty() {
+            "独 立 显 卡"
+        } else {
+            &bundle.monitor.tooltip_gpu
+        };
+        let gpu_line = format!("{}: {} ({})", gpu_lbl, gpu_val, gpu_vram);
 
+        let disk_lbl = if bundle.monitor.tooltip_disk.is_empty() {
+            "磁 盘 I/O"
+        } else {
+            &bundle.monitor.tooltip_disk
+        };
+        let read_lbl = if bundle.monitor.tooltip_read.is_empty() {
+            "读取"
+        } else {
+            &bundle.monitor.tooltip_read
+        };
+        let write_lbl = if bundle.monitor.tooltip_write.is_empty() {
+            "写入"
+        } else {
+            &bundle.monitor.tooltip_write
+        };
         let disk_line = format!(
-            "磁 盘 I/O: {:.0}% ({})",
-            snapshot.disk.activity_percent, snapshot.disk.tooltip_display
+            "{}: {:.0}% ({}: {:.1} MB/s, {}: {:.1} MB/s)",
+            disk_lbl,
+            snapshot.disk.activity_percent,
+            read_lbl,
+            snapshot.disk.read_mb_s,
+            write_lbl,
+            snapshot.disk.write_mb_s
         );
 
-        let uptime_line = format!("连续运行: {}", snapshot.details.uptime_display);
+        let total_secs = snapshot.details.uptime_seconds;
+        let days = total_secs / (3600 * 24);
+        let hours = (total_secs / 3600) % 24;
+        let minutes = (total_secs / 60) % 60;
+
+        let d_unit = if bundle.monitor.tooltip_days.is_empty() { "天" } else { &bundle.monitor.tooltip_days };
+        let h_unit = if bundle.monitor.tooltip_hours.is_empty() { "小时" } else { &bundle.monitor.tooltip_hours };
+        let m_unit = if bundle.monitor.tooltip_minutes.is_empty() { "分" } else { &bundle.monitor.tooltip_minutes };
+
+        let uptime_val = if days > 0 {
+            format!("{}{} {}{} {}{}", days, d_unit, hours, h_unit, minutes, m_unit)
+        } else if hours > 0 {
+            format!("{}{} {}{}", hours, h_unit, minutes, m_unit)
+        } else {
+            format!("{}{}", minutes.max(1), m_unit)
+        };
+
+        let uptime_lbl = if bundle.monitor.tooltip_uptime.is_empty() {
+            "连续运行"
+        } else {
+            &bundle.monitor.tooltip_uptime
+        };
+        let uptime_line = format!("{}: {}", uptime_lbl, uptime_val);
 
         let mut lines = vec![
             net_line,
@@ -113,8 +207,26 @@ impl TooltipData {
             uptime_line,
         ];
 
-        if let Some(power) = &snapshot.details.power_display {
-            lines.push(format!("供电状态: {}", power));
+        if let Some(percent) = snapshot.details.battery_percent {
+            let state_str = if snapshot.details.is_ac_online {
+                if bundle.monitor.tooltip_power_ac.is_empty() {
+                    "接通电源"
+                } else {
+                    &bundle.monitor.tooltip_power_ac
+                }
+            } else {
+                if bundle.monitor.tooltip_power_battery.is_empty() {
+                    "电池供电"
+                } else {
+                    &bundle.monitor.tooltip_power_battery
+                }
+            };
+            let power_lbl = if bundle.monitor.tooltip_power.is_empty() {
+                "供电状态"
+            } else {
+                &bundle.monitor.tooltip_power
+            };
+            lines.push(format!("{}: {}% ({})", power_lbl, percent, state_str));
         }
 
         Self {
@@ -660,5 +772,141 @@ impl Drop for MonitorTooltip {
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::collector::{CpuMetrics, DetailMetrics, DiskMetrics, GpuMetrics, NetworkSpeed};
+    use crate::monitor::collector::memory::MemoryMetrics;
+    use crate::monitor::metrics::WaveformBuffer;
+
+    fn create_mock_snapshot() -> MetricsSnapshot {
+        MetricsSnapshot {
+            network: NetworkSpeed {
+                upload_mb_s: 0.01,
+                download_mb_s: 0.02,
+                upload_mbps: 0.1,
+                download_mbps: 0.1,
+                upload_display: "↑ 0.1".to_string(),
+                download_display: "↓ 0.1".to_string(),
+                adapter_name: "MediaTek Wi-Fi 7 MT7925 Wireless LAN Card".to_string(),
+                total_bytes_session: (0.4 * 1024.0 * 1024.0) as u64,
+            },
+            cpu: CpuMetrics {
+                usage_percent: 3.0,
+                display: "C:  3%".to_string(),
+            },
+            memory: MemoryMetrics {
+                usage_percent: 52,
+                used_gb: 14.5,
+                total_gb: 27.8,
+                display: "M: 52%".to_string(),
+                tooltip_display: "14.5 GB / 27.8 GB".to_string(),
+            },
+            gpu: GpuMetrics {
+                usage_percent: Some(2.0),
+                display: "G:  2%".to_string(),
+            },
+            disk: DiskMetrics {
+                activity_percent: 2.0,
+                read_mb_s: 0.5,
+                write_mb_s: 0.1,
+                display: "D:  2%".to_string(),
+                tooltip_display: "读取: 0.5 MB/s, 写入: 0.1 MB/s".to_string(),
+            },
+            details: DetailMetrics {
+                vram_display: Some("1.4 GB / 4.2 GB".to_string()),
+                power_display: Some("80% (接通电源)".to_string()),
+                battery_percent: Some(80),
+                is_ac_online: true,
+                uptime_seconds: 6 * 86400 + 22 * 3600 + 14 * 60,
+                uptime_display: "6天 22小时 14分".to_string(),
+                top_process_display: "HZBankSecurityInputKz.exe".to_string(),
+            },
+            cpu_waveform: WaveformBuffer::new(18),
+        }
+    }
+
+    #[test]
+    fn test_tooltip_data_zh_cn() {
+        let snap = create_mock_snapshot();
+        let data = TooltipData::from_snapshot(&snap, &Language::ZhCN);
+
+        assert_eq!(data.title, "QuickPath硬件看板");
+        assert_eq!(data.producer, "衢州御风科技有限公司出品");
+        assert_eq!(data.lines.len(), 8);
+
+        assert!(data.lines[0].starts_with("实时网速: ↑ 0.1 Mbps (0.01 MB/s)  ↓ 0.1 Mbps (0.02 MB/s)"));
+        assert!(data.lines[1].starts_with("网络接口: MediaTek Wi-Fi 7 MT7925 Wireless LAN Card (本次累计: 0.4 MB)"));
+        assert_eq!(data.lines[2], "处 理 器: 3% (Top: HZBankSecurityInputKz.exe)");
+        assert_eq!(data.lines[3], "物 理 内 存: 52% (已用 14.5 GB / 共 27.8 GB)");
+        assert_eq!(data.lines[4], "独 立 显 卡: 2% (1.4 GB / 4.2 GB)");
+        assert_eq!(data.lines[5], "磁 盘 I/O: 2% (读取: 0.5 MB/s, 写入: 0.1 MB/s)");
+        assert_eq!(data.lines[6], "连续运行: 6天 22小时 14分");
+        assert_eq!(data.lines[7], "供电状态: 80% (接通电源)");
+    }
+
+    #[test]
+    fn test_tooltip_data_en_us() {
+        let snap = create_mock_snapshot();
+        let data = TooltipData::from_snapshot(&snap, &Language::EnUS);
+
+        assert_eq!(data.title, "QuickPath Hardware Dashboard");
+        assert_eq!(data.producer, "Produced by Quzhou Yufeng Technology Co., Ltd.");
+        assert_eq!(data.lines.len(), 8);
+
+        assert!(data.lines[0].starts_with("Network Speed: ↑ 0.1 Mbps (0.01 MB/s)  ↓ 0.1 Mbps (0.02 MB/s)"));
+        assert!(data.lines[1].starts_with("Adapter: MediaTek Wi-Fi 7 MT7925 Wireless LAN Card (Session: 0.4 MB)"));
+        assert_eq!(data.lines[2], "CPU: 3% (Top: HZBankSecurityInputKz.exe)");
+        assert_eq!(data.lines[3], "RAM: 52% (Used 14.5 GB / Total 27.8 GB)");
+        assert_eq!(data.lines[4], "GPU: 2% (1.4 GB / 4.2 GB)");
+        assert_eq!(data.lines[5], "Disk I/O: 2% (Read: 0.5 MB/s, Write: 0.1 MB/s)");
+        assert_eq!(data.lines[6], "Uptime: 6d 22h 14m");
+        assert_eq!(data.lines[7], "Power Status: 80% (Plugged In)");
+    }
+
+    #[test]
+    fn test_tooltip_data_no_battery_desktop() {
+        let mut snap = create_mock_snapshot();
+        snap.details.battery_percent = None;
+        snap.details.power_display = None;
+
+        let data_zh = TooltipData::from_snapshot(&snap, &Language::ZhCN);
+        let data_en = TooltipData::from_snapshot(&snap, &Language::EnUS);
+
+        assert_eq!(data_zh.lines.len(), 7);
+        assert_eq!(data_en.lines.len(), 7);
+    }
+
+    #[test]
+    fn test_tooltip_data_vram_fallback() {
+        let mut snap = create_mock_snapshot();
+        snap.details.vram_display = None;
+
+        let data_zh = TooltipData::from_snapshot(&snap, &Language::ZhCN);
+        let data_en = TooltipData::from_snapshot(&snap, &Language::EnUS);
+
+        assert_eq!(data_zh.lines[4], "独 立 显 卡: 2% (显存: --)");
+        assert_eq!(data_en.lines[4], "GPU: 2% (VRAM: --)");
+    }
+
+    #[test]
+    fn test_tooltip_uptime_variations() {
+        let mut snap = create_mock_snapshot();
+        // 2 小时 15 分
+        snap.details.uptime_seconds = 2 * 3600 + 15 * 60;
+        let data_zh = TooltipData::from_snapshot(&snap, &Language::ZhCN);
+        let data_en = TooltipData::from_snapshot(&snap, &Language::EnUS);
+        assert_eq!(data_zh.lines[6], "连续运行: 2小时 15分");
+        assert_eq!(data_en.lines[6], "Uptime: 2h 15m");
+
+        // 仅 45 分
+        snap.details.uptime_seconds = 45 * 60;
+        let data_zh2 = TooltipData::from_snapshot(&snap, &Language::ZhCN);
+        let data_en2 = TooltipData::from_snapshot(&snap, &Language::EnUS);
+        assert_eq!(data_zh2.lines[6], "连续运行: 45分");
+        assert_eq!(data_en2.lines[6], "Uptime: 45m");
     }
 }
