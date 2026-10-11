@@ -303,6 +303,7 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                 candidates,
                 state.config.floating_bar_opacity,
                 state.config.language.clone(),
+                dlg_info.kind,
             );
         }
 
@@ -324,6 +325,7 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                     let dlg_raw = dlg_info.hwnd.0 as usize;
                     let edit_raw = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd).0 as usize;
                     let target = target_folder.clone();
+                    let kind = dlg_info.kind;
 
                     state.last_switched_dialog = Some(dlg_info.hwnd);
                     state.last_switched_path = Some(target_folder.clone());
@@ -336,6 +338,7 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                             HWND(dlg_raw as *mut _),
                             HWND(edit_raw as *mut _),
                             &target,
+                            kind,
                         );
                     });
                 }
@@ -354,20 +357,21 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
             let (_pid, process_name) = dialog::detector::get_window_process_info(root_hwnd);
 
             let is_wps = dialog::detector::is_wps_process_name(&process_name);
-            let is_wps_main = is_wps && (
-                dialog::detector::is_wps_main_window(root_hwnd, &root_class, &root_title)
-                || dialog::detector::is_wps_main_window(fg_hwnd, &class_name, &fg_title)
-            );
-
-            let is_potential_dialog = !is_wps_main && (
-                root_class == "#32770"
-                || class_name == "#32770"
-                || root_class == "KcfdFileDialog"
-                || root_class.contains("Kcfd")
-                || dialog::detector::is_file_dialog_title(&root_title)
-                || dialog::detector::is_file_dialog_title(&fg_title)
-                || (is_wps && (root_class == "Qt5QWindowIcon" || class_name == "Qt5QWindowIcon"))
-            );
+            let is_potential_dialog = if is_wps {
+                let is_wps_main = dialog::detector::is_wps_main_window(root_hwnd, &root_class, &root_title)
+                    || dialog::detector::is_wps_main_window(fg_hwnd, &class_name, &fg_title);
+                !is_wps_main && (
+                    root_class == "KcfdFileDialog"
+                    || root_class.contains("Kcfd")
+                    || root_class == "Qt5QWindowIcon"
+                    || class_name == "Qt5QWindowIcon"
+                    || root_class == "#32770"
+                    || class_name == "#32770"
+                )
+            } else {
+                // 非 WPS 进程：严格仅针对尚未初始化完成的 #32770 窗口进行有界渐进式重试
+                root_class == "#32770" || class_name == "#32770"
+            };
 
             if is_potential_dialog {
                 let hwnd_raw = fg_hwnd.0 as usize;
@@ -415,6 +419,7 @@ fn on_hotkey_triggered() {
                 candidates,
                 state.config.floating_bar_opacity,
                 state.config.language.clone(),
+                dlg_info.kind,
             );
         }
     }

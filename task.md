@@ -600,6 +600,92 @@
   - [x] 运行 `cargo test` 确保全部 13 项单元测试 100% 通过
   - [x] 编译 Release 并部署常驻运行（PID 34296）
 
+## 阶段四十一：标准 Win32 对话框与 WPS Qt/自绘窗体彻底架构分流与秒退 Bug 修复
+- [x] **41.1 根因分析与架构分流方案确认**
+  - [x] 查明放宽准则导致 Word 等标准对话框在子控件未就绪时早产命中
+  - [x] 查明早产获取错误 Edit 导致 AutoSwitch 发送回车直接误保存关闭另存为窗口
+  - [x] 查明 `injector.rs` 中 `!has_valid_edit` 越权调用 WPS UIA 注入逻辑
+- [x] **41.2 标准 Win32 对话框识别完全回归 1.0.2 纯正准则 (`detector.rs`)**
+  - [x] 在 `detect_file_dialog` 顶层以进程类型 `is_wps_process_name` 实施一级物理分流
+  - [x] 非 WPS 进程严格走 1.0.2 判决：必须同时拥有 `DirectUIHWND`/`SHELLDLL_DefView` 和 `ComboBoxEx32`，必须获得有效可见 `Edit`
+  - [x] 彻底剔除针对标准对话框的标题放宽准则，杜绝未就绪时提前早产命中
+  - [x] WPS 专属逻辑完全封装于 `detect_wps_dialog`，专用通道互不干扰
+- [x] **41.3 注入引擎类型物理隔离与防误触加固 (`injector.rs`, `floating_bar.rs`)**
+  - [x] 为 `inject_path_to_dialog` 增加明确的 `kind: DialogKind` 路由
+  - [x] 标准 Win32 对话框绝对只走原生 Win32 消息注入，严禁任何情况下越权降级调用 WPS UIA 逻辑
+  - [x] 同步更新悬浮吸附条 `FloatingBar` 与 `main.rs` 中的调用，准确传递 `DialogKind`
+- [x] **41.4 单元测试更新、编译与运行验证**
+  - [x] 运行 `cargo test` 确保所有 13 项单元测试 100% 通过
+  - [x] 编译 Release 版本并在 Windows 11 环境下验证通过
+
+## 阶段四十二：硬件悬浮看板 (Hardware Dashboard) 全语言 i18n 本地化适配
+- [x] **42.1 语言包配置与多语言字典扩充 (`locales/zh-CN.toml`, `locales/en-US.toml`, `src/rules/i18n.rs`)**
+  - [x] 在 `MonitorSection` 与语言文件中补充 `tooltip_session_total`（本次累计/Session）
+  - [x] 在 `MonitorSection` 与语言文件中补充运行时间单位 `tooltip_days`、`tooltip_hours`、`tooltip_minutes`
+  - [x] 规范统一 `zh-CN.toml` 与 `en-US.toml` 中 `tooltip_power_ac`（接通电源/Plugged In）、`tooltip_vram` 等字典条目
+- [x] **42.2 硬件采集器原始数值字段扩展与展现解耦 (`details.rs`)**
+  - [x] 在 `DetailMetrics` 中扩充 `battery_percent`、`is_ac_online`、`uptime_seconds` 原生数值
+  - [x] 重构 `query_power_status` 与 `query_system_uptime`，解耦底层硬编码中文
+- [x] **42.3 悬浮看板全量指标动态本地化重构 (`tooltip.rs`)**
+  - [x] 网速与网络接口全面应用多语言与本次累计词条
+  - [x] CPU、内存（已用/共）、独立显卡（VRAM）全面应用多语言
+  - [x] 磁盘 I/O 读写带宽基于原始速率动态本地化渲染（Read/Write）
+  - [x] 连续运行时间根据语言包时间单位自适应本地化呈现（支持 6d 22h 14m / 6天 22小时 14分）
+  - [x] 供电状态基于电源和电量原生数值动态映射本地化状态
+- [x] **42.4 单元测试验证、多语言断言与构建校验**
+  - [x] 增加中英文状态下 `TooltipData` 多语言生成的单元测试覆盖
+  - [x] 运行 `cargo test` 确保全量测试 100% 通过
+  - [x] 运行 `cargo check` 确保无编译错误与警告
+
+## 阶段四十三：硬件悬浮看板 (Hardware Dashboard) 零资源纯 GDI 矢量微图标集成
+- [x] **43.1 数据模型扩展与指标类型枚举定义 (`tooltip.rs`)**
+  - [x] 定义 `MetricIconKind` 枚举涵盖 8 项核心指标（网速、适配器、CPU、内存、显卡、磁盘、运行时间、供电状态）
+  - [x] 将 `TooltipData` 重构为带图标类型的结构化行 `TooltipLine`
+- [x] **43.2 纯 GDI 零资源高性能矢量微图标绘制引擎实现 (`tooltip.rs`)**
+  - [x] 零图片零额外字体加载，纯 Win32 GDI 矢量几何绘制（网速流向箭头、Wi-Fi波纹、CPU芯片引脚、RAM内存颗粒、GPU显卡风扇、存储硬盘盒、时钟表盘、电池与闪电）
+  - [x] 支持根据深浅主题与指标类别呈现精致协调的 Fluent 微彩色 Accent 点缀
+  - [x] 全量像素坐标与线宽根据 DPI `scale` 精确自适应
+- [x] **43.3 看板布局排版与自适应间距对齐升级 (`tooltip.rs`)**
+  - [x] 为正文每行预留图标展示区，文字起始位置保持严格垂直基线对齐
+  - [x] 动态测量文本并自动适应窗体宽度，保证舒展通透无溢出截断
+- [x] **43.4 单元测试更新、编译校验与运行部署**
+  - [x] 更新单元测试覆盖 `TooltipLine` 与各指标枚举类型
+  - [x] 运行 `cargo test` 确保全量测试通过
+  - [x] 编译 Release 并更新常驻进程
+
+## 阶段四十四：硬件悬浮看板实时网速排版精简与 Top 网络进程识别
+- [x] **44.1 硬件指标模型扩展 (`details.rs`)**
+  - [x] 在 `DetailMetrics` 中扩充 `top_net_process_display: String`
+- [x] **44.2 活跃网络进程与流量 I/O 增量捕获引擎 (`details.rs`)**
+  - [x] 实现 `query_active_network_pids` 高速枚举活跃网络连接 PID（IPv4/IPv6 TCP ESTABLISHED 与 UDP 通信）
+  - [x] 在 `DetailsCollector` 进程遍历中同步采集 `GetProcessIoCounters`，计算各网络进程 I/O 增量，识别网络 Top 占用进程
+- [x] **44.3 悬浮看板实时网速行渲染重构 (`tooltip.rs`)**
+  - [x] 移除网速行中冗余的括号 `(MB/s)` 显示，精简排版
+  - [x] 网速行后方自适应追加 `(Top: xxx.exe)`，与 CPU 显示规范完全保持统一
+- [x] **44.4 单元测试验证、全量测试回归与 Release 部署**
+  - [x] 更新中英文看板单元测试断言覆盖新的网速格式与 Top 网络进程
+  - [x] 运行 `cargo test` 确保 100% 通过
+  - [x] 编译 Release 并部署更新常驻进程
+
+## 阶段四十五：硬件看板排版优化（网络接口置顶、行间细分割线）与磁盘/GPU Top进程识别
+- [x] **45.1 悬浮看板网络接口置顶与行间细分割线集成 (`tooltip.rs`)**
+  - [x] 调整看板指标行渲染顺序：网络接口置于首行，其余依次为实时网速、处理器、内存、显卡、磁盘、运行时间、供电状态
+  - [x] 在每行数据之间绘制精致 1px 细横线分割线，根据深浅模式自适应微透明配色，同步自适应高度与间距
+- [x] **45.2 磁盘 I/O 方案 A 与 Top 磁盘进程零开销捕获 (`details.rs`, `tooltip.rs`)**
+  - [x] `DetailMetrics` 扩充 `top_disk_process_display: String`
+  - [x] 在现有的进程遍历与 `GetProcessIoCounters` 采集流程中追踪各进程 I/O 增量，识别磁盘最高读写进程
+  - [x] 看板磁盘 I/O 行严格落实方案 A：保留读取/写入带宽细节，后置自适应追加 `(Top: xxx.exe)`
+- [x] **45.3 独立显卡 GPU Top 进程零开销捕获与看板展示 (`gpu.rs`, `tooltip.rs`)**
+  - [x] `GpuMetrics` 扩充 `top_process_display: String`
+  - [x] 在 `GpuCollector::sample()` 遍历 GPU Engine 计数器时高性能累加各 PID 利用率，当利用率超过底噪阈值时仅对 Top 进程查询进程名称
+  - [x] 看板 GPU 行后置自适应追加 `(Top: xxx.exe)`
+- [x] **45.4 单元测试更新、全量测试回归与 Release 部署**
+  - [x] 更新单元测试断言覆盖首行网络接口、磁盘方案 A、GPU Top 进程展示逻辑
+  - [x] 运行 `cargo test` 确保全量测试通过
+  - [x] 编译 Release 并重启常驻进程验证
+
+
+
 
 
 

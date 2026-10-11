@@ -334,10 +334,19 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
     }
 }
 
-/// 探测标准 Win32 (#32770) 文件对话框
+/// 探测标准 Win32 (#32770) 文件对话框（100% 严格遵循 1.0.2 经典稳定准则）
 fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<FileDialogInfo> {
     unsafe {
-        let hwnd = find_dialog_root(raw_hwnd);
+        // 尝试解析顶层祖先窗口，防止焦点在子控件时类名不匹配（与 1.0.2 一致）
+        let root_hwnd = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+            raw_hwnd,
+            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+        );
+        let hwnd = if !root_hwnd.0.is_null() && IsWindow(Some(root_hwnd)).as_bool() {
+            root_hwnd
+        } else {
+            raw_hwnd
+        };
 
         if !IsWindowVisible(hwnd).as_bool() {
             log_debug(&format!("detect_std REJECT: hwnd=0x{:X} not visible", hwnd.0 as usize));
@@ -345,13 +354,8 @@ fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Opt
         }
 
         let class_name = get_window_class_name(hwnd);
-        let window_title = get_window_title(hwnd);
-
         // 大多数标准与通用文件对话框的类名均为 #32770
-        let is_32770 = class_name == "#32770";
-        let is_dialog_title = is_file_dialog_title(&window_title);
-
-        if !is_32770 && !is_dialog_title {
+        if class_name != "#32770" {
             return None;
         }
 
@@ -365,35 +369,28 @@ fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Opt
 
         let _ = EnumChildWindows(
             Some(hwnd),
-            Some(enum_children_proc),
+            Some(enum_standard_children_proc),
             LPARAM(&mut ctx as *mut _ as isize),
         );
 
-        // 标准 Win32 对话框判定条件：
-        // 1. 具有输入控件 (ComboBoxEx32 / ComboBox / 可见 Edit)
-        let has_input = ctx.has_file_name_combo || !ctx.edit_hwnds.is_empty();
+        // 1.0.2 黄金法则：文件对话框必须同时满足两个必要条件：
+        // 1. 文件列表视图（DirectUIHWND / SHELLDLL_DefView）
+        // 2. 文件名输入组合框（ComboBoxEx32）
+        // 属性页/安装向导/工具软件等 #32770 窗口不会同时具备这两者
+        // 此外：必须取得有效可见的 Edit 控件，确保对话框已完全初始化完成，杜绝早产误判
+        let file_name_edit = ctx.edit_hwnds.first().copied();
 
-        // 2. 具有列表或工具栏导航
-        let has_navigation_or_list = ctx.has_list_view || ctx.has_toolbar_or_breadcrumb;
-
-        // 3. 判定准则：
-        // 准则 A：若标题明确为“另存为/打开/Save As/Open”，且窗口类名为 #32770：
-        // 只要具备输入控件 (has_input) 或具备浏览导航列表 (has_navigation_or_list)，即认定为文件对话框
-        // 准则 B：若具备文件列表且具备输入控件 (has_list_view && has_input)，无条件认定为标准文件对话框
-        let is_standard_dialog = (ctx.has_list_view && has_input)
-            || (is_dialog_title && (has_navigation_or_list || has_input));
-
-        if !is_standard_dialog {
+        if !ctx.has_list_view || !ctx.has_file_name_combo || file_name_edit.is_none() {
             log_debug(&format!(
-                "detect_std REJECT: hwnd=0x{:X} list={} combo={} bar={} edits={} title='{}'",
-                hwnd.0 as usize, ctx.has_list_view, ctx.has_file_name_combo, ctx.has_toolbar_or_breadcrumb, ctx.edit_hwnds.len(), window_title
+                "detect_std REJECT: hwnd=0x{:X} list={} combo={} edits={}",
+                hwnd.0 as usize, ctx.has_list_view, ctx.has_file_name_combo, ctx.edit_hwnds.len()
             ));
             return None;
         }
 
         let mut rect = RECT::default();
         let _ = GetWindowRect(hwnd, &mut rect);
-        let file_name_edit = ctx.edit_hwnds.first().copied();
+        let window_title = get_window_title(hwnd);
 
         Some(FileDialogInfo {
             hwnd,
@@ -426,15 +423,16 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
             raw_hwnd.0 as usize, pid, process_name, class_name, title, root.0 as usize, root_class, root_title
         ));
 
-        // 1. 若为 WPS 进程，优先尝试识别 WPS 自绘文件对话框
+        // 1. 若为 WPS 进程，严格走 WPS 专属自绘/Qt 对话框探测通道
         if is_wps_process_name(&process_name) {
             if let Some(wps_info) = detect_wps_dialog(raw_hwnd, pid, process_name.clone()) {
                 log_debug(&format!("DETECT_HIT_WPS: hwnd=0x{:X} title='{}' rect={:?}", wps_info.hwnd.0 as usize, wps_info.window_title, wps_info.rect));
                 return Some(wps_info);
             }
+            return None;
         }
 
-        // 2. 标准 Win32 对话框识别
+        // 2. 非 WPS 进程：100% 走标准 Win32 对话框通道（完全保留 1.0.2 纯正准则，绝不受任何放宽影响）
         if let Some(std_info) = detect_standard_dialog(raw_hwnd, pid, process_name.clone()) {
             log_debug(&format!("DETECT_HIT_STD: hwnd=0x{:X} title='{}' rect={:?}", std_info.hwnd.0 as usize, std_info.window_title, std_info.rect));
             Some(std_info)
@@ -444,6 +442,29 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
     }
 }
 
+/// 标准 Win32 对话框子控件枚举过程（100% 恢复 1.0.2 纯净定义）
+unsafe extern "system" fn enum_standard_children_proc(child: HWND, lparam: LPARAM) -> BOOL {
+    unsafe {
+        let ctx = &mut *(lparam.0 as *mut ChildEnumContext);
+        let class = get_window_class_name(child);
+
+        if class == "DirectUIHWND" || class == "SHELLDLL_DefView" {
+            ctx.has_list_view = true;
+        } else if class == "ComboBoxEx32" {
+            ctx.has_file_name_combo = true;
+        } else if class.starts_with("ToolbarWindow32") || class.contains("Breadcrumb") {
+            ctx.has_toolbar_or_breadcrumb = true;
+        } else if class.eq_ignore_ascii_case("Edit") {
+            if IsWindowVisible(child).as_bool() {
+                ctx.edit_hwnds.push(child);
+            }
+        }
+
+        BOOL(1)
+    }
+}
+
+/// WPS Office 专用子控件枚举过程
 unsafe extern "system" fn enum_children_proc(child: HWND, lparam: LPARAM) -> BOOL {
     unsafe {
         let ctx = &mut *(lparam.0 as *mut ChildEnumContext);

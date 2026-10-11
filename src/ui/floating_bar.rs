@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::dialog::inject_path_to_dialog;
+use crate::dialog::{inject_path_to_dialog, DialogKind};
 use crate::managers::FolderCandidate;
 use crate::rules::{I18n, Language};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -37,6 +37,7 @@ pub struct FloatingBarState {
     pub hwnd: HWND,
     pub target_dialog_hwnd: HWND,
     pub target_edit_hwnd: HWND,
+    pub target_dialog_kind: DialogKind,
     pub candidates: Vec<FolderCandidate>,
     pub selected_index: usize,
     pub hovered_index: Option<usize>,
@@ -125,6 +126,7 @@ impl FloatingBar {
                 hwnd,
                 target_dialog_hwnd: HWND::default(),
                 target_edit_hwnd: HWND::default(),
+                target_dialog_kind: DialogKind::StandardWin32,
                 candidates: Vec::new(),
                 selected_index: 0,
                 hovered_index: None,
@@ -168,6 +170,7 @@ impl FloatingBar {
         candidates: Vec<FolderCandidate>,
         opacity: u8,
         language: Language,
+        kind: DialogKind,
     ) {
         if candidates.is_empty() {
             self.hide();
@@ -201,6 +204,7 @@ impl FloatingBar {
 
         self.state.target_dialog_hwnd = dialog_hwnd;
         self.state.target_edit_hwnd = edit_hwnd;
+        self.state.target_dialog_kind = kind;
         self.state.candidates = candidates;
         self.state.selected_index = 0;
         self.state.hovered_index = None;
@@ -326,6 +330,7 @@ impl FloatingBar {
             let path = target.path.clone();
             let dlg_hwnd = self.state.target_dialog_hwnd;
             let edit_hwnd = self.state.target_edit_hwnd;
+            let kind = self.state.target_dialog_kind;
             self.hide();
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
@@ -334,6 +339,7 @@ impl FloatingBar {
                 dlg_hwnd,
                 edit_hwnd,
                 &path,
+                kind,
             );
         }
     }
@@ -764,6 +770,7 @@ fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
                 let path = target.path.clone();
                 let dlg_hwnd = state.target_dialog_hwnd;
                 let edit_hwnd = state.target_edit_hwnd;
+                let kind = state.target_dialog_kind;
                 unsafe {
                     let _ = ShowWindow(state.hwnd, SW_HIDE);
                     let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
@@ -772,6 +779,7 @@ fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
                     dlg_hwnd,
                     edit_hwnd,
                     &path,
+                    kind,
                 );
             }
         }
