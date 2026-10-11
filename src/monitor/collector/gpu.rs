@@ -1,10 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use windows::core::w;
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
     PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
 };
+use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
+use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
 const PDH_MORE_DATA: u32 = 0x800007D2;
 
@@ -14,6 +17,8 @@ pub struct GpuMetrics {
     pub usage_percent: Option<f32>,
     /// 格式化用于常驻显示的文本，如 "G: 32%" 或 "G: --%"
     pub display: String,
+    /// 占用 GPU 最高进程名称，如 "dwm.exe" 或 "--"
+    pub top_process_display: String,
 }
 
 impl Default for GpuMetrics {
@@ -21,6 +26,7 @@ impl Default for GpuMetrics {
         Self {
             usage_percent: None,
             display: "G: --%".to_string(),
+            top_process_display: "--".to_string(),
         }
     }
 }
@@ -148,10 +154,26 @@ impl GpuCollector {
             );
 
             let mut total_usage = 0.0f64;
+            let mut pid_usages: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
             for item in items {
                 let val = item.FmtValue.Anonymous.doubleValue;
                 if val > 0.0 {
                     total_usage += val;
+                    if let Some(pid) = parse_gpu_pid(item.szName.0) {
+                        *pid_usages.entry(pid).or_insert(0.0) += val;
+                    }
+                }
+            }
+
+            let mut top_process_display = "--".to_string();
+            if let Some((&top_pid, &max_val)) = pid_usages
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                if max_val >= 1.0 {
+                    if let Some(name) = get_process_name_by_pid(top_pid) {
+                        top_process_display = name;
+                    }
                 }
             }
 
@@ -159,6 +181,7 @@ impl GpuCollector {
             GpuMetrics {
                 usage_percent: Some(clamped),
                 display: format!("G: {:2.0}%", clamped.round()),
+                top_process_display,
             }
         }
     }
@@ -168,8 +191,77 @@ impl GpuCollector {
     }
 }
 
+/// 快速从 GPU Engine 实例名中提取 PID（如 "pid_1234_luid_..."），零堆分配
+unsafe fn parse_gpu_pid(mut ptr: *const u16) -> Option<u32> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut offset = 0;
+    while *ptr.add(offset) != 0 && offset < 32 {
+        if *ptr.add(offset) == b'p' as u16
+            && *ptr.add(offset + 1) == b'i' as u16
+            && *ptr.add(offset + 2) == b'd' as u16
+            && *ptr.add(offset + 3) == b'_' as u16
+        {
+            ptr = ptr.add(offset + 4);
+            let mut pid: u32 = 0;
+            let mut digits = 0;
+            while *ptr >= b'0' as u16 && *ptr <= b'9' as u16 {
+                pid = pid * 10 + (*ptr - b'0' as u16) as u32;
+                digits += 1;
+                ptr = ptr.add(1);
+            }
+            if digits > 0 {
+                return Some(pid);
+            }
+            return None;
+        }
+        offset += 1;
+    }
+    None
+}
+
+/// 根据 PID 极速获取可执行文件名（如 "dwm.exe"），仅对 Top 进程单次查询
+unsafe fn get_process_name_by_pid(pid: u32) -> Option<String> {
+    if pid == 0 || pid == 4 {
+        return Some("System".to_string());
+    }
+    if let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+        let mut buf = [0u16; 260];
+        let len = K32GetProcessImageFileNameW(handle, &mut buf);
+        let _ = CloseHandle(handle);
+        if len > 0 {
+            let path = String::from_utf16_lossy(&buf[..len as usize]);
+            if let Some(idx) = path.rfind('\\') {
+                return Some(path[idx + 1..].to_string());
+            } else {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
 impl Drop for GpuCollector {
     fn drop(&mut self) {
         self.cleanup();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_gpu_pid() {
+        let sample = "pid_22764_luid_0x00000000_0x0000D0EB_phys_0_eng_0_engtype_3D\0";
+        let u16_sample: Vec<u16> = sample.encode_utf16().collect();
+        let pid = unsafe { parse_gpu_pid(u16_sample.as_ptr()) };
+        assert_eq!(pid, Some(22764));
+
+        let invalid = "unknown_engine_instance_name\0";
+        let u16_invalid: Vec<u16> = invalid.encode_utf16().collect();
+        let pid_invalid = unsafe { parse_gpu_pid(u16_invalid.as_ptr()) };
+        assert_eq!(pid_invalid, None);
     }
 }

@@ -1,9 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory4};
+use windows::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6TABLE_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+    MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -14,7 +18,7 @@ use windows::Win32::System::Performance::{
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessIoCounters, GetProcessTimes, OpenProcess, IO_COUNTERS, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
 #[derive(Debug, Clone)]
@@ -31,8 +35,12 @@ pub struct DetailMetrics {
     pub uptime_seconds: u64,
     /// 系统连续运行时间 (如 "3天 14小时 32分")
     pub uptime_display: String,
-    /// 资源消耗最高的进程 (如 "chrome.exe")
+    /// CPU 消耗最高的进程 (如 "chrome.exe")
     pub top_process_display: String,
+    /// 网络吞吐消耗最高的进程 (如 "chrome.exe")
+    pub top_net_process_display: String,
+    /// 磁盘 I/O 读写消耗最高的进程 (如 "devenv.exe")
+    pub top_disk_process_display: String,
 }
 
 impl Default for DetailMetrics {
@@ -45,6 +53,8 @@ impl Default for DetailMetrics {
             uptime_seconds: 0,
             uptime_display: "0天 0小时 0分".to_string(),
             top_process_display: "--".to_string(),
+            top_net_process_display: "--".to_string(),
+            top_disk_process_display: "--".to_string(),
         }
     }
 }
@@ -225,6 +235,7 @@ impl Drop for VramCollector {
 
 pub struct DetailsCollector {
     last_process_times: HashMap<u32, (u64, String)>,
+    last_process_io: HashMap<u32, u64>,
     last_total_sys_time: u64,
     vram_collector: VramCollector,
 }
@@ -233,6 +244,7 @@ impl DetailsCollector {
     pub fn new() -> Self {
         Self {
             last_process_times: HashMap::new(),
+            last_process_io: HashMap::new(),
             last_total_sys_time: 0,
             vram_collector: VramCollector::new(),
         }
@@ -242,7 +254,7 @@ impl DetailsCollector {
         let vram_display = self.vram_collector.sample();
         let (battery_percent, is_ac_online, power_display) = query_power_status();
         let (uptime_seconds, uptime_display) = query_system_uptime();
-        let top_process_display = self.query_top_process();
+        let (top_process_display, top_net_process_display, top_disk_process_display) = self.query_top_processes();
 
         DetailMetrics {
             vram_display,
@@ -252,22 +264,27 @@ impl DetailsCollector {
             uptime_seconds,
             uptime_display,
             top_process_display,
+            top_net_process_display,
+            top_disk_process_display,
         }
     }
 
-    fn query_top_process(&mut self) -> String {
+    fn query_top_processes(&mut self) -> (String, String, String) {
         unsafe {
             let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
                 Ok(h) if !h.is_invalid() => h,
-                _ => return "--".to_string(),
+                _ => return ("--".to_string(), "--".to_string(), "--".to_string()),
             };
+
+            let net_pids = query_active_network_pids();
 
             let mut entry = PROCESSENTRY32W {
                 dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
                 ..Default::default()
             };
 
-            let mut current_map: HashMap<u32, (u64, String)> = HashMap::new();
+            let mut current_times: HashMap<u32, (u64, String)> = HashMap::new();
+            let mut current_io: HashMap<u32, u64> = HashMap::new();
 
             if Process32FirstW(snap, &mut entry).is_ok() {
                 loop {
@@ -284,8 +301,15 @@ impl DetailsCollector {
 
                             if GetProcessTimes(h_proc, &mut creation, &mut exit, &mut kernel, &mut user).is_ok() {
                                 let total_time = filetime_to_u64(&kernel) + filetime_to_u64(&user);
-                                current_map.insert(pid, (total_time, name));
+                                current_times.insert(pid, (total_time, name.clone()));
                             }
+
+                            let mut io = IO_COUNTERS::default();
+                            if GetProcessIoCounters(h_proc, &mut io).is_ok() {
+                                let total_transfer = io.ReadTransferCount + io.WriteTransferCount;
+                                current_io.insert(pid, total_transfer);
+                            }
+
                             let _ = CloseHandle(h_proc);
                         }
                     }
@@ -297,29 +321,159 @@ impl DetailsCollector {
             }
             let _ = CloseHandle(snap);
 
-            // 比较上一轮时间戳找出 CPU 耗时增量最大的进程
-            let mut max_delta = 0u64;
-            let mut top_name = String::new();
+            // 1. 比较上一轮时间戳找出 CPU 耗时增量最大的进程
+            let mut max_cpu_delta = 0u64;
+            let mut top_cpu_name = String::new();
 
-            for (pid, (cur_time, name)) in &current_map {
+            for (pid, (cur_time, name)) in &current_times {
                 if let Some((prev_time, _)) = self.last_process_times.get(pid) {
                     let delta = cur_time.saturating_sub(*prev_time);
-                    if delta > max_delta {
-                        max_delta = delta;
-                        top_name = name.clone();
+                    if delta > max_cpu_delta {
+                        max_cpu_delta = delta;
+                        top_cpu_name = name.clone();
                     }
                 }
             }
 
-            self.last_process_times = current_map;
+            // 2. 比较上一轮时间戳找出持有活跃网络连接且 I/O 增量最大的网络进程
+            let mut max_net_delta = 0u64;
+            let mut top_net_name = String::new();
 
-            if max_delta > 0 && !top_name.is_empty() {
-                format!("{}", top_name)
+            for (pid, cur_io) in &current_io {
+                if net_pids.contains(pid) {
+                    if let Some(prev_io) = self.last_process_io.get(pid) {
+                        let delta = cur_io.saturating_sub(*prev_io);
+                        // 过滤闲置底噪：单采样周期增量至少 16 KB
+                        if delta > max_net_delta && delta >= 16 * 1024 {
+                            max_net_delta = delta;
+                            if let Some((_, name)) = current_times.get(pid) {
+                                top_net_name = name.clone();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 比较上一轮时间戳找出全系统磁盘 I/O 读写增量最大的进程
+            let mut max_disk_delta = 0u64;
+            let mut top_disk_name = String::new();
+
+            for (pid, cur_io) in &current_io {
+                if let Some(prev_io) = self.last_process_io.get(pid) {
+                    let delta = cur_io.saturating_sub(*prev_io);
+                    // 过滤闲置底噪：单采样周期增量至少 16 KB
+                    if delta > max_disk_delta && delta >= 16 * 1024 {
+                        max_disk_delta = delta;
+                        if let Some((_, name)) = current_times.get(pid) {
+                            top_disk_name = name.clone();
+                        }
+                    }
+                }
+            }
+
+            self.last_process_times = current_times;
+            self.last_process_io = current_io;
+
+            let cpu_res = if max_cpu_delta > 0 && !top_cpu_name.is_empty() {
+                top_cpu_name
             } else {
                 "--".to_string()
+            };
+
+            let net_res = if max_net_delta > 0 && !top_net_name.is_empty() {
+                top_net_name
+            } else {
+                "--".to_string()
+            };
+
+            let disk_res = if max_disk_delta > 0 && !top_disk_name.is_empty() {
+                top_disk_name
+            } else {
+                "--".to_string()
+            };
+
+            (cpu_res, net_res, disk_res)
+        }
+    }
+}
+
+/// 枚举当前所有持有活跃外部网络连接的进程 PID (IPv4/IPv6 TCP ESTABLISHED 以及活跃 UDP 通信)
+fn query_active_network_pids() -> HashSet<u32> {
+    let mut pids = HashSet::new();
+    unsafe {
+        // 1. IPv4 TCP (dwState == 5 代表 MIB_TCP_STATE_ESTAB)
+        let mut size: u32 = 0;
+        let _ = GetExtendedTcpTable(None, &mut size, false, 2, TCP_TABLE_OWNER_PID_ALL, 0);
+        if size > 0 {
+            let mut buf = vec![0u8; size as usize + 512];
+            if GetExtendedTcpTable(
+                Some(buf.as_mut_ptr() as *mut _),
+                &mut size,
+                false,
+                2,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            ) == 0 {
+                let table = buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
+                let num = (*table).dwNumEntries as usize;
+                let rows = std::slice::from_raw_parts((*table).table.as_ptr(), num);
+                for row in rows {
+                    if row.dwState == 5 && row.dwOwningPid > 4 {
+                        pids.insert(row.dwOwningPid);
+                    }
+                }
+            }
+        }
+
+        // 2. IPv6 TCP
+        let mut size6: u32 = 0;
+        let _ = GetExtendedTcpTable(None, &mut size6, false, 23, TCP_TABLE_OWNER_PID_ALL, 0);
+        if size6 > 0 {
+            let mut buf6 = vec![0u8; size6 as usize + 512];
+            if GetExtendedTcpTable(
+                Some(buf6.as_mut_ptr() as *mut _),
+                &mut size6,
+                false,
+                23,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            ) == 0 {
+                let table = buf6.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID;
+                let num = (*table).dwNumEntries as usize;
+                let rows = std::slice::from_raw_parts((*table).table.as_ptr(), num);
+                for row in rows {
+                    if row.dwState == 5 && row.dwOwningPid > 4 {
+                        pids.insert(row.dwOwningPid);
+                    }
+                }
+            }
+        }
+
+        // 3. UDP (针对现代 QUIC / HTTP3 通信)
+        let mut size_udp: u32 = 0;
+        let _ = GetExtendedUdpTable(None, &mut size_udp, false, 2, UDP_TABLE_OWNER_PID, 0);
+        if size_udp > 0 {
+            let mut buf_u = vec![0u8; size_udp as usize + 512];
+            if GetExtendedUdpTable(
+                Some(buf_u.as_mut_ptr() as *mut _),
+                &mut size_udp,
+                false,
+                2,
+                UDP_TABLE_OWNER_PID,
+                0,
+            ) == 0 {
+                let table = buf_u.as_ptr() as *const MIB_UDPTABLE_OWNER_PID;
+                let num = (*table).dwNumEntries as usize;
+                let rows = std::slice::from_raw_parts((*table).table.as_ptr(), num);
+                for row in rows {
+                    if row.dwOwningPid > 4 {
+                        pids.insert(row.dwOwningPid);
+                    }
+                }
             }
         }
     }
+    pids
 }
 
 /// 查询电池电量与供电状态：返回 (Option<battery_percent>, is_ac_online, Option<display_string>)

@@ -637,6 +637,54 @@
   - [x] 运行 `cargo test` 确保全量测试 100% 通过
   - [x] 运行 `cargo check` 确保无编译错误与警告
 
+## 阶段四十三：硬件悬浮看板 (Hardware Dashboard) 零资源纯 GDI 矢量微图标集成
+- [x] **43.1 数据模型扩展与指标类型枚举定义 (`tooltip.rs`)**
+  - [x] 定义 `MetricIconKind` 枚举涵盖 8 项核心指标（网速、适配器、CPU、内存、显卡、磁盘、运行时间、供电状态）
+  - [x] 将 `TooltipData` 重构为带图标类型的结构化行 `TooltipLine`
+- [x] **43.2 纯 GDI 零资源高性能矢量微图标绘制引擎实现 (`tooltip.rs`)**
+  - [x] 零图片零额外字体加载，纯 Win32 GDI 矢量几何绘制（网速流向箭头、Wi-Fi波纹、CPU芯片引脚、RAM内存颗粒、GPU显卡风扇、存储硬盘盒、时钟表盘、电池与闪电）
+  - [x] 支持根据深浅主题与指标类别呈现精致协调的 Fluent 微彩色 Accent 点缀
+  - [x] 全量像素坐标与线宽根据 DPI `scale` 精确自适应
+- [x] **43.3 看板布局排版与自适应间距对齐升级 (`tooltip.rs`)**
+  - [x] 为正文每行预留图标展示区，文字起始位置保持严格垂直基线对齐
+  - [x] 动态测量文本并自动适应窗体宽度，保证舒展通透无溢出截断
+- [x] **43.4 单元测试更新、编译校验与运行部署**
+  - [x] 更新单元测试覆盖 `TooltipLine` 与各指标枚举类型
+  - [x] 运行 `cargo test` 确保全量测试通过
+  - [x] 编译 Release 并更新常驻进程
+
+## 阶段四十四：硬件悬浮看板实时网速排版精简与 Top 网络进程识别
+- [x] **44.1 硬件指标模型扩展 (`details.rs`)**
+  - [x] 在 `DetailMetrics` 中扩充 `top_net_process_display: String`
+- [x] **44.2 活跃网络进程与流量 I/O 增量捕获引擎 (`details.rs`)**
+  - [x] 实现 `query_active_network_pids` 高速枚举活跃网络连接 PID（IPv4/IPv6 TCP ESTABLISHED 与 UDP 通信）
+  - [x] 在 `DetailsCollector` 进程遍历中同步采集 `GetProcessIoCounters`，计算各网络进程 I/O 增量，识别网络 Top 占用进程
+- [x] **44.3 悬浮看板实时网速行渲染重构 (`tooltip.rs`)**
+  - [x] 移除网速行中冗余的括号 `(MB/s)` 显示，精简排版
+  - [x] 网速行后方自适应追加 `(Top: xxx.exe)`，与 CPU 显示规范完全保持统一
+- [x] **44.4 单元测试验证、全量测试回归与 Release 部署**
+  - [x] 更新中英文看板单元测试断言覆盖新的网速格式与 Top 网络进程
+  - [x] 运行 `cargo test` 确保 100% 通过
+  - [x] 编译 Release 并部署更新常驻进程
+
+## 阶段四十五：硬件看板排版优化（网络接口置顶、行间细分割线）与磁盘/GPU Top进程识别
+- [x] **45.1 悬浮看板网络接口置顶与行间细分割线集成 (`tooltip.rs`)**
+  - [x] 调整看板指标行渲染顺序：网络接口置于首行，其余依次为实时网速、处理器、内存、显卡、磁盘、运行时间、供电状态
+  - [x] 在每行数据之间绘制精致 1px 细横线分割线，根据深浅模式自适应微透明配色，同步自适应高度与间距
+- [x] **45.2 磁盘 I/O 方案 A 与 Top 磁盘进程零开销捕获 (`details.rs`, `tooltip.rs`)**
+  - [x] `DetailMetrics` 扩充 `top_disk_process_display: String`
+  - [x] 在现有的进程遍历与 `GetProcessIoCounters` 采集流程中追踪各进程 I/O 增量，识别磁盘最高读写进程
+  - [x] 看板磁盘 I/O 行严格落实方案 A：保留读取/写入带宽细节，后置自适应追加 `(Top: xxx.exe)`
+- [x] **45.3 独立显卡 GPU Top 进程零开销捕获与看板展示 (`gpu.rs`, `tooltip.rs`)**
+  - [x] `GpuMetrics` 扩充 `top_process_display: String`
+  - [x] 在 `GpuCollector::sample()` 遍历 GPU Engine 计数器时高性能累加各 PID 利用率，当利用率超过底噪阈值时仅对 Top 进程查询进程名称
+  - [x] 看板 GPU 行后置自适应追加 `(Top: xxx.exe)`
+- [x] **45.4 单元测试更新、全量测试回归与 Release 部署**
+  - [x] 更新单元测试断言覆盖首行网络接口、磁盘方案 A、GPU Top 进程展示逻辑
+  - [x] 运行 `cargo test` 确保全量测试通过
+  - [x] 编译 Release 并重启常驻进程验证
+
+
 
 
 
