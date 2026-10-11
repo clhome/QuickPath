@@ -1,3 +1,4 @@
+use crate::dialog::DialogKind;
 use crate::win32::ime::ImeGuard;
 use std::path::Path;
 use std::thread;
@@ -12,31 +13,42 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const EM_SETSEL: u32 = 0x00B1;
 
 /// 安全将目标目录注入到文件对话框中，并促使其平滑导航切换
-/// 保证：
-/// 1. 不丢失用户已输入的文件名
-/// 2. 隔离输入法，不触发任何中文拼音候选框
-/// 3. 操作后自动恢复原焦点与选区
-pub fn inject_path_to_dialog(dialog_hwnd: HWND, edit_hwnd: HWND, target_path: &str) -> bool {
+/// 根据 DialogKind 严格物理隔离：标准 Win32 走纯 Win32 消息，WPS Office 走专用 UIA 引擎
+pub fn inject_path_to_dialog(
+    dialog_hwnd: HWND,
+    edit_hwnd: HWND,
+    target_path: &str,
+    kind: DialogKind,
+) -> bool {
     let clean_path = target_path.trim().trim_end_matches('\\');
     if !Path::new(clean_path).is_dir() {
         return false;
     }
 
-    // 针对 WPS Office 自绘对话框或无独立 Edit 句柄的窗口，通过 UI Automation 引擎进行注入
-    let class_name = crate::dialog::detector::get_window_class_name(dialog_hwnd);
-    let has_valid_edit = unsafe {
-        windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(edit_hwnd)).as_bool()
-            && edit_hwnd != dialog_hwnd
-    };
-
-    if class_name == "KcfdFileDialog" || class_name == "Qt5QWindowIcon" || !has_valid_edit {
-        return crate::win32::uia::inject_path_to_wps_dialog(dialog_hwnd, target_path);
+    match kind {
+        DialogKind::WpsOffice => {
+            // 针对 WPS Office 自绘对话框，通过专用的 UI Automation 引擎进行注入
+            crate::win32::uia::inject_path_to_wps_dialog(dialog_hwnd, target_path)
+        }
+        DialogKind::StandardWin32 => {
+            // 针对标准 Win32 对话框，绝对只走纯原生 Win32 消息通道，绝不调用 UIA！
+            inject_path_to_standard_dialog(dialog_hwnd, edit_hwnd, clean_path)
+        }
     }
+}
 
-    // 格式化为带有单斜杠结尾的目录字符串（用于告知系统对话框进入该目录而非将其当做文件名保存）
-    let folder_with_slash = format!("{}\\", clean_path);
-
+fn inject_path_to_standard_dialog(dialog_hwnd: HWND, edit_hwnd: HWND, clean_path: &str) -> bool {
     unsafe {
+        // 严格安全校验：edit_hwnd 必须是有效的子窗口句柄且不能是对话框自身
+        if !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(edit_hwnd)).as_bool()
+            || edit_hwnd == dialog_hwnd
+        {
+            return false;
+        }
+
+        // 格式化为带有单斜杠结尾的目录字符串（用于告知系统对话框进入该目录而非将其当做文件名保存）
+        let folder_with_slash = format!("{}\\", clean_path);
+
         // 1. 读取当前已有的文件名文本
         let old_text = get_edit_text(edit_hwnd);
         let should_restore_name = !old_text.trim().is_empty()

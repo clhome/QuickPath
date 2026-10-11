@@ -600,6 +600,25 @@
   - [x] 运行 `cargo test` 确保全部 13 项单元测试 100% 通过
   - [x] 编译 Release 并部署常驻运行（PID 34296）
 
+## 阶段四十一：标准 Win32 对话框与 WPS Qt/自绘窗体彻底架构分流与秒退 Bug 修复
+- [x] **41.1 根因分析与架构分流方案确认**
+  - [x] 查明放宽准则导致 Word 等标准对话框在子控件未就绪时早产命中
+  - [x] 查明早产获取错误 Edit 导致 AutoSwitch 发送回车直接误保存关闭另存为窗口
+  - [x] 查明 `injector.rs` 中 `!has_valid_edit` 越权调用 WPS UIA 注入逻辑
+- [x] **41.2 标准 Win32 对话框识别完全回归 1.0.2 纯正准则 (`detector.rs`)**
+  - [x] 在 `detect_file_dialog` 顶层以进程类型 `is_wps_process_name` 实施一级物理分流
+  - [x] 非 WPS 进程严格走 1.0.2 判决：必须同时拥有 `DirectUIHWND`/`SHELLDLL_DefView` 和 `ComboBoxEx32`，必须获得有效可见 `Edit`
+  - [x] 彻底剔除针对标准对话框的标题放宽准则，杜绝未就绪时提前早产命中
+  - [x] WPS 专属逻辑完全封装于 `detect_wps_dialog`，专用通道互不干扰
+- [x] **41.3 注入引擎类型物理隔离与防误触加固 (`injector.rs`, `floating_bar.rs`)**
+  - [x] 为 `inject_path_to_dialog` 增加明确的 `kind: DialogKind` 路由
+  - [x] 标准 Win32 对话框绝对只走原生 Win32 消息注入，严禁任何情况下越权降级调用 WPS UIA 逻辑
+  - [x] 同步更新悬浮吸附条 `FloatingBar` 与 `main.rs` 中的调用，准确传递 `DialogKind`
+- [x] **41.4 单元测试更新、编译与运行验证**
+  - [x] 运行 `cargo test` 确保所有 13 项单元测试 100% 通过
+  - [x] 编译 Release 版本并在 Windows 11 环境下验证通过
+
+
 
 
 
