@@ -225,7 +225,11 @@ pub struct MonitorSection {
     #[serde(default)]
     pub position_label: String,
     #[serde(default)]
-    pub position_desc: String,
+    pub tips_title: String,
+    #[serde(default)]
+    pub tips_line1: String,
+    #[serde(default)]
+    pub tips_line2: String,
     #[serde(default)]
     pub tooltip_title: String,
     #[serde(default)]
@@ -545,5 +549,22 @@ mod tests {
         let bundle_en = I18n::get_bundle(&Language::EnUS);
         assert!(bundle_en.about.version.contains(crate::rules::version::APP_VERSION));
         assert!(bundle_en.settings.version_info.contains(crate::rules::version::APP_VERSION));
+    }
+
+    #[test]
+    fn test_monitor_tips_and_abbrev_labels_i18n() {
+        let zh = I18n::get_bundle(&Language::ZhCN);
+        assert_eq!(zh.monitor.tips_title, "💡 高效交互与智能特性指南");
+        assert!(zh.monitor.tips_line1.contains("双击直接调出系统任务管理器"));
+        assert_eq!(zh.monitor.interval_3s, "3.0秒 (推荐)");
+        assert_eq!(zh.monitor.menu_pos_taskbar_left, "左上方 (独立悬浮)");
+        assert_eq!(zh.monitor.menu_pos_tray_left, "任务栏右侧 (默认)");
+
+        let en = I18n::get_bundle(&Language::EnUS);
+        assert_eq!(en.monitor.tips_title, "💡 Tips & Smart Features");
+        assert!(en.monitor.tips_line1.contains("Double-click to open Task Manager"));
+        assert_eq!(en.monitor.interval_3s, "3.0s (Rec.)");
+        assert_eq!(en.monitor.menu_pos_taskbar_left, "Top-Left (Float)");
+        assert_eq!(en.monitor.menu_pos_tray_left, "Tray Right (Default)");
     }
 }

@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
     InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_CENTER,
-    DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
     HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
@@ -382,7 +382,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             right: rect.right - pad_x,
             bottom: (34.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         SelectObject(hdc, HGDIOBJ(font_text.0 as _));
         SetTextColor(hdc, COLORREF(0x008e8e8e));
@@ -398,12 +398,12 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             right: rect.right - pad_x,
             bottom: (50.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut sub_buf, &mut sub_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut sub_buf, &mut sub_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         // 顶部 Tab 选项卡栏
         let tab_y = (56.0 * scale).round() as i32;
         let tab_h = (30.0 * scale).round() as i32;
-        let tab_w = (116.0 * scale).round() as i32;
+        let tab_w = (136.0 * scale).round() as i32;
         let tab_gap = (8.0 * scale).round() as i32;
         render_segmented_tabs(
             hdc,
@@ -554,7 +554,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 );
 
                 let card_m1_top = card_m0_top + card_m0_h + card_gap;
-                let card_m1_h = (130.0 * scale).round() as i32;
+                let card_m1_h = (140.0 * scale).round() as i32;
                 render_metrics_checklist_card(
                     hdc, pad_x, card_m1_top, pad_x + card_w, card_m1_top + card_m1_h, scale,
                     font_card_title, font_text,
@@ -563,7 +563,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 );
 
                 let card_m2_top = card_m1_top + card_m1_h + card_gap;
-                let card_m2_h = (172.0 * scale).round() as i32;
+                let card_m2_h = (182.0 * scale).round() as i32;
                 render_monitor_visual_card(
                     hdc, pad_x, card_m2_top, pad_x + card_w, card_m2_top + card_m2_h, scale,
                     font_card_title, font_text,
@@ -575,7 +575,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 let card_m3_h = (68.0 * scale).round() as i32;
                 render_monitor_tips_card(
                     hdc, pad_x, card_m3_top, pad_x + card_w, card_m3_top + card_m3_h, scale,
-                    font_card_title, font_small,
+                    font_card_title, font_small, &bundle,
                 );
             }
         }
@@ -709,7 +709,7 @@ unsafe fn render_rounded_button(
         SetTextColor(hdc, text_color);
         let mut buf: Vec<u16> = text.encode_utf16().collect();
         let mut r = *rect;
-        DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 }
 
@@ -738,7 +738,7 @@ unsafe fn render_card_texts(
             right: right_limit,
             bottom: top + (27.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
         SetTextColor(hdc, COLORREF(0x00909090));
@@ -749,7 +749,7 @@ unsafe fn render_card_texts(
             right: right_limit,
             bottom: bottom - (6.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut desc_buf, &mut desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut desc_buf, &mut desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 }
 
@@ -1320,7 +1320,7 @@ unsafe fn render_segmented_tabs(
                 right: tab_right,
                 bottom: tab_bottom,
             };
-            DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
     }
 }
@@ -1405,9 +1405,9 @@ unsafe fn render_metrics_checklist_card(
     unsafe {
         draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00242424), COLORREF(0x00353535));
 
-        render_card_texts(hdc, left, top, right, top + (36.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
+        render_card_texts(hdc, left, top, right, top + (54.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
 
-        let items_top = top + (42.0 * scale).round() as i32;
+        let items_top = top + (52.0 * scale).round() as i32;
         let item_h = (26.0 * scale).round() as i32;
         let col_w = (right - left - (32.0 * scale).round() as i32) / 2;
         let col1_left = left + (16.0 * scale).round() as i32;
@@ -1458,12 +1458,12 @@ unsafe fn render_monitor_visual_card(
     unsafe {
         draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00242424), COLORREF(0x00353535));
 
-        render_card_texts(hdc, left, top, right, top + (34.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
+        render_card_texts(hdc, left, top, right, top + (54.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
 
-        let row0_top = top + (36.0 * scale).round() as i32;
-        let row1_top = top + (68.0 * scale).round() as i32;
-        let row2_top = top + (100.0 * scale).round() as i32;
-        let row3_top = top + (132.0 * scale).round() as i32;
+        let row0_top = top + (54.0 * scale).round() as i32;
+        let row1_top = top + (84.0 * scale).round() as i32;
+        let row2_top = top + (114.0 * scale).round() as i32;
+        let row3_top = top + (144.0 * scale).round() as i32;
         let inner_x = left + (16.0 * scale).round() as i32;
         let right_pad = (18.0 * scale).round() as i32;
 
@@ -1477,9 +1477,9 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (160.0 * scale).round() as i32,
             bottom: row0_top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r0_lbl, &mut r0_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut r0_lbl, &mut r0_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-        let pos_w = (120.0 * scale).round() as i32;
+        let pos_w = (138.0 * scale).round() as i32;
         let seg_h = (24.0 * scale).round() as i32;
         let seg_gap = (6.0 * scale).round() as i32;
         let pos_base_right = right - right_pad;
@@ -1516,9 +1516,9 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (160.0 * scale).round() as i32,
             bottom: row1_top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r1_lbl, &mut r1_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut r1_lbl, &mut r1_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
-        let seg_w = (84.0 * scale).round() as i32;
+        let seg_w = (96.0 * scale).round() as i32;
         let seg_h = (24.0 * scale).round() as i32;
         let seg_gap = (6.0 * scale).round() as i32;
         let seg_base_right = right - right_pad;
@@ -1555,7 +1555,7 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (280.0 * scale).round() as i32,
             bottom: row2_top + (24.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r2_lbl, &mut r2_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut r2_lbl, &mut r2_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         let sw_w = (46.0 * scale).round() as i32;
         let sw_h = (22.0 * scale).round() as i32;
@@ -1603,7 +1603,7 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (160.0 * scale).round() as i32,
             bottom: row3_top + (24.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r3_lbl, &mut r3_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut r3_lbl, &mut r3_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         let slider_w = (140.0 * scale).round() as i32;
         let track_right = right - right_pad;
@@ -1669,6 +1669,7 @@ unsafe fn render_monitor_tips_card(
     scale: f32,
     font_bold: windows::Win32::Graphics::Gdi::HFONT,
     font_small: windows::Win32::Graphics::Gdi::HFONT,
+    bundle: &crate::rules::LocaleBundle,
 ) {
     unsafe {
         draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00212121), COLORREF(0x00343434));
@@ -1677,22 +1678,34 @@ unsafe fn render_monitor_tips_card(
 
         SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
         SetTextColor(hdc, COLORREF(0x0050d268));
-        let mut title_buf: Vec<u16> = "💡 高效交互与智能特性指南".encode_utf16().collect();
+        let title_text = if !bundle.monitor.tips_title.is_empty() {
+            bundle.monitor.tips_title.as_str()
+        } else {
+            "💡 高效交互与智能特性指南"
+        };
+        let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
         let mut title_rect = RECT {
             left: inner_x,
             top: top + (8.0 * scale).round() as i32,
             right: right - (16.0 * scale).round() as i32,
             bottom: top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
         SetTextColor(hdc, COLORREF(0x009e9e9e));
 
-        let tips = [
-            "• 双击直接调出系统任务管理器；右键菜单可快速切换常驻指标与停靠位置",
-            "• 鼠标悬停弹出 Fluent 硬件详情看板；全屏应用与 3D 游戏智能避让隐匿",
-        ];
+        let line1 = if !bundle.monitor.tips_line1.is_empty() {
+            bundle.monitor.tips_line1.as_str()
+        } else {
+            "• 双击直接调出系统任务管理器；右键菜单可快速切换常驻指标与停靠位置"
+        };
+        let line2 = if !bundle.monitor.tips_line2.is_empty() {
+            bundle.monitor.tips_line2.as_str()
+        } else {
+            "• 鼠标悬停弹出 Fluent 硬件详情看板；全屏应用与 3D 游戏智能避让隐匿"
+        };
+        let tips = [line1, line2];
 
         let line_h = (18.0 * scale).round() as i32;
         let mut tip_top = top + (30.0 * scale).round() as i32;
@@ -1704,7 +1717,7 @@ unsafe fn render_monitor_tips_card(
                 right: right - (16.0 * scale).round() as i32,
                 bottom: tip_top + line_h,
             };
-            DrawTextW(hdc, &mut buf, &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, &mut buf, &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             tip_top += line_h + (2.0 * scale).round() as i32;
         }
     }
@@ -1727,7 +1740,7 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     // 顶部 Tab 栏坐标
     let tab_y = (56.0 * scale).round() as i32;
     let tab_h = (30.0 * scale).round() as i32;
-    let tab_w = (116.0 * scale).round() as i32;
+    let tab_w = (136.0 * scale).round() as i32;
     let tab_gap = (8.0 * scale).round() as i32;
     let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
     let card_top_base = line_y + (10.0 * scale).round() as i32;
@@ -2014,16 +2027,16 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
             let card_m0_top = card_top_base;
             let card_m0_h = (56.0 * scale).round() as i32;
             let card_m1_top = card_m0_top + card_m0_h + card_gap;
-            let card_m1_h = (130.0 * scale).round() as i32;
+            let card_m1_h = (140.0 * scale).round() as i32;
             let card_m2_top = card_m1_top + card_m1_h + card_gap;
-            let card_m2_h = (140.0 * scale).round() as i32;
+            let card_m2_h = (182.0 * scale).round() as i32;
 
             if x >= pad_x && x <= pad_x + card_w {
                 if y >= card_m0_top && y <= card_m0_top + card_m0_h {
                     new_hover = Some(30);
                     is_pointer = true;
                 } else if y >= card_m1_top && y <= card_m1_top + card_m1_h {
-                    let items_top = card_m1_top + (42.0 * scale).round() as i32;
+                    let items_top = card_m1_top + (52.0 * scale).round() as i32;
                     let item_h = (26.0 * scale).round() as i32;
                     let col_w = (card_w - (32.0 * scale).round() as i32) / 2;
                     let col1_left = pad_x + (16.0 * scale).round() as i32;
@@ -2047,15 +2060,15 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                         }
                     }
                 } else if y >= card_m2_top && y <= card_m2_top + card_m2_h {
-                    let row0_top = card_m2_top + (36.0 * scale).round() as i32;
-                    let row1_top = card_m2_top + (68.0 * scale).round() as i32;
-                    let row2_top = card_m2_top + (100.0 * scale).round() as i32;
-                    let row3_top = card_m2_top + (132.0 * scale).round() as i32;
+                    let row0_top = card_m2_top + (54.0 * scale).round() as i32;
+                    let row1_top = card_m2_top + (84.0 * scale).round() as i32;
+                    let row2_top = card_m2_top + (114.0 * scale).round() as i32;
+                    let row3_top = card_m2_top + (144.0 * scale).round() as i32;
                     let right_pad = (18.0 * scale).round() as i32;
 
                     // 行 0: 2个停靠位置胶囊 (ID 45 / 46)
                     if y >= row0_top && y <= row0_top + (24.0 * scale).round() as i32 {
-                        let pos_w = (120.0 * scale).round() as i32;
+                        let pos_w = (138.0 * scale).round() as i32;
                         let seg_gap = (6.0 * scale).round() as i32;
                         let pos_base_right = pad_x + card_w - right_pad;
                         let pos_opts = [(1, 46usize), (0, 45usize)];
@@ -2071,7 +2084,7 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                     }
                     // 行 1: 3个单选胶囊 (ID 40 / 41 / 42)
                     else if y >= row1_top && y <= row1_top + (24.0 * scale).round() as i32 {
-                        let seg_w = (84.0 * scale).round() as i32;
+                        let seg_w = (96.0 * scale).round() as i32;
                         let seg_gap = (6.0 * scale).round() as i32;
                         let seg_base_right = pad_x + card_w - right_pad;
                         let seg_opts = [(2, 40usize), (1, 41usize), (0, 42usize)];
@@ -2165,7 +2178,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
 
     let tab_y = (56.0 * scale).round() as i32;
     let tab_h = (30.0 * scale).round() as i32;
-    let tab_w = (116.0 * scale).round() as i32;
+    let tab_w = (136.0 * scale).round() as i32;
     let tab_gap = (8.0 * scale).round() as i32;
     let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
     let card_top_base = line_y + (10.0 * scale).round() as i32;
@@ -2399,9 +2412,9 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             let card_m0_top = card_top_base;
             let card_m0_h = (56.0 * scale).round() as i32;
             let card_m1_top = card_m0_top + card_m0_h + card_gap;
-            let card_m1_h = (130.0 * scale).round() as i32;
+            let card_m1_h = (140.0 * scale).round() as i32;
             let card_m2_top = card_m1_top + card_m1_h + card_gap;
-            let card_m2_h = (140.0 * scale).round() as i32;
+            let card_m2_h = (182.0 * scale).round() as i32;
 
             // 点击 M0: 任务栏监控总开关
             if x >= pad_x && x <= pad_x + card_w && y >= card_m0_top && y <= card_m0_top + card_m0_h {
@@ -2423,7 +2436,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             }
             // 点击 M1: 常驻指标勾选面板
             else if x >= pad_x && x <= pad_x + card_w && y >= card_m1_top && y <= card_m1_top + card_m1_h {
-                let items_top = card_m1_top + (42.0 * scale).round() as i32;
+                let items_top = card_m1_top + (52.0 * scale).round() as i32;
                 let item_h = (26.0 * scale).round() as i32;
                 let col_w = (card_w - (32.0 * scale).round() as i32) / 2;
                 let col1_left = pad_x + (16.0 * scale).round() as i32;
@@ -2469,16 +2482,16 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             }
             // 点击 M2: 外观与采样参数面板
             else if x >= pad_x && x <= pad_x + card_w && y >= card_m2_top && y <= card_m2_top + card_m2_h {
-                let row0_top = card_m2_top + (36.0 * scale).round() as i32;
-                let row1_top = card_m2_top + (68.0 * scale).round() as i32;
-                let row2_top = card_m2_top + (100.0 * scale).round() as i32;
-                let row3_top = card_m2_top + (132.0 * scale).round() as i32;
+                let row0_top = card_m2_top + (54.0 * scale).round() as i32;
+                let row1_top = card_m2_top + (84.0 * scale).round() as i32;
+                let row2_top = card_m2_top + (114.0 * scale).round() as i32;
+                let row3_top = card_m2_top + (144.0 * scale).round() as i32;
                 let seg_h = (24.0 * scale).round() as i32;
                 let right_pad = (18.0 * scale).round() as i32;
 
                 // 行 0: 任务栏停靠位置单选胶囊 (防遮挡)
                 if y >= row0_top && y <= row0_top + seg_h {
-                    let pos_w = (120.0 * scale).round() as i32;
+                    let pos_w = (138.0 * scale).round() as i32;
                     let seg_gap = (6.0 * scale).round() as i32;
                     let pos_base_right = pad_x + card_w - right_pad;
                     let pos_opts = [
@@ -2500,7 +2513,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 }
                 // 行 1: 刷新采样频率胶囊单选
                 else if y >= row1_top && y <= row1_top + seg_h {
-                    let seg_w = (84.0 * scale).round() as i32;
+                    let seg_w = (96.0 * scale).round() as i32;
                     let seg_gap = (6.0 * scale).round() as i32;
                     let seg_base_right = pad_x + card_w - right_pad;
                     let seg_opts = [

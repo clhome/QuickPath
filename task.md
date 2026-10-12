@@ -711,6 +711,34 @@
   - [x] 运行 `cargo check` 确保无编译警告与错误
   - [x] 运行 `cargo build --release` 完成优化生产构建验证
 
+## 阶段四十七：设置中心任务栏监控卡片副标题排版与命中测试修复
+- [x] **47.1 修复常驻指标项与外观参数卡片副标题排版计算 (`settings.rs`)**
+  - [x] 调整 `render_metrics_checklist_card` 头部文本高度与指标复选框垂直偏移
+  - [x] 调整 `render_monitor_visual_card` 头部文本高度与 4 行控件排版间距
+  - [x] 彻底解决副标题描述被压扁成 1 像素/负数高度的 GDI 渲染缺陷
+- [x] **47.2 统一卡片几何尺寸与三端命中测试联动一致性 (`settings.rs`)**
+  - [x] 统一渲染层、`handle_settings_mouse_move` 与 `handle_settings_mouse_down` 中的 `card_m1_h` (140) 与 `card_m2_h` (182)
+  - [x] 同步校准鼠标悬停与点击命中判定矩形，修复原代码中外观卡片高度不一致的潜在 Bug
+- [x] **47.3 全量编译校验与测试回归**
+  - [x] 运行 `cargo check` 与 `cargo test` 确保无编译警告与测试 100% 通过
+
+## 阶段四十八：设置中心国际化文案精简、按钮宽度自适应扩充与 Tips 卡片英文适配
+- [x] **48.1 扩展 MonitorSection 国际化支持 Tips 卡片与文案精简 (`i18n.rs`, `zh-CN.toml`, `en-US.toml`)**
+  - [x] 在 `MonitorSection` 增加 `tips_title`, `tips_line1`, `tips_line2`
+  - [x] 精简中英文停靠位置按钮文案（中文精简为“任务栏右侧 (默认)”与“左上方 (独立悬浮)”；英文精简为“Tray Right (Default)”与“Top-Left (Float)”）
+  - [x] 精简英文 3.0s 推荐文案为“3.0s (Rec.)”
+  - [x] 在中英文语言包中增加 Tips 指南卡片翻译
+- [x] **48.2 扩充按钮宽度与 Tab 宽度，修复文字裁切与快捷键下划线 Bug (`settings.rs`)**
+  - [x] 引入 `DT_NOPREFIX` 并在标题、副标题、Tab 及按钮绘制中启用，彻底修复 `&` 被误渲染为下划线
+  - [x] 将 Tab 宽度 `tab_w` 从 116 扩充至 136，彻底解决英文“Taskbar Monitor”截断
+  - [x] 将停靠位置按钮宽度 `pos_w` 从 120 扩充至 138，同步校准悬停与点击命中判定
+  - [x] 将刷新频率按钮宽度 `seg_w` 从 84 扩充至 96，同步校准悬停与点击命中判定
+  - [x] `render_monitor_tips_card` 接入 `bundle.monitor` 动态国际化渲染
+- [x] **48.3 编译与全量测试回归**
+  - [x] 运行 `cargo check` 与 `cargo test` 确保无编译警告与测试 100% 通过
+
+
+
 
 
 
