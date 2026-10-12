@@ -11,7 +11,7 @@ use windows::Win32::System::Com::{
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::System::Variant::VARIANT;
-use windows::Win32::UI::Shell::{IShellWindows, IWebBrowser2, ShellWindows};
+use windows::Win32::UI::Shell::{IShellFolderViewDual, IShellWindows, IWebBrowser2, ShellWindows};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, IsWindowVisible};
 
 #[derive(Debug, Clone)]
@@ -54,6 +54,13 @@ pub enum ComRequest {
     GetWindowTargetInfo {
         target_hwnd_raw: usize,
         reply: Sender<Option<(String, Option<String>)>>,
+    },
+    /// 轮询等待新 Tab 在 COM 中注册并将其导航至指定路径
+    WaitAndNavigateNewTab {
+        host_hwnd_raw: usize,
+        count_before: usize,
+        target_path: String,
+        reply: Sender<bool>,
     },
 }
 
@@ -101,6 +108,11 @@ impl ShellComManager {
                             let hwnd = HWND(target_hwnd_raw as *mut _);
                             let info = get_window_target_info_internal(hwnd);
                             let _ = reply.send(info);
+                        }
+                        ComRequest::WaitAndNavigateNewTab { host_hwnd_raw, count_before, target_path, reply } => {
+                            let hwnd = HWND(host_hwnd_raw as *mut _);
+                            let ok = wait_and_navigate_new_tab_internal(hwnd, count_before, &target_path);
+                            let _ = reply.send(ok);
                         }
                     }
                 }
@@ -175,6 +187,21 @@ impl ShellComManager {
         let tabs = self.get_all_tabs();
         let raw = hwnd.0 as usize;
         tabs.into_iter().filter(|t| t.hwnd_raw == raw).count()
+    }
+
+    /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航（带 2000ms 超时）
+    pub fn wait_and_navigate_new_tab(&self, host_hwnd: HWND, count_before: usize, target_path: &str) -> bool {
+        let (reply_tx, reply_rx) = channel();
+        let host_hwnd_raw = host_hwnd.0 as usize;
+        if self.tx.send(ComRequest::WaitAndNavigateNewTab {
+            host_hwnd_raw,
+            count_before,
+            target_path: target_path.to_string(),
+            reply: reply_tx,
+        }).is_err() {
+            return false;
+        }
+        reply_rx.recv_timeout(Duration::from_millis(2000)).unwrap_or(false)
     }
 
     /// 根据窗口 HWND、预期的 Tab 标题或索引，解析出最匹配的物理路径
@@ -372,6 +399,53 @@ fn navigate_latest_internal(target_hwnd: HWND, target_path: &str) -> bool {
     false
 }
 
+/// 轮询等待宿主窗口内新注册的 Tab 并对其调用 Navigate2
+fn wait_and_navigate_new_tab_internal(host_hwnd: HWND, count_before: usize, target_path: &str) -> bool {
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(50));
+        unsafe {
+            let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+            if let Ok(shell_windows) = shell_windows {
+                if let Ok(count) = shell_windows.Count() {
+                    let mut host_browsers = Vec::new();
+                    for i in 0..count {
+                        let index = VARIANT::from(i);
+                        if let Ok(disp) = shell_windows.Item(&index) {
+                            if let Ok(browser) = disp.cast::<IWebBrowser2>() {
+                                let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
+                                if hwnd == host_hwnd {
+                                    host_browsers.push(browser);
+                                }
+                            }
+                        }
+                    }
+
+                    // 当属于 host_hwnd 的 Tab 数量出现增长，或者已多于 count_before
+                    if host_browsers.len() > count_before || (count_before == 0 && !host_browsers.is_empty()) {
+                        if let Some(newest_browser) = host_browsers.last() {
+                            let path_bstr = BSTR::from(target_path);
+                            let var_url = VARIANT::from(path_bstr);
+                            let null_var = VARIANT::default();
+                            if newest_browser.Navigate2(
+                                &var_url,
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                            ).is_ok() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 兜底：如果超时未检测到数量严格递增，直接回退尝试对 host_hwnd 最新可见 Tab 进行导航
+    navigate_latest_internal(host_hwnd, target_path)
+}
+
 /// 针对指定 Explorer 窗口定向穿透探测其当前路径及待选文件名（不受 IsWindowVisible 限制）
 fn get_window_target_info_internal(target_hwnd: HWND) -> Option<(String, Option<String>)> {
     if target_hwnd.0.is_null() {
@@ -392,6 +466,45 @@ fn get_window_target_info_internal(target_hwnd: HWND) -> Option<(String, Option<
                         if let Ok(browser) = disp.cast::<IWebBrowser2>() {
                             let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
                             if hwnd == target_hwnd {
+                                // 优先穿透提取 SelectedItems 中的绝对路径（针对外部 /select 唤起秒级提取）
+                                let mut selected_file = None;
+                                let mut selected_full_path = None;
+
+                                if let Ok(doc_disp) = browser.Document() {
+                                    if let Ok(sfv) = doc_disp.cast::<IShellFolderViewDual>() {
+                                        if let Ok(items) = sfv.SelectedItems() {
+                                            if let Ok(item_count) = items.Count() {
+                                                if item_count > 0 {
+                                                    let v_zero = VARIANT::from(0i32);
+                                                    if let Ok(first_item) = items.Item(&v_zero) {
+                                                        if let Ok(item_path) = first_item.Path() {
+                                                            let path_str = item_path.to_string();
+                                                            if !path_str.is_empty() {
+                                                                selected_full_path = Some(path_str);
+                                                            }
+                                                        }
+                                                        if let Ok(item_name) = first_item.Name() {
+                                                            let name_str = item_name.to_string();
+                                                            if !name_str.is_empty() {
+                                                                selected_file = Some(name_str);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if let Some(ref full_p) = selected_full_path {
+                                    let p = Path::new(full_p);
+                                    if let Some(parent) = p.parent() {
+                                        let folder = parent.to_string_lossy().to_string();
+                                        let file = p.file_name().map(|f| f.to_string_lossy().to_string());
+                                        return Some((folder, file.or(selected_file)));
+                                    }
+                                }
+
                                 let url = browser.LocationURL().map(|u| u.to_string()).unwrap_or_default();
                                 let name = browser.LocationName().map(|n| n.to_string()).unwrap_or_default();
                                 if let Some(path) = parse_shell_url(&url, &name) {
@@ -399,9 +512,9 @@ fn get_window_target_info_internal(target_hwnd: HWND) -> Option<(String, Option<
                                     if p.is_file() {
                                         let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| path.clone());
                                         let file = p.file_name().map(|f| f.to_string_lossy().to_string());
-                                        return Some((folder, file));
+                                        return Some((folder, file.or(selected_file)));
                                     } else {
-                                        return Some((path, None));
+                                        return Some((path, selected_file));
                                     }
                                 }
                             }

@@ -47,6 +47,8 @@ pub struct TabCoordinator {
     pending_inherit_path: Arc<parking_lot_or_std::Mutex<Option<(String, Instant)>>>,
     /// 是否正处于旁路去重模式（防止新建同路径 Tab 时被去重拦截）
     bypass_deduplication: Arc<AtomicBool>,
+    /// 正在被合并捕获处理中的外部窗口集合（防重触发）
+    processing_new_windows: Arc<parking_lot_or_std::Mutex<std::collections::HashSet<usize>>>,
 }
 
 mod parking_lot_or_std {
@@ -61,6 +63,7 @@ impl TabCoordinator {
             history_stack: TabHistoryStack::new(20),
             pending_inherit_path: Arc::new(parking_lot_or_std::Mutex::new(None)),
             bypass_deduplication: Arc::new(AtomicBool::new(false)),
+            processing_new_windows: Arc::new(parking_lot_or_std::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -328,6 +331,16 @@ impl TabCoordinator {
             return;
         }
 
+        let raw_new = new_hwnd.0 as usize;
+        // 防重检查：如果该窗口已经在异步合并处理中，直接跳过
+        {
+            if let Ok(mut set) = self.processing_new_windows.lock() {
+                if !set.insert(raw_new) {
+                    return;
+                }
+            }
+        }
+
         // 1. 查找除 new_hwnd 之外的真实存活且可见的宿主窗口
         let tabs = self.com_manager.get_all_tabs();
         let host_tab = tabs.into_iter().find(|t| {
@@ -340,11 +353,27 @@ impl TabCoordinator {
         // 关键原则：若当前系统没有其它存活且可见的宿主窗口，坚决不隐藏、不干涉，完全原生放行
         let host = match host_tab {
             Some(h) => h,
-            None => return,
+            None => {
+                let _ = self.processing_new_windows.lock().map(|mut set| set.remove(&raw_new));
+                return;
+            }
         };
 
-        // 2. 确认存在真实有效宿主，移出可视视区防闪烁（替代暴力的 SW_HIDE，保证 COM 与系统渲染不休眠）
+        // 2. 确认存在真实有效宿主，采用分层窗口 Alpha=0 透明度 + 离屏移位，杜绝弹窗闪烁同时保持 COM 活跃
         unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE,
+                LWA_ALPHA, WS_EX_LAYERED,
+            };
+            let ex_style = GetWindowLongW(new_hwnd, GWL_EXSTYLE);
+            let _ = SetWindowLongW(new_hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32);
+            let _ = SetLayeredWindowAttributes(
+                new_hwnd,
+                windows::Win32::Foundation::COLORREF(0),
+                0,
+                LWA_ALPHA,
+            );
+
             let _ = SetWindowPos(
                 new_hwnd,
                 None,
@@ -357,8 +386,8 @@ impl TabCoordinator {
         }
 
         let raw_host = host.hwnd_raw;
-        let raw_new = new_hwnd.0 as usize;
         let com = self.com_manager.clone();
+        let processing = self.processing_new_windows.clone();
 
         std::thread::spawn(move || {
             let new_h = HWND(raw_new as *mut _);
@@ -366,7 +395,7 @@ impl TabCoordinator {
 
             let mut target_info: Option<(String, Option<String>)> = None;
 
-            // 1. 优先尝试从新窗口对应的进程命令行提取目标路径（极速识别 /select）
+            // 1. 尝试从新窗口对应的进程命令行提取目标路径（优先识别外部快捷 /select）
             let mut pid = 0u32;
             unsafe {
                 let _ = GetWindowThreadProcessId(new_h, Some(&mut pid));
@@ -379,14 +408,24 @@ impl TabCoordinator {
                 }
             }
 
-            // 2. 若命令行未能命中，通过 COM 穿透定向探测（最多 10 轮，每轮 30ms，共 300ms 窗口期）
+            // 2. COM 穿透定向探测：最长等待 2000ms（40 轮 × 50ms），确保新窗口在冷启动下有充足时间初始化完成
             if target_info.is_none() {
-                for _ in 0..10 {
-                    std::thread::sleep(Duration::from_millis(30));
+                for round in 0..40 {
+                    std::thread::sleep(Duration::from_millis(50));
                     if !unsafe { IsWindow(Some(new_h)) }.as_bool() {
+                        let _ = processing.lock().map(|mut set| set.remove(&raw_new));
                         return; // 窗口已被外部自行关闭
                     }
                     if let Some(info) = com.get_window_target_info(new_h) {
+                        // 核心防误判：如果当前提取出的是空主页（"shell:Home" 或虚拟主文件夹），且没有选中文件，
+                        // 在前 30 轮（1500ms）内判定为过渡初始骨架状态，继续轮询等待真实目标加载完成！
+                        let (ref path, ref sel) = info;
+                        let is_blank_or_home = path == "shell:Home"
+                            || path == "shell:::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}"
+                            || path.is_empty();
+                        if is_blank_or_home && sel.is_none() && round < 30 {
+                            continue;
+                        }
                         target_info = Some(info);
                         break;
                     }
@@ -422,15 +461,14 @@ impl TabCoordinator {
                         let _ = try_select_tab_item_by_title(host_h, &folder_name);
                         merged_success = true;
                     } else {
-                        // 宿主没有该 Tab，在宿主中新建 Tab
+                        // 宿主没有该 Tab，在宿主中新建 Tab 并精准导航
+                        let count_before = com.get_tabs_count_for_hwnd(host_h);
                         if trigger_new_tab(host_h) {
-                            // 关键防护：仅当目标是具体的本地物理路径时才执行导航重定向；
-                            // 若为虚拟 Shell 主页（如主文件夹/此电脑等），原生新 Tab 默认即为主页，绝不调用 navigate
                             if is_physical_dir_path(folder_path) {
-                                std::thread::sleep(Duration::from_millis(50));
-                                let _ = com.navigate_latest(host_h, folder_path);
+                                merged_success = com.wait_and_navigate_new_tab(host_h, count_before, folder_path);
+                            } else {
+                                merged_success = true;
                             }
-                            merged_success = true;
                         }
                     }
                 }
@@ -438,8 +476,8 @@ impl TabCoordinator {
 
             if merged_success {
                 // 如果存在待高亮的文件（外部 /select 唤起），异步在宿主列表中恢复聚焦选中
-                if let Some((_, Some(file_name))) = target_info {
-                    async_select_file_item(host_h, file_name);
+                if let Some((_, Some(ref file_name))) = target_info {
+                    async_select_file_item(host_h, file_name.clone());
                 }
 
                 // 只有在彻底确认合并成功的情况下，才安全销毁源窗口
@@ -464,8 +502,17 @@ impl TabCoordinator {
                     }
                 }
             } else {
-                // 【核心 Fail-Safe 兜底】：未能成功合并或超时未就绪，绝对不关窗，立即恢复显示源窗口并激活！
+                // 【核心 Fail-Safe 兜底】：未能成功合并或超时未就绪，绝对不关窗，立即恢复显示源窗口并恢复不透明度！
                 unsafe {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetLayeredWindowAttributes, LWA_ALPHA,
+                    };
+                    let _ = SetLayeredWindowAttributes(
+                        new_h,
+                        windows::Win32::Foundation::COLORREF(0),
+                        255,
+                        LWA_ALPHA,
+                    );
                     let _ = SetWindowPos(
                         new_h,
                         None,
@@ -478,6 +525,9 @@ impl TabCoordinator {
                     let _ = SetForegroundWindow(new_h);
                 }
             }
+
+            // 处理结束，从防重集合中移除记录
+            let _ = processing.lock().map(|mut set| set.remove(&raw_new));
         });
     }
 
@@ -488,6 +538,7 @@ impl TabCoordinator {
             history_stack: self.history_stack.clone(),
             pending_inherit_path: self.pending_inherit_path.clone(),
             bypass_deduplication: self.bypass_deduplication.clone(),
+            processing_new_windows: self.processing_new_windows.clone(),
         })
     }
 }

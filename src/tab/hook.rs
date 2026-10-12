@@ -5,7 +5,7 @@ use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_OBJECT_CREATE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
 
 use super::coordinator::TabCoordinator;
@@ -13,7 +13,7 @@ use super::coordinator::TabCoordinator;
 static COORDINATOR_PTR: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 pub struct TabHookGuard {
-    hook_create: HWINEVENTHOOK,
+    hook: HWINEVENTHOOK,
     _coordinator: Arc<TabCoordinator>,
 }
 
@@ -23,9 +23,10 @@ impl TabHookGuard {
         COORDINATOR_PTR.store(raw_ptr, Ordering::SeqCst);
 
         unsafe {
-            let hook_create = SetWinEventHook(
+            // 同时监听 EVENT_OBJECT_CREATE 至 EVENT_OBJECT_SHOW，确保外部新窗口 100% 捕获
+            let hook = SetWinEventHook(
                 EVENT_OBJECT_CREATE,
-                EVENT_OBJECT_CREATE,
+                EVENT_OBJECT_SHOW,
                 None,
                 Some(win_event_proc),
                 0,
@@ -33,12 +34,12 @@ impl TabHookGuard {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             );
 
-            if hook_create.is_invalid() {
+            if hook.is_invalid() {
                 return Err("注册资源管理器多标签页 WinEventHook 失败".to_string());
             }
 
             Ok(Self {
-                hook_create,
+                hook,
                 _coordinator: coordinator,
             })
         }
@@ -48,8 +49,8 @@ impl TabHookGuard {
 impl Drop for TabHookGuard {
     fn drop(&mut self) {
         unsafe {
-            if !self.hook_create.is_invalid() {
-                let _ = UnhookWinEvent(self.hook_create);
+            if !self.hook.is_invalid() {
+                let _ = UnhookWinEvent(self.hook);
             }
         }
         let ptr = COORDINATOR_PTR.swap(std::ptr::null_mut(), Ordering::SeqCst);
@@ -82,7 +83,7 @@ unsafe extern "system" fn win_event_proc(
     let coordinator = unsafe { &*(raw_ptr as *const TabCoordinator) };
 
     match event {
-        EVENT_OBJECT_CREATE => {
+        EVENT_OBJECT_CREATE | EVENT_OBJECT_SHOW => {
             if TabCoordinator::is_explorer_window(hwnd) {
                 coordinator.handle_new_explorer_window(hwnd);
             }

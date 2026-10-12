@@ -3,7 +3,7 @@
 use std::thread;
 use std::time::Duration;
 use windows::core::{Interface, BSTR};
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
@@ -15,7 +15,33 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, KEYEVENTF_KEYUP, VK_CONTROL,
 };
-use windows::Win32::UI::WindowsAndMessaging::{IsWindow, SetForegroundWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowExW, IsWindow, SendMessageW, SetForegroundWindow, WM_COMMAND,
+};
+
+/// 尝试向 ShellTabWindowClass 发送 Windows 11 Explorer 内部原生创建新 Tab 的 0xA21B 魔法指令
+fn try_magic_command_add_tab(explorer_hwnd: HWND) -> bool {
+    if explorer_hwnd.0.is_null() {
+        return false;
+    }
+    unsafe {
+        if !IsWindow(Some(explorer_hwnd)).as_bool() {
+            return false;
+        }
+        if let Ok(tab_wnd) = FindWindowExW(
+            Some(explorer_hwnd),
+            None,
+            windows::core::w!("ShellTabWindowClass"),
+            None,
+        ) {
+            if !tab_wnd.0.is_null() {
+                let _ = SendMessageW(tab_wnd, WM_COMMAND, Some(WPARAM(0xA21B)), Some(LPARAM(0)));
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// 通过 UIA 定位 AutomationId 为 "AddButton" 的新建标签页按钮并触发
 fn try_uia_add_button(explorer_hwnd: HWND) -> bool {
@@ -64,8 +90,11 @@ fn simulate_ctrl_t(explorer_hwnd: HWND) -> bool {
     }
 }
 
-/// 触发 Win11 Explorer 创建新 Tab（UIA 优先 + 原生 Ctrl+T 兜底）
+/// 触发 Win11 Explorer 创建新 Tab（魔法指令 0xA21B 优先 + UIA 次之 + 原生 Ctrl+T 兜底）
 pub fn trigger_new_tab(explorer_hwnd: HWND) -> bool {
+    if try_magic_command_add_tab(explorer_hwnd) {
+        return true;
+    }
     if try_uia_add_button(explorer_hwnd) {
         return true;
     }
