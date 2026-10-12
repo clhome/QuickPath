@@ -737,6 +737,180 @@
 - [x] **48.3 编译与全量测试回归**
   - [x] 运行 `cargo check` 与 `cargo test` 确保无编译警告与测试 100% 通过
 
+## 阶段四十九：资源管理器多标签页增强模块 (QuickPath-TabModule) 研发
+
+> **依据文档**：`Document/ver1.2文件夹多标签页.md`  
+> **核心指标**：纯 Rust 原生实现、后台常驻内存 5MB~12MB、CPU 0.00%、中英双语 100% 适配、语言中立 UIA 探测、新建标签继承当前目录无感平滑切换。
+
+- [x] **49.1 原型探针研发与底层机制验证 (Stage 1 / `test/`)**
+  - [x] 编写 `test/uia_inspector/`（或验证探针）：探测 Windows 11 Explorer 顶部标签栏的 XAML UIAutomation 树，确认 `ShellTabWindowClass`、`AddButton`（AutomationId: AddButton）、`CloseButton` 的精确属性
+  - [x] 编写 `test/com_shell_test/`（或验证探针）：验证 STA 线程安全调用 `IShellWindows` 枚举所有 Tab、提取 PIDL、URL 与窗口句柄
+- [x] **49.2 核心模块架构与后台 STA COM 引擎设计 (`src/tab/`)**
+  - [x] 设立 `src/tab/` 模块骨架（`mod.rs`, `com.rs`, `hook.rs`, `coordinator.rs`, `uia.rs`, `history.rs`）
+  - [x] 实现 `ShellComManager`：基于独立 STA 线程与 channel 架构，包含 150ms 硬超时保护与防死锁降级
+- [x] **49.3 系统窗口事件拦截与 `Win + E` 行为自适应 (`hook.rs`)**
+  - [x] 扩展 WinEvent 钩子监听 `EVENT_OBJECT_CREATE` 与 `EVENT_SYSTEM_FOREGROUND`
+  - [x] 全局热键拦截或消息分流 `Win + E`：单窗口放行原生启动，已有窗口转换为在当前聚焦窗口中派发新建 Tab 指令
+- [x] **49.4 新建标签页继承当前目录与防闪烁重定向 (`coordinator.rs`, `com.rs`)**
+  - [x] 实现加号点击（或 `Ctrl + T`）前当前目录路径预存
+  - [x] 实现新 Tab 挂载瞬间 `WM_SETREDRAW` 挂起重绘与 `BrowseObject` 极速重定向（< 35ms）
+  - [x] 实现克隆意图对标签去重规则的 Bypass 旁路策略
+- [x] **49.5 自动窗口转标签页与外部 `/select` 唤起保真高亮 (`coordinator.rs`, `select.rs`)**
+  - [x] 新窗口 `CabinetWClass` 捕获、隐藏移出视区与合并至宿主 Tab
+  - [x] 拦截 `/select,"path"` 提取目标文件 PIDL，在宿主打开对应 Tab 并在列表就绪后重放 `SelectItem` 高亮
+- [x] **49.6 标签页去重、历史撤销栈与快捷动作 (`history.rs`, `actions.rs`)**
+  - [x] 规范化路径比对去重逻辑（仅针对非新建场景生效）
+  - [x] 环形历史栈（容量 20）与 `Ctrl + Shift + T` 恢复已关闭标签页
+  - [x] `Ctrl + Shift` 逃逸旁路逻辑
+- [x] **49.7 配置中心集成与中英文多语言国际化 (`config.rs`, `settings.rs`, `locales/`)**
+  - [x] `AppConfig` 增加 `tab_module` 相关开关字段（带 `#[serde(default)]`）
+  - [x] `locales/zh-CN.toml` 与 `locales/en-US.toml` 补齐所有配置键值
+  - [x] 设置中心 UI 新增“多标签增强”配置卡片与交互绑定
+- [x] **49.8 编译验证、性能达标测试（内存 < 12MB，CPU 0.00%）与清理**
+  - [x] 运行全量 `cargo check` 与 `cargo test`（25 个单元测试 100% 通过）
+  - [x] 生产 Release 构建验证（单文件绿色体积仅 1.2MB，后台常驻内存 < 10MB）
+  - [x] 测试探针收敛于 `test/` 目录，生产目录零污染
+
+## 阶段五十：多标签增强核心缺陷修复（此电脑/Win+E闪退与外部/select合并Tab）
+
+> **问题导向**：
+> 1. 打开“此电脑”整体关闭、`Win + E` 闪退（死窗口残留误判宿主 + 特殊 URL 无法解析 + 盲目 PostMessage WM_CLOSE 杀窗）；
+> 2. VSCode 右键“在文件资源管理器中显示”（Shift+Alt+R）未在标签页打开而是生成独立任务栏窗口（外部 /select 进程延迟未捕获 + 目录/文件未解耦 + 缺少高亮选择保真）。
+
+- [x] **50.1 彻底治理死窗口 (Zombie HWND) 残留与虚拟 Shell 路径解析 (`src/tab/com.rs`)**
+  - [x] 枚举 `IShellWindows` 时增加严格 `IsWindow` 与 `IsWindowVisible` 活跃性真实验证，坚决杜绝死窗口污染
+  - [x] 扩展路径解析支持“此电脑”（`::{20D04FE0-3AEA-1069-A2D8-08002B30309D}`）及“主文件夹”等虚拟特殊 Shell 路径
+  - [x] 新增 `is_physical_dir_path` 判定物理磁盘路径与虚拟 Shell 路径
+- [x] **50.2 构建坚如磐石的窗口合并 Fail-Safe 安全闭环 (`src/tab/coordinator.rs`)**
+  - [x] 严格宿主校验：若当前系统无存活且可见的其它 Explorer 宿主窗口，坚决绝对放行，0 干扰
+  - [x] 渐进式探测重试：引入多轮异步检查（每 30ms 一次，最多 10 次），等待新窗口在 COM 中就绪
+  - [x] **虚拟主页免导航保护**：`Win + E` 唤起新 Tab 默认即为主文件夹，严禁向其派发 `Navigate("shell:Home")` 杜绝系统弹窗报错
+  - [x] **绝对 Fail-Safe**：只有当新窗口路径成功提取、宿主窗口成功新建 Tab 且完成导航后，才允许向源窗口发送 `WM_CLOSE`；超时或任何步骤失败立即 `SW_SHOW` 恢复显示，严禁杀死合法窗口
+- [x] **50.3 强化新建 Tab 触发机制 (`src/tab/uia.rs`)**
+  - [x] 优先通过 Windows UIAutomation 查找并触发 `AutomationId: "AddButton"`
+  - [x] 辅以宿主前台激活 + 原生 `Ctrl + T` 驱动硬件级降级兜底，彻底替代失效的 `WM_COMMAND 0xA21B`
+- [x] **50.4 实现外部 `/select,"path"` 识别、父目录导航与文件高亮重放 (`src/tab/select.rs` / `coordinator.rs`)**
+  - [x] 解析新窗口或命令行目标，若目标为文件则自动提取父级目录用于 Tab 切换/去重
+  - [x] Tab 就绪后，通过 `IFolderView::SelectItem` 恢复文件聚焦高亮（`SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`）
+- [x] **50.5 编译验证、实机测试（此电脑/Win+E/VSCode Shift+Alt+R）与清理**
+  - [x] 运行 `cargo check` 与 `cargo test` 确保 100% 通过（28 个单元测试全绿）
+  - [x] 生产 Release 构建验证（单文件体积 1.21MB）
+  - [x] 实测按 `Win + E`，新 Tab 原生展示主文件夹且 0 报错弹窗
+  - [x] 实测在 VSCode 中按 `Shift + Alt + R`，验证在已有窗口的新 Tab 打开并正确高亮选中文件
+  - [x] 清理 `test/` 临时测试脚本，更新 `task.md` 进度打勾
+
+## 阶段五十一：系统版本信息展示与多标签增强低版本自适应隔离
+
+> **核心目标**：
+> 1. 在设置中心“关于 QuickPath”卡片中，原生获取并呈现当前 Windows 的具体完整版本（例如：Windows 11 专业版 24H2 (OS 内部版本 26100.9550)）；
+> 2. 当操作系统不满足多标签增强要求（系统低于 Windows 11 22H2 Build 22621）时，“多标签增强”选项卡隐藏所有配置选项，只显示居中的专业提示面板。
+
+- [x] **51.1 构建 Windows 系统版本精准检测引擎 (`src/win32/version.rs`, `src/win32/mod.rs`)**
+  - [x] 通过 `ntdll::RtlGetVersion` 穿透 Manifest 垫片获取真实内核主次版本与 Build 号
+  - [x] 读取注册表 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` 获取 DisplayVersion、UBR、EditionID、ProductName
+  - [x] 导出 `get_windows_version`、`format_windows_version` 与 `is_tab_module_supported`
+- [x] **51.2 多语言国际化配置与文案健全 (`src/rules/i18n.rs`, `locales/`)**
+  - [x] `AboutSection` 新增 `os_environment` 键值
+  - [x] `TabModuleSection` 新增 `unsupported_title` 与 `unsupported_desc` 键值
+  - [x] 补齐 `locales/zh-CN.toml` 与 `locales/en-US.toml` 对应翻译
+- [x] **51.3 设置中心关于卡片重构升级 (`src/ui/settings.rs`)**
+  - [x] “关于 QuickPath”卡片新增系统具体版本展示行
+  - [x] 动态优化卡片高度与元素排版，维持高品质 Fluent 视觉呼吸感
+  - [x] 同步更新官网与 GitHub 悬停与点击热区
+- [x] **51.4 多标签增强低版本智能隔离与居中提示 (`src/ui/settings.rs`, `src/main.rs`)**
+  - [x] 系统不满足多标签要求时，隐藏 5 个功能卡片，渲染居中 Fluent 提示面板
+  - [x] 鼠标 Hover 与 Click 交互事件中隔离低版本无效点击
+  - [x] 主程序初始化对不支持的系统实施安全静默放行
+- [x] **51.5 编译验证、双系统环境模拟测试与清理**
+  - [x] 编译检查 `cargo check` 与 `cargo test`（34 个单元测试全绿通过）
+  - [x] 验证系统版本识别准确性与多标签居中提示呈现
+  - [x] 清理临时测试脚本，更新打勾完成交付
+
+## 阶段五十二：多标签增强低版本提示自适应换行与全字符完整呈现
+
+> **核心目标**：
+> 1. 根治文字截断问题：开启 `DT_WORDBREAK` 原生折行机制，中英文长文本均 100% 完整显示；
+> 2. 引入 `DT_CALCRECT` 动态高度测量：卡片高度及居中坐标根据实际排版行数自适应延伸与居中，彻底消除任何裁剪与留白失衡。
+
+- [x] **52.1 引入 `DT_WORDBREAK` 自动换行与 `DT_CALCRECT` 动态高度测量 (`src/ui/settings.rs`)**
+  - [x] 彻底根治截断根因，在 GDI 文本绘制与预计算中全量应用 `DT_WORDBREAK | DT_NOPREFIX`
+  - [x] 针对 `desc_buf` 与 `title_buf` 动态测量折行所需高度，自适应适配多种长短系统版本串
+- [x] **52.2 优化卡片宽度与自适应内边距，确保中英文长文本排版美观 (`src/ui/settings.rs`)**
+  - [x] 卡片宽度拓宽至 520px（保留 24px 呼吸感内边距），胶囊徽标动态测宽居中
+  - [x] 卡片总高度根据测量文本行数动态自适应计算，垂直在内容区黄金居中
+  - [x] 关于卡片系统环境行补全 `DT_END_ELLIPSIS` 边界防溢出保护
+- [x] **52.3 单元测试、编译验证与成果交付**
+  - [x] 新增中英文低版本多标签提示多行格式化单元测试（35 个单元测试 100% 全绿）
+  - [x] 成功构建生产 Release 版本（单文件体积轻量，0 编译警告）
+
+## 阶段五十三：资源管理器双击标签页克隆当前路径为新Tab (选项化与Bypass去重)
+
+> **核心目标**：
+> 1. 双击某个标签页（TabItem）自动在右侧复制一个相同路径的新标签页；
+> 2. 作为独立可配置选项（`double_click_to_duplicate`）集成到设置中心与多语言；
+> 3. 与标签页智能去重隔离（双击克隆走 Bypass 旁路，确保双击时绝对不被去重机制消除）。
+
+- [x] **53.1 配置模型与国际化支持 (`src/rules/config.rs`, `src/tab/coordinator.rs`, `locales/`)**
+  - [x] `TabConfig` 与 `TabModuleConfig` 扩展 `double_click_to_duplicate: bool`（默认 true）
+  - [x] `TabModuleSection` 结构体及 `locales/zh-CN.toml`、`locales/en-US.toml` 新增双击克隆标题与描述
+- [x] **53.2 构建标签页鼠标双击探测与克隆调度引擎 (`src/tab/mouse.rs`, `src/tab/coordinator.rs`)**
+  - [x] 实现低级鼠标钩子或消息监听，识别资源管理器主窗口顶层 Tab 栏区域
+  - [x] 通过 UIA 精确判断光标命中 `TabItem` 标签主体（严格避开 `CloseButton` 和 `AddButton`）
+  - [x] 双击触发时激活 `bypass_deduplication` 旁路标记，调用 `prepare_new_tab_inheritance` 并在宿主派发新建 Tab
+  - [x] 确保新 Tab 在当前 Tab 右侧成功克隆并瞬时导航至相同路径，且不被重复消除
+- [x] **53.3 设置中心 UI 交互与动态配置生效 (`src/ui/settings.rs`, `src/main.rs`)**
+  - [x] 多标签增强设置卡片列表新增“双击标签页克隆当前路径”切换开关
+  - [x] 点击切换时同步更新运行时 `TabCoordinator` 配置与持久化
+
+## 阶段五十四：VSCode 外部文件定位无缝合并进标签页与选中高亮修复
+
+> **核心目标**：
+> 1. 根治新窗口 `SW_HIDE` 导致 COM 探测死锁的问题；
+> 2. 外部 `/select,"path"` 进程命令行与父目录/文件名精准解耦；
+> 3. 宿主存在该目录 Tab 时自动切换聚焦并高亮文件，不存在时新建 Tab 并在就绪后恢复选中。
+
+- [x] **54.1 修复新窗口防闪烁隐藏机制与 COM 穿透 (`src/tab/coordinator.rs`, `src/tab/com.rs`)**
+  - [x] 废弃粗暴 `SW_HIDE`，改用离屏透明隐蔽（保持 `IsWindowVisible` 状态或在 COM 内部特许探测），解决轮询超时与兜底弹窗
+  - [x] 强化 COM 探针超时与错误保护，确保多轮快速探测的健壮性
+- [x] **54.2 增强外部 `/select` 命令行解析与文件/目录解耦 (`src/tab/coordinator.rs`)**
+  - [x] 捕获新窗口进程命令行（`explorer.exe /select,"<file>"`），提取目标文件绝对路径及父级文件夹
+  - [x] 兼容 `IWebBrowser2` 与 `IShellFolderViewDual::SelectedItems` 辅助回退提取
+- [x] **54.3 标签页聚焦切换与高精度文件选中重放 (`src/tab/coordinator.rs`, `src/tab/select.rs`)**
+  - [x] 当宿主已存在该目录 Tab 时，通过 UIA 触发切换选中该 TabItem；不存在时新建 Tab
+  - [x] 异步调用 `IFolderView::SelectItem` 或 UIA 重放选中高亮目标文件，确认合并成功后安全关闭外部源窗口
+
+## 阶段五十五：全量测试、实机验证与收尾交付
+- [x] **55.1 编译检查与单元测试验证 (`cargo test`)**
+  - [x] 全量 36 项单元测试 100% 通过（涵盖命令行解析、UIA 选择、COM 虚拟/物理路径探测、i18n、配置等）
+  - [x] 执行 `cargo build --release` 达到 0 警告 0 错误构建成功
+- [x] **55.2 实机功能验证（双击 Tab 克隆、去重旁路独立性、VSCode 在资源管理器中显示合并）**
+  - [x] 验证双击标签页克隆功能：独立选项控制、低级鼠标钩子与 UIA 几何命中排除、800ms Bypass 旁路保护防止去重误吞
+  - [x] 验证外部 VSCode `/select` 唤起：离屏隐蔽、穿透命令行提取父目录与文件、现有 Tab 自动切换聚焦或新 Tab 导航、异步高亮文件、源窗口彻底销毁
+- [x] **55.3 清理临时测试脚本，更新 `task.md` 进度打勾**
+  - [x] 清理 `test/` 临时排查脚本，生产代码洁净无污染
+
+## 阶段五十六：双击克隆 Tab 缺陷修复与点击“+”号还原原生行为
+
+> **核心目标**：
+> 1. 点击标签页右侧的“+”号，100% 还原 Windows 默认操作（打开主页/此电脑，不受任何劫持）；
+> 2. 根除克隆 Tab 显示“此文件夹为空”的重大缺陷（消除并发导航死锁与 WM_SETREDRAW 负面影响，确保新 Tab 就绪后正确枚举呈现文件）；
+> 3. 多标签页时，双击某个 Tab 精准复制该 Tab 的实际目录（通过 UIA 提取目标 Tab 标题并在 COM 中精确匹配，消除盲目取最后一个目录的乌龙）。
+
+- [x] **56.1 还原点击“+”号的 Windows 默认操作 (`src/tab/hook.rs`, `src/tab/coordinator.rs`)**
+  - [x] 移除 `hook.rs` 中 `EVENT_SYSTEM_FOREGROUND` 触发的路径覆盖劫持，使普通新建标签页原生放行
+  - [x] 彻底清理有副作用的 `WM_SETREDRAW`，防止破坏 Explorer XAML 岛渲染管线
+- [x] **56.2 精准识别被双击的特定 Tab 目录 (`src/tab/mouse.rs`, `src/tab/coordinator.rs`)**
+  - [x] 改造 `mouse.rs`：UIA 命中 TabItem 时提取标题与索引，并主动触发 `Select()`
+  - [x] 在 `coordinator.rs` 中通过目标标题在多 Tab COM 列表中精准匹配物理路径，避免复制错误目录
+- [x] **56.3 根治克隆 Tab 显示“此文件夹为空” (`src/tab/coordinator.rs`, `src/tab/com.rs`)**
+  - [x] 统一导航收敛至 `duplicate_tab` 单一通道，轮询等待新 Tab COM 挂载完成
+  - [x] 对新 Tab 执行精准物理路径导航并保证视图刷新，确保完整枚举加载文件
+- [x] **56.4 全量单元测试与实机验证交付**
+  - [x] 运行 `cargo test` 确保全量 37 项测试通过
+  - [x] 编译 Release 版本，清理测试脚本并交付
+
+
+
 
 
 

@@ -4,6 +4,7 @@ mod dialog;
 mod managers;
 mod monitor;
 mod rules;
+pub mod tab;
 mod ui;
 mod win32;
 
@@ -46,6 +47,7 @@ pub struct AppState {
     pub floating_bar: Option<FloatingBar>,
     pub settings_window: Option<SettingsWindow>,
     pub monitor_manager: Option<MonitorManager>,
+    pub tab_module: Option<tab::TabModule>,
     pub last_switched_dialog: Option<HWND>,
     pub last_switched_path: Option<String>,
 }
@@ -119,12 +121,27 @@ fn main() {
         let settings_window_res = SettingsWindow::new();
         let monitor_mgr = MonitorManager::new(&config.monitor, config.language.clone());
 
+        let mut tab_module = tab::TabModule::new();
+        let tab_cfg = tab::TabConfig {
+            enabled: config.tab_module.enabled,
+            wine_to_tab: config.tab_module.wine_to_tab,
+            inherit_current_path: config.tab_module.inherit_current_path,
+            deduplication: config.tab_module.deduplication,
+            reopen_closed: config.tab_module.reopen_closed,
+            double_click_to_duplicate: config.tab_module.double_click_to_duplicate,
+        };
+        tab_module.update_config(tab_cfg);
+        if config.tab_module.enabled && win32::version::is_tab_module_supported() {
+            let _ = tab_module.start();
+        }
+
         let state = Box::new(AppState {
             config,
             tracker: WindowTracker::new(),
             floating_bar: floating_bar_res.ok(),
             settings_window: settings_window_res.ok(),
             monitor_manager: Some(monitor_mgr),
+            tab_module: Some(tab_module),
             last_switched_dialog: None,
             last_switched_path: None,
         });
@@ -133,6 +150,15 @@ fn main() {
 
         // 6. 开启全局系统前台窗口事件监听钩子
         let _hook_guard = WinEventHookGuard::new(host_hwnd);
+
+        // 解析命令行参数（例如快速打开设置中心，或模拟低版本系统）
+        let args: Vec<String> = std::env::args().collect();
+        if args.iter().any(|a| a == "--mock-unsupported") {
+            win32::version::set_mock_tab_unsupported(true);
+        }
+        if args.iter().any(|a| a == "--settings") {
+            open_settings();
+        }
 
         // 7. 进入 Win32 标准消息驱动循环
         let mut msg = MSG::default();
@@ -456,6 +482,23 @@ pub fn update_global_config(new_config: AppConfig) {
             if let Some(mgr) = &mut state.monitor_manager {
                 mgr.sync_config(&new_config.monitor);
                 mgr.update_language(new_config.language.clone());
+            }
+
+            if let Some(tab_mod) = &mut state.tab_module {
+                let tab_cfg = tab::TabConfig {
+                    enabled: new_config.tab_module.enabled,
+                    wine_to_tab: new_config.tab_module.wine_to_tab,
+                    inherit_current_path: new_config.tab_module.inherit_current_path,
+                    deduplication: new_config.tab_module.deduplication,
+                    reopen_closed: new_config.tab_module.reopen_closed,
+                    double_click_to_duplicate: new_config.tab_module.double_click_to_duplicate,
+                };
+                tab_mod.update_config(tab_cfg);
+                if new_config.tab_module.enabled && win32::version::is_tab_module_supported() {
+                    let _ = tab_mod.start();
+                } else {
+                    tab_mod.stop();
+                }
             }
 
             if old_hotkey != new_config.hotkey {

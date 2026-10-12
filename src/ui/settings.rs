@@ -13,9 +13,10 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_CENTER,
-    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
-    HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, PS_NULL, PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
+    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_CALCRECT,
+    DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+    DT_WORDBREAK, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, PS_NULL,
+    PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture};
@@ -35,6 +36,7 @@ static SETTINGS_WINDOW_HWND: AtomicPtr<core::ffi::c_void> =
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
     General,
+    TabModule,
     Monitor,
 }
 
@@ -403,8 +405,13 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         // 顶部 Tab 选项卡栏
         let tab_y = (56.0 * scale).round() as i32;
         let tab_h = (30.0 * scale).round() as i32;
-        let tab_w = (136.0 * scale).round() as i32;
+        let tab_w = (118.0 * scale).round() as i32;
         let tab_gap = (8.0 * scale).round() as i32;
+        let label_tabs = if bundle.meta.code.starts_with("zh") {
+            "多标签增强"
+        } else {
+            "Tab Utility"
+        };
         render_segmented_tabs(
             hdc,
             pad_x,
@@ -417,6 +424,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             hovered,
             font_card_title,
             &bundle.monitor.tab_general,
+            label_tabs,
             &bundle.monitor.tab_monitor,
         );
 
@@ -509,7 +517,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
 
                 // 卡片 5：“关于 QuickPath”现代专属信息卡片 (About Card)
                 let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-                let about_h = (104.0 * scale).round() as i32;
+                let about_h = (120.0 * scale).round() as i32;
                 render_about_card(
                     hdc, pad_x, card5_top, pad_x + card_w, card5_top + about_h, scale,
                     &bundle, font_card_title, font_text, font_small, hovered,
@@ -539,6 +547,99 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     is_debug,
                     is_hov_debug,
                 );
+            }
+            SettingsTab::TabModule => {
+                if !crate::win32::version::is_tab_module_supported() {
+                    let bottom_pad = (22.0 * scale).round() as i32;
+                    let btn_h = (34.0 * scale).round() as i32;
+                    let btn_top = rect.bottom - bottom_pad - btn_h;
+                    render_tab_unsupported_view(
+                        hdc,
+                        pad_x,
+                        card_top_base,
+                        pad_x + card_w,
+                        btn_top,
+                        scale,
+                        &bundle,
+                        font_card_title,
+                        font_text,
+                        font_small,
+                    );
+                } else {
+                    let card_h = (56.0 * scale).round() as i32;
+
+                    // 卡片 0：启用多标签增强 (Tab Utility)
+                    let card0_top = card_top_base;
+                    let is_hov_0 = hovered == Some(40);
+                    render_toggle_card(
+                        hdc, pad_x, card0_top, pad_x + card_w, card0_top + card_h, scale,
+                        font_card_title, font_text,
+                        &bundle.tab_module.enable_tab_module, &bundle.tab_module.enable_tab_module_desc,
+                        config.tab_module.enabled,
+                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        is_hov_0,
+                    );
+
+                    // 卡片 1：新建标签页打开当前目录 (Inherit Current Path)
+                    let card1_top = card0_top + card_h + card_gap;
+                    let is_hov_1 = hovered == Some(41);
+                    render_toggle_card(
+                        hdc, pad_x, card1_top, pad_x + card_w, card1_top + card_h, scale,
+                        font_card_title, font_text,
+                        &bundle.tab_module.inherit_current_path, &bundle.tab_module.inherit_current_path_desc,
+                        config.tab_module.inherit_current_path,
+                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        is_hov_1,
+                    );
+
+                    // 卡片 2：Win + E 自动转为新建标签页
+                    let card2_top = card1_top + card_h + card_gap;
+                    let is_hov_2 = hovered == Some(42);
+                    render_toggle_card(
+                        hdc, pad_x, card2_top, pad_x + card_w, card2_top + card_h, scale,
+                        font_card_title, font_text,
+                        &bundle.tab_module.wine_to_tab, &bundle.tab_module.wine_to_tab_desc,
+                        config.tab_module.wine_to_tab,
+                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        is_hov_2,
+                    );
+
+                    // 卡片 3：标签页智能去重 (Deduplication)
+                    let card3_top = card2_top + card_h + card_gap;
+                    let is_hov_3 = hovered == Some(43);
+                    render_toggle_card(
+                        hdc, pad_x, card3_top, pad_x + card_w, card3_top + card_h, scale,
+                        font_card_title, font_text,
+                        &bundle.tab_module.tab_deduplication, &bundle.tab_module.tab_deduplication_desc,
+                        config.tab_module.deduplication,
+                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        is_hov_3,
+                    );
+
+                    // 卡片 4：恢复已关闭标签页快捷键 (Ctrl+Shift+T)
+                    let card4_top = card3_top + card_h + card_gap;
+                    let is_hov_4 = hovered == Some(44);
+                    render_toggle_card(
+                        hdc, pad_x, card4_top, pad_x + card_w, card4_top + card_h, scale,
+                        font_card_title, font_text,
+                        &bundle.tab_module.reopen_closed_tab, &bundle.tab_module.reopen_closed_tab_desc,
+                        config.tab_module.reopen_closed,
+                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        is_hov_4,
+                    );
+
+                    // 卡片 5：双击标签页克隆当前路径 (Double-Click Clone)
+                    let card5_top = card4_top + card_h + card_gap;
+                    let is_hov_5 = hovered == Some(45);
+                    render_toggle_card(
+                        hdc, pad_x, card5_top, pad_x + card_w, card5_top + card_h, scale,
+                        font_card_title, font_text,
+                        &bundle.tab_module.double_click_duplicate, &bundle.tab_module.double_click_duplicate_desc,
+                        config.tab_module.double_click_to_duplicate,
+                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        is_hov_5,
+                    );
+                }
             }
             SettingsTab::Monitor => {
                 let card_m0_top = card_top_base;
@@ -1188,11 +1289,32 @@ unsafe fn render_about_card(
             left: text_x,
             top: top + (10.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (29.0 * scale).round() as i32,
+            bottom: top + (28.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf1, &mut r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 行 2: 出品方及官网链接（衢州御风科技有限公司 · qp.yftec.top ↗）
+        // 行 2: 运行系统环境（当前 Windows 具体版本）
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        SetTextColor(hdc, COLORREF(0x00bbbbbb));
+        let is_chinese = bundle.meta.code.starts_with("zh");
+        let os_ver_str = crate::win32::version::format_windows_version(is_chinese);
+        let line_os = if !bundle.about.os_environment.is_empty() {
+            bundle.about.os_environment.replace("{os_version}", &os_ver_str)
+        } else if is_chinese {
+            format!("系统环境：{}", os_ver_str)
+        } else {
+            format!("System: {}", os_ver_str)
+        };
+        let mut buf_os: Vec<u16> = line_os.encode_utf16().collect();
+        let mut r_os = RECT {
+            left: text_x,
+            top: top + (31.0 * scale).round() as i32,
+            right: text_right,
+            bottom: top + (48.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut buf_os, &mut r_os, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        // 行 3: 出品方及官网链接（衢州御风科技有限公司 · qp.yftec.top ↗）
         SelectObject(hdc, HGDIOBJ(font_normal.0 as _));
         let is_hov_web = hovered == Some(20);
         let web_color = if is_hov_web {
@@ -1210,15 +1332,15 @@ unsafe fn render_about_card(
         let mut buf2: Vec<u16> = line2.encode_utf16().collect();
         let mut r2 = RECT {
             left: text_x,
-            top: top + (32.0 * scale).round() as i32,
+            top: top + (51.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (50.0 * scale).round() as i32,
+            bottom: top + (69.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf2, &mut r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 行 3: GitHub 官方开源地址（GitHub 纯白高清图标 + github.com/clhome/QuickPath ↗）
+        // 行 4: GitHub 官方开源地址（GitHub 纯白高清图标 + github.com/clhome/QuickPath ↗）
         let gh_size = (15.0 * scale).round() as i32;
-        let gh_y = top + (54.0 * scale).round() as i32 + ((18.0 * scale) as i32 - gh_size) / 2;
+        let gh_y = top + (72.0 * scale).round() as i32 + ((18.0 * scale) as i32 - gh_size) / 2;
         let _ = crate::win32::icon::draw_github_png(hdc, text_x, gh_y, gh_size, gh_size);
 
         let is_hov_github = hovered == Some(21);
@@ -1233,13 +1355,13 @@ unsafe fn render_about_card(
         let mut buf3: Vec<u16> = line3.encode_utf16().collect();
         let mut r3 = RECT {
             left: text_x + gh_size + (7.0 * scale).round() as i32,
-            top: top + (53.0 * scale).round() as i32,
+            top: top + (72.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (72.0 * scale).round() as i32,
+            bottom: top + (90.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf3, &mut r3, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 行 4: 版权声明
+        // 行 5: 版权声明
         SetTextColor(hdc, COLORREF(0x00666666));
         let copyright_text = if bundle.about.copyright.is_empty() {
             "Copyright © 2026 衢州御风科技有限公司. All Rights Reserved."
@@ -1249,11 +1371,169 @@ unsafe fn render_about_card(
         let mut buf4: Vec<u16> = copyright_text.encode_utf16().collect();
         let mut r4 = RECT {
             left: text_x,
-            top: top + (75.0 * scale).round() as i32,
+            top: top + (93.0 * scale).round() as i32,
             right: text_right,
-            bottom: top + (93.0 * scale).round() as i32,
+            bottom: top + (110.0 * scale).round() as i32,
         };
         DrawTextW(hdc, &mut buf4, &mut r4, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/// 当操作系统版本不满足资源管理器多标签增强基准时，在选项卡内容区居中渲染提示信息
+unsafe fn render_tab_unsupported_view(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    bundle: &crate::rules::LocaleBundle,
+    font_title: windows::Win32::Graphics::Gdi::HFONT,
+    font_text: windows::Win32::Graphics::Gdi::HFONT,
+    font_small: windows::Win32::Graphics::Gdi::HFONT,
+) {
+    unsafe {
+        let area_w = right - left;
+        let area_h = bottom - top;
+
+        // 适度加宽卡片（如 520px），并预留足够内边距，确保中英文无论单行还是折行都呼吸舒展
+        let box_w = ((520.0 * scale).round() as i32).min(area_w - (16.0 * scale).round() as i32);
+        let pad_inner_x = (24.0 * scale).round() as i32;
+        let text_w = box_w - pad_inner_x * 2;
+
+        // 1. 顶部提示胶囊徽标 (Badge) - 动态测量文本宽度，中英文均完美自适应
+        let badge_h = (24.0 * scale).round() as i32;
+        let badge_text = if bundle.tab_module.unsupported_badge.is_empty() {
+            "系统环境限制"
+        } else {
+            &bundle.tab_module.unsupported_badge
+        };
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        let mut badge_buf: Vec<u16> = badge_text.encode_utf16().collect();
+        let mut r_badge_calc = RECT::default();
+        DrawTextW(hdc, &mut badge_buf, &mut r_badge_calc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        let badge_txt_w = r_badge_calc.right - r_badge_calc.left;
+        let badge_pad_x = (14.0 * scale).round() as i32;
+        let badge_w = (badge_txt_w + badge_pad_x * 2).max((100.0 * scale).round() as i32);
+
+        // 2. 主标题 - 预先测量折行所需高度 (DT_CALCRECT | DT_WORDBREAK)
+        SelectObject(hdc, HGDIOBJ(font_title.0 as _));
+        let title_text = if bundle.tab_module.unsupported_title.is_empty() {
+            "当前 Windows 系统版本暂不支持多标签增强"
+        } else {
+            &bundle.tab_module.unsupported_title
+        };
+        let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
+        let mut r_title_calc = RECT {
+            left: 0,
+            top: 0,
+            right: text_w,
+            bottom: 0,
+        };
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut r_title_calc,
+            DT_CALCRECT | DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        let title_h = (r_title_calc.bottom - r_title_calc.top).max((24.0 * scale).round() as i32);
+
+        // 3. 详细说明与当前系统版本提示 - 预先测量自动换行折行所需高度
+        SelectObject(hdc, HGDIOBJ(font_text.0 as _));
+        let is_chinese = bundle.meta.code.starts_with("zh");
+        let os_str = crate::win32::version::format_windows_version(is_chinese);
+        let desc_text = if !bundle.tab_module.unsupported_desc.is_empty() {
+            bundle.tab_module.unsupported_desc.replace("{os_version}", &os_str)
+        } else {
+            format!("文件资源管理器多标签增强需要 Windows 11 22H2 (Build 22621) 或更高版本 原生标签架构支持。\n当前检测到您的操作系统为：{}", os_str)
+        };
+        let mut desc_buf: Vec<u16> = desc_text.encode_utf16().collect();
+        let mut r_desc_calc = RECT {
+            left: 0,
+            top: 0,
+            right: text_w,
+            bottom: 0,
+        };
+        DrawTextW(
+            hdc,
+            &mut desc_buf,
+            &mut r_desc_calc,
+            DT_CALCRECT | DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+        );
+        let desc_h = (r_desc_calc.bottom - r_desc_calc.top).max((36.0 * scale).round() as i32);
+
+        // 4. 根据实际测量内容自适应计算卡片整体尺寸与垂直居中坐标
+        let top_pad = (22.0 * scale).round() as i32;
+        let gap_badge_title = (14.0 * scale).round() as i32;
+        let gap_title_desc = (14.0 * scale).round() as i32;
+        let bottom_pad = (22.0 * scale).round() as i32;
+
+        let box_h = (top_pad + badge_h + gap_badge_title + title_h + gap_title_desc + desc_h + bottom_pad)
+            .min(area_h - (16.0 * scale).round() as i32);
+
+        let box_left = left + (area_w - box_w) / 2;
+        let box_top = top + (area_h - box_h) / 2;
+        let box_right = box_left + box_w;
+        let box_bottom = box_top + box_h;
+
+        // 渲染外层 Fluent 居中卡片容器
+        draw_fluent_box(
+            hdc,
+            box_left,
+            box_top,
+            box_right,
+            box_bottom,
+            (10.0 * scale).round() as i32,
+            COLORREF(0x00212121),
+            COLORREF(0x00363636),
+        );
+
+        // 渲染 1: 顶部提示胶囊徽标 (Badge)
+        let badge_x = box_left + (box_w - badge_w) / 2;
+        let badge_y = box_top + top_pad;
+        draw_fluent_box(
+            hdc,
+            badge_x,
+            badge_y,
+            badge_x + badge_w,
+            badge_y + badge_h,
+            (12.0 * scale).round() as i32,
+            COLORREF(0x002d261e), // 琥珀深色底
+            COLORREF(0x005a442a), // 微亮边框
+        );
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        SetTextColor(hdc, COLORREF(0x007ad0ff)); // 醒目琥珀金色文字
+        let mut r_badge = RECT {
+            left: badge_x,
+            top: badge_y,
+            right: badge_x + badge_w,
+            bottom: badge_y + badge_h,
+        };
+        DrawTextW(hdc, &mut badge_buf, &mut r_badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        // 渲染 2: 居中主标题（DT_WORDBREAK 保证长英文自适应换行）
+        SelectObject(hdc, HGDIOBJ(font_title.0 as _));
+        SetTextColor(hdc, COLORREF(0x00ffffff));
+        let title_y = badge_y + badge_h + gap_badge_title;
+        let mut r_title = RECT {
+            left: box_left + pad_inner_x,
+            top: title_y,
+            right: box_right - pad_inner_x,
+            bottom: title_y + title_h,
+        };
+        DrawTextW(hdc, &mut title_buf, &mut r_title, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+
+        // 渲染 3: 居中说明与当前系统版本（DT_WORDBREAK 自动折行，中英文全显，绝不截断）
+        SelectObject(hdc, HGDIOBJ(font_text.0 as _));
+        SetTextColor(hdc, COLORREF(0x009e9e9e));
+        let desc_y = title_y + title_h + gap_title_desc;
+        let mut r_desc = RECT {
+            left: box_left + pad_inner_x,
+            top: desc_y,
+            right: box_right - pad_inner_x,
+            bottom: desc_y + desc_h + (4.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut desc_buf, &mut r_desc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
     }
 }
 
@@ -1270,12 +1550,14 @@ unsafe fn render_segmented_tabs(
     hovered: Option<usize>,
     font: windows::Win32::Graphics::Gdi::HFONT,
     label_general: &str,
+    label_tabs: &str,
     label_monitor: &str,
 ) {
     unsafe {
         let tabs = [
             (0usize, SettingsTab::General, label_general, 100usize),
-            (1usize, SettingsTab::Monitor, label_monitor, 101usize),
+            (1usize, SettingsTab::TabModule, label_tabs, 102usize),
+            (2usize, SettingsTab::Monitor, label_monitor, 101usize),
         ];
 
         for (idx, tab_type, label, hov_id) in tabs {
@@ -1941,10 +2223,15 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
         let tab0_r = pad_x + tab_w;
         let tab1_l = tab0_r + tab_gap;
         let tab1_r = tab1_l + tab_w;
+        let tab2_l = tab1_r + tab_gap;
+        let tab2_r = tab2_l + tab_w;
         if x >= pad_x && x <= tab0_r {
             new_hover = Some(100);
             is_pointer = true;
         } else if x >= tab1_l && x <= tab1_r {
+            new_hover = Some(102);
+            is_pointer = true;
+        } else if x >= tab2_l && x <= tab2_r {
             new_hover = Some(101);
             is_pointer = true;
         }
@@ -1960,7 +2247,7 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
             let card3_top = card2_top + card_h + card_gap;
             let card4_top = card3_top + card_h + card_gap;
             let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-            let about_h = (104.0 * scale).round() as i32;
+            let about_h = (120.0 * scale).round() as i32;
 
             if x >= pad_x && x <= pad_x + card_w {
                 if y >= card0_top && y <= card0_top + card_h {
@@ -1994,10 +2281,10 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                     let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
                     let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
 
-                    let web_top = card5_top + (32.0 * scale).round() as i32;
-                    let web_bottom = card5_top + (50.0 * scale).round() as i32;
-                    let gh_top = card5_top + (53.0 * scale).round() as i32;
-                    let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+                    let web_top = card5_top + (51.0 * scale).round() as i32;
+                    let web_bottom = card5_top + (69.0 * scale).round() as i32;
+                    let gh_top = card5_top + (72.0 * scale).round() as i32;
+                    let gh_bottom = card5_top + (90.0 * scale).round() as i32;
 
                     if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
                         new_hover = Some(20);
@@ -2019,6 +2306,21 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                     if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h {
                         new_hover = Some(50);
                         is_pointer = true;
+                    }
+                }
+            }
+        }
+        SettingsTab::TabModule => {
+            if crate::win32::version::is_tab_module_supported() {
+                let card_h = (56.0 * scale).round() as i32;
+                if x >= pad_x && x <= pad_x + card_w {
+                    for i in 0..6 {
+                        let c_top = card_top_base + i * (card_h + card_gap);
+                        if y >= c_top && y <= c_top + card_h {
+                            new_hover = Some(40 + i as usize);
+                            is_pointer = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -2178,7 +2480,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
 
     let tab_y = (56.0 * scale).round() as i32;
     let tab_h = (30.0 * scale).round() as i32;
-    let tab_w = (136.0 * scale).round() as i32;
+    let tab_w = (118.0 * scale).round() as i32;
     let tab_gap = (8.0 * scale).round() as i32;
     let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
     let card_top_base = line_y + (10.0 * scale).round() as i32;
@@ -2190,6 +2492,8 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
         let tab0_r = pad_x + tab_w;
         let tab1_l = tab0_r + tab_gap;
         let tab1_r = tab1_l + tab_w;
+        let tab2_l = tab1_r + tab_gap;
+        let tab2_r = tab2_l + tab_w;
         if x >= pad_x && x <= tab0_r {
             if let Ok(mut t) = CURRENT_TAB.lock() {
                 *t = SettingsTab::General;
@@ -2202,6 +2506,17 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             }
             return;
         } else if x >= tab1_l && x <= tab1_r {
+            if let Ok(mut t) = CURRENT_TAB.lock() {
+                *t = SettingsTab::TabModule;
+            }
+            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+                let _ = UpdateWindow(hwnd);
+            }
+            return;
+        } else if x >= tab2_l && x <= tab2_r {
             if let Ok(mut t) = CURRENT_TAB.lock() {
                 *t = SettingsTab::Monitor;
             }
@@ -2225,7 +2540,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             let card3_top = card2_top + card_h + card_gap;
             let card4_top = card3_top + card_h + card_gap;
             let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
-            let about_h = (104.0 * scale).round() as i32;
+            let about_h = (120.0 * scale).round() as i32;
 
             let is_dropdown_open = IS_DROPDOWN_OPEN.load(Ordering::SeqCst);
             let combo_w = (170.0 * scale).round() as i32;
@@ -2357,10 +2672,10 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
                 let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
 
-                let web_top = card5_top + (32.0 * scale).round() as i32;
-                let web_bottom = card5_top + (50.0 * scale).round() as i32;
-                let gh_top = card5_top + (53.0 * scale).round() as i32;
-                let gh_bottom = card5_top + (72.0 * scale).round() as i32;
+                let web_top = card5_top + (51.0 * scale).round() as i32;
+                let web_bottom = card5_top + (69.0 * scale).round() as i32;
+                let gh_top = card5_top + (72.0 * scale).round() as i32;
+                let gh_bottom = card5_top + (90.0 * scale).round() as i32;
 
                 if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
                     let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
@@ -2405,6 +2720,30 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                     let cur = crate::dialog::detector::is_debug_mode_enabled();
                     crate::dialog::detector::set_debug_mode_enabled(!cur);
                     need_redraw = true;
+                }
+            }
+        }
+        SettingsTab::TabModule => {
+            if crate::win32::version::is_tab_module_supported() {
+                let card_h = (56.0 * scale).round() as i32;
+                if x >= pad_x && x <= pad_x + card_w {
+                    for i in 0..6 {
+                        let c_top = card_top_base + i * (card_h + card_gap);
+                        if y >= c_top && y <= c_top + card_h {
+                            match i {
+                                0 => config.tab_module.enabled = !config.tab_module.enabled,
+                                1 => config.tab_module.inherit_current_path = !config.tab_module.inherit_current_path,
+                                2 => config.tab_module.wine_to_tab = !config.tab_module.wine_to_tab,
+                                3 => config.tab_module.deduplication = !config.tab_module.deduplication,
+                                4 => config.tab_module.reopen_closed = !config.tab_module.reopen_closed,
+                                5 => config.tab_module.double_click_to_duplicate = !config.tab_module.double_click_to_duplicate,
+                                _ => {}
+                            }
+                            set_draft_config(config.clone());
+                            need_redraw = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2613,5 +2952,70 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             let _ = InvalidateRect(Some(hwnd), None, false);
             let _ = UpdateWindow(hwnd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_about_os_version_rendering() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        let os_str_zh = crate::win32::version::format_windows_version(true);
+        let line_zh = zh.about.os_environment.replace("{os_version}", &os_str_zh);
+        assert!(line_zh.starts_with("系统环境："));
+        assert!(line_zh.contains("Windows"));
+
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+        let os_str_en = crate::win32::version::format_windows_version(false);
+        let line_en = en.about.os_environment.replace("{os_version}", &os_str_en);
+        assert!(line_en.starts_with("System:"));
+        assert!(line_en.contains("Windows"));
+    }
+
+    #[test]
+    fn test_tab_module_unsupported_notices() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        assert_eq!(zh.tab_module.unsupported_badge, "系统环境限制");
+        assert_eq!(zh.tab_module.unsupported_title, "当前 Windows 系统版本暂不支持多标签增强");
+        let os_str = crate::win32::version::format_windows_version(true);
+        let desc = zh.tab_module.unsupported_desc.replace("{os_version}", &os_str);
+        assert!(desc.contains("22621"));
+        assert!(desc.contains(&os_str));
+
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+        assert_eq!(en.tab_module.unsupported_badge, "System Unsupported");
+        assert_eq!(en.tab_module.unsupported_title, "File Explorer Tabs Not Supported on Current Windows");
+        let desc_en = en.tab_module.unsupported_desc.replace("{os_version}", &os_str);
+        assert!(desc_en.contains("22621"));
+    }
+
+    #[test]
+    fn test_tab_module_mock_unsupported_switch() {
+        crate::win32::version::set_mock_tab_unsupported(true);
+        assert!(!crate::win32::version::is_tab_module_supported());
+        crate::win32::version::set_mock_tab_unsupported(false);
+        // 当前运行环境是 Windows 11 Build >= 22621
+        assert!(crate::win32::version::is_tab_module_supported());
+    }
+
+    #[test]
+    fn test_tab_module_unsupported_multiline_format() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+
+        let os_str_mock = "Windows 10 ServerStandard 1809 (OS 内部版本 17763.107)";
+        let desc_zh = zh.tab_module.unsupported_desc.replace("{os_version}", os_str_mock);
+        assert!(desc_zh.contains('\n'), "中文描述应包含分段换行符以保持整洁");
+        assert!(desc_zh.contains("17763.107"));
+        assert!(!desc_zh.is_empty());
+
+        let desc_en = en.tab_module.unsupported_desc.replace("{os_version}", os_str_mock);
+        assert!(desc_en.contains('\n'), "英文描述应包含分段换行符以保持整洁");
+        assert!(desc_en.contains("17763.107"));
+        assert!(!desc_en.is_empty());
     }
 }

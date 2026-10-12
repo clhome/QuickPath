@@ -139,6 +139,8 @@ pub struct AboutSection {
     pub website: String,
     #[serde(default)]
     pub github: String,
+    #[serde(default)]
+    pub os_environment: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -274,6 +276,44 @@ pub struct MonitorSection {
     pub tooltip_minutes: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TabModuleSection {
+    #[serde(default)]
+    pub card_title: String,
+    #[serde(default)]
+    pub card_desc: String,
+    #[serde(default)]
+    pub enable_tab_module: String,
+    #[serde(default)]
+    pub enable_tab_module_desc: String,
+    #[serde(default)]
+    pub wine_to_tab: String,
+    #[serde(default)]
+    pub wine_to_tab_desc: String,
+    #[serde(default)]
+    pub inherit_current_path: String,
+    #[serde(default)]
+    pub inherit_current_path_desc: String,
+    #[serde(default)]
+    pub tab_deduplication: String,
+    #[serde(default)]
+    pub tab_deduplication_desc: String,
+    #[serde(default)]
+    pub reopen_closed_tab: String,
+    #[serde(default)]
+    pub reopen_closed_tab_desc: String,
+    #[serde(default)]
+    pub double_click_duplicate: String,
+    #[serde(default)]
+    pub double_click_duplicate_desc: String,
+    #[serde(default)]
+    pub unsupported_badge: String,
+    #[serde(default)]
+    pub unsupported_title: String,
+    #[serde(default)]
+    pub unsupported_desc: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocaleBundle {
     pub meta: MetaSection,
@@ -285,6 +325,8 @@ pub struct LocaleBundle {
     pub tray: TraySection,
     #[serde(default)]
     pub monitor: MonitorSection,
+    #[serde(default)]
+    pub tab_module: TabModuleSection,
 }
 
 // 编译期嵌入官方自带语言文件，确保单文件绿色分发零外部依赖

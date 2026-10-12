@@ -53,6 +53,39 @@ pub struct AppConfig {
     pub theme: String,
     /// 任务栏硬件状态监控模块配置
     pub monitor: MonitorConfig,
+    /// 资源管理器多标签页增强模块配置
+    #[serde(default)]
+    pub tab_module: TabModuleConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabModuleConfig {
+    /// 资源管理器多标签页增强总开关
+    pub enabled: bool,
+    /// Win + E 自动转为新建标签页
+    pub wine_to_tab: bool,
+    /// 新建标签页打开当前目录（点击加号或按 Ctrl+T 时克隆当前路径）
+    pub inherit_current_path: bool,
+    /// 标签页智能去重
+    pub deduplication: bool,
+    /// 恢复已关闭标签页快捷键 (Ctrl+Shift+T)
+    pub reopen_closed: bool,
+    /// 双击标签页自动在右侧复制当前路径标签页 (Duplicate Tab)
+    pub double_click_to_duplicate: bool,
+}
+
+impl Default for TabModuleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            wine_to_tab: true,
+            inherit_current_path: true,
+            deduplication: true,
+            reopen_closed: true,
+            double_click_to_duplicate: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -137,6 +170,7 @@ impl Default for AppConfig {
             enable_xyplorer: true,
             theme: "auto".to_string(),
             monitor: MonitorConfig::default(),
+            tab_module: TabModuleConfig::default(),
         }
     }
 }
@@ -420,5 +454,33 @@ mod tests {
 
         // 清理测试临时目录
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tab_module_config_defaults() {
+        let default_cfg = TabModuleConfig::default();
+        assert!(default_cfg.enabled);
+        assert!(default_cfg.wine_to_tab);
+        assert!(default_cfg.inherit_current_path);
+        assert!(default_cfg.deduplication);
+        assert!(default_cfg.reopen_closed);
+
+        let app_cfg = AppConfig::default();
+        assert_eq!(app_cfg.tab_module, default_cfg);
+
+        // 验证旧版 JSON 反序列化时自动补齐 tab_module 默认字段
+        let old_json = r#"{"hotkey": "Ctrl+Q"}"#;
+        let parsed: AppConfig = serde_json::from_str(old_json).expect("必须成功解析缺失 tab_module 的旧配置");
+        assert!(parsed.tab_module.enabled);
+        assert!(parsed.tab_module.inherit_current_path);
+
+        // 验证多语言语言包包含 tab_module
+        let bundle_zh = crate::rules::I18n::get_bundle(&Language::ZhCN);
+        assert!(!bundle_zh.tab_module.card_title.is_empty());
+        assert!(!bundle_zh.tab_module.inherit_current_path.is_empty());
+
+        let bundle_en = crate::rules::I18n::get_bundle(&Language::EnUS);
+        assert!(!bundle_en.tab_module.card_title.is_empty());
+        assert!(!bundle_en.tab_module.inherit_current_path.is_empty());
     }
 }
