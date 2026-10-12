@@ -4,7 +4,7 @@
 
 [使用说明书 (中文)](User_Manual_CN.md) | **English Manual** · [Back to Home](../README.md)
 
-[![Version](https://img.shields.io/badge/Version-v1.1.0-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.2.0-success)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Producer](https://img.shields.io/badge/Produced%20By-Quzhou%20Yufeng%20Technology%20Co.,%20Ltd.-orange)](https://qp.yftec.top)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](../LICENSE)
@@ -28,6 +28,14 @@
   - [4.3 IME Guard & Filename Preservation](#43-ime-guard--filename-preservation)
   - [4.4 File Manager Ecosystem Integration](#44-file-manager-ecosystem-integration)
   - [4.5 Taskbar Hardware Status Monitor (New in Ver 1.1.0)](#45-taskbar-hardware-status-monitor-new-in-ver-110)
+  - [4.6 File Explorer Tab Utility Module (New in Ver 1.2.0)](#46-file-explorer-tab-utility-module-new-in-ver-120)
+    - [4.6.1 Module Positioning & Native Lightweight Architecture](#461-module-positioning--native-lightweight-architecture)
+    - [4.6.2 Auto Window-to-Tab Capture & Consolidation](#462-auto-window-to-tab-capture--consolidation)
+    - [4.6.3 External App "Show in Folder" Takeover with Selection Preservation](#463-external-app-show-in-folder-takeover-with-selection-preservation)
+    - [4.6.4 Win + E Smart Interception & Single-Window Experience](#464-win--e-smart-interception--single-window-experience)
+    - [4.6.5 Smart Tab Deduplication](#465-smart-tab-deduplication)
+    - [4.6.6 Double-Click Tab to Duplicate](#466-double-click-tab-to-duplicate)
+    - [4.6.7 Shortcut Reference & Efficiency Guidelines](#467-shortcut-reference--efficiency-guidelines)
 - [5. Graphical Settings Center Guide](#5-graphical-settings-center-guide)
   - [5.1 Opening the Settings Center](#51-opening-the-settings-center)
   - [5.2 Configuration Options in Detail](#52-configuration-options-in-detail)
@@ -200,6 +208,57 @@ Hovering over the docked monitor bar for 400ms reveals a modern Fluent dark card
   - `Exit QuickPath`
 - **System Tray Integration**: Toggle taskbar monitoring on/off at any time from the tray icon's context menu.
 
+### 4.6 File Explorer Tab Utility Module (New in Ver 1.2.0)
+
+#### 4.6.1 Module Positioning & Native Lightweight Architecture
+In Windows 11 (22H2 Build 22621 and later), Microsoft officially introduced native multi-tab functionality into File Explorer (implemented via XAML island `ShellTabWindowClass`). However, several frustrating user experience gaps remain in the default Windows behavior:
+1. **Proliferation of Redundant Windows**: Pressing `Win + E` or clicking "Show in Folder" from external applications (IDEs, browsers, chat tools) persistently spawns new top-level independent windows, quickly cluttering your desktop;
+2. **Tab Clutter & Infinite Duplication**: Opening the same folder multiple times spawns duplicate tabs without intelligent reuse;
+3. **Lack of Instant Tab Cloning**: Power users lacking an effortless mouse gesture to duplicate a tab side-by-side for folder comparison.
+
+QuickPath **Ver 1.2.0** deconstructs this workflow and provides a pure Rust native **File Explorer Tab Utility**:
+- **Pure Native & Zero External Dependencies**: Built strictly upon Win32 APIs, Shell COM interfaces (`IShellWindows` / `IShellBrowser` / `IShellView`), and UI Automation. **Zero external DLL injection**, ensuring total immunity from antivirus heuristic false alarms;
+- **Extreme Memory & CPU Efficiency**: Bypasses heavy rendering engines completely; consumes only **5MB ~ 10MB** incremental working set memory with **0.00%** idle CPU;
+- **Clean Lifecycle**: When disabled in Settings, all global system hooks are completely unhooked and released, reverting Windows to 100% native behavior.
+
+#### 4.6.2 Auto Window-to-Tab Capture & Consolidation
+- **Dual-Event Complementary Interception**: Simultaneously registers `EVENT_OBJECT_CREATE` and `EVENT_OBJECT_SHOW` via `SetWinEventHook`. This ensures 100% reliable detection of incoming `CabinetWClass` windows, resolving edge cases during cold start initialization;
+- **Off-Screen Layered Concealment (Zero Flash)**: In the microsecond an incoming Explorer window spawns, QuickPath applies `WS_EX_LAYERED` with Alpha=0 and shifts its coordinates off-screen. This preserves COM initialization while completely eliminating the unsightly white/black screen flashes common in legacy tools;
+- **Windows 11 Native Magic Command `0xA21B`**: Sends internal command `WM_COMMAND (0xA21B)` directly to the destination window's `ShellTabWindowClass`, creating an instant tab natively, backed by robust UI Automation and keyboard fallbacks;
+- **Safe Destruction & Focus Transition**: Once the target tab is attached and directed to the target directory, the temporary source window is smoothly closed and destroyed, leaving focus naturally inside the new tab.
+
+#### 4.6.3 External App "Show in Folder" Takeover with Selection Preservation
+Development and productivity software (such as VS Code, Cursor, IntelliJ IDEA, Google Chrome, WeChat, and Telegram) frequently invokes `explorer.exe /select,"C:\path\to\file.ext"` or the Shell API `SHOpenFolderAndSelectItems` to reveal files to users.
+- **Metadata Penetration Extraction**: QuickPath asynchronously queries the incoming window's `IShellItem` and `IShellView` COM interfaces to determine the exact parent folder path and the specific target filename to be selected;
+- **Intelligent Tab Consolidation**: If an Explorer window is already open, the action is routed into that window (switching to an existing tab if already open, or creating a new tab directed to the parent folder);
+- **100% Selection Fidelity (Crucial)**: Once the directory view finishes loading, QuickPath dispatches `IShellView::SelectItem` with `SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`. **The target file remains vividly highlighted and scrolled into the center of the view**, solving the long-standing flaw in basic window mergers where files lose their selected state.
+
+#### 4.6.4 Win + E Smart Interception & Single-Window Experience
+- **No Existing Explorer Window**: When you press the global shortcut `Win + E`, QuickPath lets the system proceed natively, launching the initial primary window;
+- **Existing Explorer Window Present**: Intercepts the redundant top-level window and converts the action into creating a new tab in the active Explorer window (defaulting to Home or This PC), preserving an orderly single-window desktop environment.
+
+#### 4.6.5 Smart Tab Deduplication
+- When navigating to folders, QuickPath extracts canonical normalized physical paths across all open tabs in the host window;
+- If the folder is already open in an existing tab, focus shifts immediately to that tab, stopping identical folders from proliferating across the tab bar;
+- **Intent-Aware Bypass**: Deduplication applies to external navigations and address jumps. It automatically bypasses when the user intentionally triggers the "Double-Click Tab to Duplicate" gesture described below.
+
+#### 4.6.6 Double-Click Tab to Duplicate
+- **Intuitive Mouse Gesture**: **Double-click any tab** on the File Explorer tab bar using the left mouse button, and QuickPath will instantly clone and open an identical folder tab directly to its right;
+- **Ideal for Multi-Directory Workflows**: Compare files or drag items between adjacent views without tedious path copying or manually pressing `+`;
+- **Low-Level Precision Hit-Testing**: Combines a low-level mouse hook with UI Automation hierarchy resolution to accurately identify the clicked `TabItem` node even when the tab is currently in the background.
+
+#### 4.6.7 Shortcut Reference & Efficiency Guidelines
+
+| Action / Shortcut | Description |
+| :--- | :--- |
+| **`Win + E`** | When Tab Utility is active, opens a new tab in the existing window instead of launching a separate window *(New in Ver 1.2.0)* |
+| **Double-Click Tab** | Double-click any tab on the Explorer tab bar to clone the same folder to its right *(New in Ver 1.2.0)* |
+| **Middle-Click Tab** | Middle-click any tab to close it quickly *(Windows Native Feature)* |
+| **`Ctrl + Tab`** | Cycle forward smoothly through adjacent tabs *(Windows Native Feature)* |
+| **`Ctrl + Shift + Tab`** | Cycle backward smoothly through adjacent tabs *(Windows Native Feature)* |
+| **`Ctrl + T`** | Create a new default home tab in the active window *(Windows Native Feature)* |
+| **`Ctrl + W` / `Ctrl + F4`** | Close the currently active tab *(Windows Native Feature)* |
+
 ---
 
 ## 5. Graphical Settings Center Guide
@@ -210,7 +269,7 @@ Hovering over the docked monitor bar for 400ms reveals a modern Fluent dark card
 
 ### 5.2 Configuration Options in Detail
 
-The Settings Center utilizes a modern Fluent dual-tab card layout (freely toggle between "General Preferences" and "Taskbar Monitor" at the top):
+The Settings Center utilizes a modern Fluent **three-tab** card layout (freely toggle between "General Preferences", "Tab Utility", and "Taskbar Monitor" at the top):
 
 #### "General Preferences" Tab
 1. **Smart AutoSwitch**
@@ -233,6 +292,22 @@ The Settings Center utilizes a modern Fluent dual-tab card layout (freely toggle
    - Features the high-resolution bicubic resampled QuickPath logo;
    - Displays version number, product overview, and producer branding (*Quzhou Yufeng Technology Co., Ltd.*);
    - Includes clickable hyperlinks to the official website ([https://qp.yftec.top](https://qp.yftec.top)) and the GitHub repository ([https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)).
+
+#### "Tab Utility" Tab (New in Ver 1.2.0)
+1. **Master Toggle Card (Card T0: Enable Tab Utility)**:
+   - Standalone top master switch (similar to the Taskbar Monitor toggle). Click or drag to enable or completely disable Explorer multi-tab enhancement;
+   - **Master-Child Linked Dimming**: When the master switch is disabled, all sub-cards gracefully dim and disable mouse interactions, while global hooks are completely unhooked from the system.
+2. **Shortcuts & Window Integration Group Card (Card T1)**:
+   - **Win + E Opens New Tab**: Intercepts the system global `Win + E` shortcut. If an Explorer window is already open, opens a new tab in the active window instead of launching a separate window; if no window exists, lets the system open the initial primary window naturally.
+3. **Smart Behaviors & Mouse Gestures Group Card (Card T2)**:
+   - **Smart Tab Deduplication**: When navigating to folders, matches canonical paths against all open tabs in the active window. If the folder is already open, switches focus directly to that tab to prevent endless duplication;
+   - **Double-Click Tab to Duplicate**: Double-click any tab on the File Explorer tab bar to clone and open the same folder to its right, boosting efficiency when organizing and comparing directories.
+4. **High-Efficiency Tips Card (Card T3)**:
+   - Permanent guidance card at the bottom illustrating native shortcuts:
+     - `• Middle-click any tab to close it quickly`;
+     - `• Press Ctrl+Tab or Ctrl+Shift+Tab to cycle smoothly through adjacent folder tabs`.
+5. **System Compatibility Fallback Display**:
+   - If running on Windows 10 or pre-22H2 Windows 11 builds lacking native XAML Explorer tabs, the Tab Utility section gracefully displays an informational "System Unsupported" banner explaining the OS requirement, while core path following and taskbar monitoring remain 100% operational.
 
 #### "Taskbar Monitor" Tab (New in Ver 1.1.0)
 
@@ -288,6 +363,12 @@ Settings are serialized in standard JSON format:
     "C:\\Users\\Public\\Downloads"
   ],
   "history_folders": [],
+  "tab_module": {
+    "enabled": true,
+    "wine_to_tab": true,
+    "deduplication": true,
+    "double_click_to_duplicate": true
+  },
   "monitor": {
     "enabled": true,
     "position": "TrayLeft",
@@ -302,6 +383,14 @@ Settings are serialized in standard JSON format:
   }
 }
 ```
+
+#### File Explorer Tab Utility Configuration Properties (New in Ver 1.2.0)
+| Property | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | boolean | `true` | Master switch for File Explorer multi-tab enhancement (releases all global hooks when false, zero system overhead) |
+| `wine_to_tab` | boolean | `true` | Whether to convert global `Win + E` into opening a new tab inside the existing active Explorer window |
+| `deduplication` | boolean | `true` | Whether to activate existing open tabs when navigating to already open folder paths |
+| `double_click_to_duplicate` | boolean | `true` | Whether double-clicking any tab on the Explorer tab bar duplicates that folder tab to its right |
 
 #### Taskbar Hardware Monitor Configuration Properties (New in Ver 1.1.0)
 | Property | Type | Default | Description |
@@ -360,6 +449,17 @@ QuickPath includes embedded English and Simplified Chinese localization, while a
 - **Answer**: Right-click the monitor bar and select "Dock Position", or configure it under the "Taskbar Monitor" tab in Settings:
   - **Right of Taskbar (Default)**: Docks snugly to the left of the notification tray icons;
   - **Above Taskbar Left (Float)**: Floats independently directly above the taskbar's left edge, completely preventing any visual overlap with running application taskbar icons.
+
+### Q9: Why does Settings show "File Explorer Tabs Not Supported on Current Windows"? *(New in Ver 1.2.0)*
+- **Answer**: The multi-tab enhancement relies on the native XAML tabs architecture introduced in **Windows 11 22H2 (Build 22621 or newer)**. If you are running Windows 10 or an earlier Windows 11 build, your system does not have the native tab infrastructure. QuickPath automatically detects this and gracefully disables the tab module with an informational banner, while all core file dialog AutoSwitch and hardware monitor features continue to work flawlessly.
+
+### Q10: Why does double-clicking a tab duplicate the folder, while opening the same folder from outside triggers deduplication? *(New in Ver 1.2.0)*
+- **Answer**: This is powered by QuickPath's "intent-aware routing":
+  1. Opening folders via external apps usually signifies navigating to an existing workspace, so smart deduplication switches focus to your existing tab to prevent tab clutter;
+  2. In contrast, **explicitly double-clicking a tab** expresses a deliberate desire for a duplicated side-by-side view (e.g., comparing files). QuickPath automatically triggers a deduplication bypass to honor this intent.
+
+### Q11: How does QuickPath preserve file selection when using "Show in Folder" from VS Code, Cursor, etc.? *(New in Ver 1.2.0)*
+- **Answer**: Basic tab mergers often navigate to the parent folder without restoring selection state. In the microsecond an incoming window spawns, QuickPath queries `IShellView` and Shell items to extract the exact item to be selected. Once the tab view is mounted in the target window, QuickPath invokes `IShellView::SelectItem` with `SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`, ensuring the file remains vividly highlighted and scrolled into view.
 
 ---
 

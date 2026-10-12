@@ -987,13 +987,40 @@
 - [x] **60.5 清理临时文件、全量单元测试与交付验证**
   - [x] 清理 `test/test_tab_reopen.rs`
   - [x] 运行 `cargo test` 确保全量单元测试 100% 通过（37 项测试全绿）
-  - [x] 运行 `cargo build --release` 编译验证并交付成果
+## 阶段六十一：多标签增强功能 (Ver 1.2.0) 补充至全套中英文文档
 
+> **核心目标**：
+> 将 ver1.2.0 研发落地的“文件资源管理器多标签增强 (Tab Utility)”模块完整、专业地同步至项目四份核心中英文文档：
+> 1. `README_CN.md` 与 `README.md`
+> 2. `Document/User_Manual_CN.md` 与 `Document/User_Manual_EN.md`
 
-
-
-
-
+- [x] **61.1 更新项目中文自述文件 (`README_CN.md`)**
+  - [x] 升级版本号徽章至 `v1.2.0`
+  - [x] 在核心特性中新增“文件资源管理器多标签增强”板块（自动窗口合并、外部 IDE/浏览器 Show in Folder 接管与高亮还原、Win+E 接管、智能去重、双击标签页克隆）
+  - [x] 在常用快捷操作表格中新增 Win+E、双击标签页克隆、中键关闭说明
+  - [x] 在设置中心一览中增加三选项卡布局与「多标签增强」卡片明细介绍
+  - [x] 在配置文件说明中补充 `tab_module` 结构与字段说明
+- [x] **61.2 更新项目英文自述文件 (`README.md`)**
+  - [x] 升级版本号徽章至 `v1.2.0`
+  - [x] 在 Key Features 中补充 File Explorer Tab Utility 核心特性
+  - [x] 在 Shortcuts & Controls 表格中补充 Win+E、Double-Click Tab、Middle-Click Tab
+  - [x] 在 Settings Center 中同步三选项卡结构与 Tab Utility 卡片说明
+  - [x] 在 Configuration File 中补充 `tab_module` JSON 与字段释义
+- [x] **61.3 更新中文用户使用说明书 (`Document/User_Manual_CN.md`)**
+  - [x] 升级版本号徽章至 `v1.2.0`，更新目录结构
+  - [x] 撰写 4.6 节“文件资源管理器多标签页增强模块 (Ver 1.2.0 新增)”详细操作与原理解析
+  - [x] 更新 5.2 节图形设置中心，补充「多标签增强」选项卡（Card T0~T3 及不支持环境友好提示）
+  - [x] 更新 6.1 节配置文件说明，补充 `tab_module` 字段明细表
+  - [x] 更新 7 节 FAQ，补充 Win10 不支持提示、双击克隆并列诉求、外部应用接管等答疑
+- [x] **61.4 更新英文用户使用说明书 (`Document/User_Manual_EN.md`)**
+  - [x] 升级版本号徽章至 `v1.2.0`，更新目录结构
+  - [x] 撰写 4.6 节“File Explorer Tab Utility Module (New in Ver 1.2.0)”
+  - [x] 更新 5.2 节补充「Tab Utility」Tab 详细配置卡片说明
+  - [x] 更新 6.1 节补充 `tab_module` 参数配置表
+  - [x] 更新 7 节 FAQ 补充多标签常见疑问与技术原理解释
+- [x] **61.5 文档规范检查与收尾**
+  - [x] 检查所有内部锚点与相互引用链接有效性
+  - [x] 确保全文件 UTF-8 LF 编码，更新任务打勾状态
 
 
 

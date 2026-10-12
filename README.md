@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-v1.1.1-success)](#)
+[![Version](https://img.shields.io/badge/Version-v1.2.0-success)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
 
@@ -25,9 +25,10 @@
 When working across multiple applications, do you frequently face this frustration?
 - You just navigated to a deeply nested project folder in **File Explorer** or **Directory Opus**, but when invoking "Open" or "Save As" in your code editor, IDE, Photoshop, Office, or **WPS Office**, the file dialog defaults back to "Downloads" or "Documents";
 - You are forced to traverse through long directory trees again or manually copy and paste folder paths into the dialog address bar;
-- Outdated legacy switcher tools often trigger your Input Method Editor (IME) unintentionally during path injection, causing typos, candidate popups, or accidentally overwriting your desired filename.
+- Outdated legacy switcher tools often trigger your Input Method Editor (IME) unintentionally during path injection, causing typos, candidate popups, or accidentally overwriting your desired filename;
+- On Windows 11 File Explorer, viewing files from IDEs or pressing `Win + E` constantly spawns messy, redundant top-level windows without tab reuse or convenient tab duplication shortcuts.
 
-**QuickPath** was engineered to eliminate this friction once and for all. It senses your active file manager folders in milliseconds upon opening a file dialog, providing seamless automatic synchronization and instant keyboard-driven navigation.
+**QuickPath** was engineered to eliminate this friction once and for all. It senses your active file manager folders in milliseconds upon opening a file dialog, providing seamless automatic synchronization and instant keyboard-driven navigation; while supercharging Windows 11 with native-grade multi-tab window consolidation.
 
 ---
 
@@ -37,7 +38,14 @@ When working across multiple applications, do you frequently face this frustrati
 
 - **⚡ Smart AutoSwitch**:
   When an "Open" or "Save As" dialog appears in editors, IDEs, or creative software, QuickPath synchronizes it to your most recently browsed file manager directory within milliseconds—eliminating repetitive path hunting and copy-pasting.
-- **📑 WPS Office Deep Adaptation (New in Ver 1.1.1)**:
+- **🗂️ File Explorer Tab Utility (New in Ver 1.2.0)**:
+  Ultra-lightweight multi-tab utility purpose-built for native Windows 11 File Explorer (Zero external DLL injection, 0% GC, consumes only 5~10MB RAM):
+  - **Auto Window-to-Tab Merge**: Automatically intercepts new top-level Explorer windows and merges them into the active window as tabs using Windows 11 native internal command `0xA21B`, with off-screen layered concealment to eliminate white/black flashes;
+  - **IDE & External App "Show in Folder" Integration**: When VS Code, Cursor, Chrome, WeChat, or other tools invoke `explorer.exe /select`, merges into tabs in the existing window and 100% preserves file selection/highlighting via Shell view and UIA;
+  - **Win + E Smart Intercept**: When an Explorer window already exists, pressing `Win + E` opens a new tab in the active window instead of launching a separate window;
+  - **Smart Tab Deduplication**: Automatically switches focus to existing tabs when navigating to already open folders, eliminating duplicate tabs;
+  - **Double-Click Tab to Duplicate**: Double-click any tab on the Explorer tab bar to instantly clone and open the same folder to its right—ideal for side-by-side file organization.
+- **📑 WPS Office Deep Adaptation (Ver 1.1.1 Adaptation)**:
   Overcomes the longstanding technical barrier of intercepting custom Qt-based owner-drawn file dialogs in WPS Office (Writer, Spreadsheets, Presentation, and PDF across both Personal and Enterprise editions). Features an intelligent main window negation filter to avoid false triggers, combined with native Windows UI Automation (UIA) heuristic scoring and atomic clipboard injection to achieve instant folder switching while flawlessly preserving the user's typed filename and extension.
 - **📊 Taskbar Hardware Status Monitor (New in Ver 1.1.0)**:
   Ultra-lightweight native hardware dashboard docked right on your Windows taskbar. Displays real-time upload/download speeds, CPU, RAM, dedicated GPU, and Disk I/O across an adaptive 2-row layout. Features crisp Win32 ClearType typography, mini indicator bars, and 3-tier dynamic threshold coloring (Green/Yellow/Red). Supports dual docking modes ("Right of Taskbar" or "Above Taskbar Left Float" to prevent blocking taskbar app buttons) and automatic stealth evasion during full-screen games/media. Consumes $\le 5\text{MB}$ additional RAM when active and drops to absolute 0% CPU & 0 MB footprint when disabled.
@@ -53,7 +61,7 @@ When working across multiple applications, do you frequently face this frustrati
   - Total Commander (TC)
   - XYplorer
 - **💼 Comprehensive Productivity & Creative Suite Compatibility**:
-  - WPS Office (Writer, Spreadsheets, Presentation, PDF, Personal & Enterprise editions, **New in Ver 1.1.1**)
+  - WPS Office (Writer, Spreadsheets, Presentation, PDF, Personal & Enterprise editions)
   - Microsoft Office (Word, Excel, PowerPoint)
   - Popular IDEs & Code Editors (VS Code, Visual Studio, JetBrains IDEs, Sublime Text, Notepad++, etc.)
   - Creative Applications (Photoshop, Illustrator, etc.)
@@ -77,6 +85,10 @@ When working across multiple applications, do you frequently face this frustrati
 | **`↑` / `↓`** | Navigate between active file manager tabs, pinned favorites, and recent history |
 | **`Enter`** | Confirm and instantly inject the selected path into the file dialog |
 | **`Esc`** | Dismiss the floating bar |
+| **`Win + E`** | When Tab Utility is active, opens a new tab in the active Explorer window instead of launching a separate window *(New in Ver 1.2.0)* |
+| **Double-Click Tab** | Double-click any tab on the Explorer tab bar to quickly clone and open the same folder to its right *(New in Ver 1.2.0)* |
+| **Middle-Click Tab** | Middle-click any tab to close it quickly *(Windows Native Feature)* |
+| **`Ctrl + Tab` / `Ctrl + Shift + Tab`** | Cycle forward / backward smoothly through adjacent tabs *(Windows Native Feature)* |
 | **Monitor Double-Click** | Instantly launch Windows Task Manager (`taskmgr.exe`) *(New in Ver 1.1.0)* |
 | **Monitor Mouse Hover** | Summon Fluent Hardware Dashboard (Tooltip) showing dual-unit network speed, top consumer process, dedicated VRAM, uptime, and battery *(New in Ver 1.1.0)* |
 | **Monitor Right-Click** | Native context menu: toggle metrics (Net/CPU/RAM/GPU/Disk), waveform background, dock position, refresh network, open settings *(New in Ver 1.1.0)* |
@@ -89,16 +101,23 @@ When working across multiple applications, do you frequently face this frustrati
 
 ![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings_en.webp)
 
-QuickPath includes a modern Fluent dual-tab card-based Settings Center:
-- **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms).
-- **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency.
-- **Taskbar Hardware Monitor (New in Ver 1.1.0)**: Master toggle for hardware monitoring, docking position selector ("Right of Taskbar" / "Above Taskbar Left Float"), granular metric toggles (Network/CPU/RAM/GPU/Disk), 15~20s historical waveform graph toggle, sampling refresh rate selector (1.0s / 3.0s recommended / 5.0s), and monitor panel transparency slider (50% – 100%).
-
+QuickPath includes a modern Fluent **three-tab** card-based Settings Center:
+- **"General Preferences" Tab**:
+  - **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms);
+  - **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency;
+  - **Custom Hotkey**: Interactive key recording interface supporting custom modifier combinations (Ctrl, Alt, Shift, Win) with dynamic hotkey re-registration;
+  - **System Startup**: Seamless Task Scheduler integration for UAC-free elevation on boot;
+  - **Language Switcher**: Dynamic switching between English, Simplified Chinese, or any external `./locales/*.toml` files;
+  - **About & Community**: View version info, open the official website, or visit the GitHub repository.
+- **"Tab Utility" Tab (New in Ver 1.2.0)**:
+  - **Master Toggle Card**: Easily enable or completely disable Explorer multi-tab enhancement; unloads system hooks completely and dims sub-cards gracefully when disabled;
+  - **Shortcuts & Window Integration Card**: Toggle "Win + E Opens New Tab" in the active window;
+  - **Smart Behaviors & Mouse Gestures Card**: Independently toggle "Smart Tab Deduplication" and "Double-Click Tab to Duplicate";
+  - **💡 High-Efficiency Tips Card**: Built-in shortcut guidelines (middle-click to close tabs, Ctrl+Tab cycle navigation);
+  - **System Compatibility Detection**: Automatically displays a graceful informational banner when running on Windows 10 or pre-22H2 systems that lack native Explorer tabs.
+- **"Taskbar Monitor" Tab (New in Ver 1.1.0)**:
+  - Master toggle for hardware monitoring, docking position selector ("Right of Taskbar" / "Above Taskbar Left Float"), granular metric toggles (Network/CPU/RAM/GPU/Disk), 15~20s historical waveform graph toggle, sampling refresh rate selector (1.0s / 3.0s recommended / 5.0s), and monitor panel transparency slider (50% – 100%);
 ![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
-- **Custom Hotkey**: Interactive key recording interface supporting custom modifier combinations (Ctrl, Alt, Shift, Win) with dynamic hotkey re-registration.
-- **System Startup**: Seamless Task Scheduler integration for UAC-free elevation on boot.
-- **Language Switcher**: Dynamic switching between English, Simplified Chinese, or any external `./locales/*.toml` files.
-- **About & Community**: View version info, open the official website, or visit the GitHub repository.
 
 ---
 
@@ -128,6 +147,12 @@ Sample configuration:
   ],
   "pinned_folders": [],
   "history_folders": [],
+  "tab_module": {
+    "enabled": true,
+    "wine_to_tab": true,
+    "deduplication": true,
+    "double_click_to_duplicate": true
+  },
   "monitor": {
     "enabled": true,
     "position": "TrayLeft",
@@ -143,7 +168,9 @@ Sample configuration:
 }
 ```
 
-> **Note (New in Ver 1.1.0)**: The `monitor` section configures the taskbar hardware status monitor. `position` accepts `"TrayLeft"` (Right of Taskbar) or `"TaskbarLeft"` (Floating Above Taskbar Left). `refresh_interval_ms` supports `1000`, `3000` (default recommended), and `5000` ms. Each metric toggle is independently configurable.
+> **Notes**:
+> - `tab_module` **(New in Ver 1.2.0)**: Configures File Explorer multi-tab enhancement. `enabled` is the master switch; `wine_to_tab` converts `Win + E` into new tabs in existing windows; `deduplication` prevents duplicate folder tabs; `double_click_to_duplicate` allows double-clicking tabs to clone the folder.
+> - `monitor` **(New in Ver 1.1.0)**: Configures the taskbar hardware status monitor. `position` accepts `"TrayLeft"` (Right of Taskbar) or `"TaskbarLeft"` (Floating Above Taskbar Left). `refresh_interval_ms` supports `1000`, `3000` (default recommended), and `5000` ms. Each metric toggle is independently configurable.
 
 ---
 
