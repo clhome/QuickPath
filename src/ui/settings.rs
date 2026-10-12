@@ -46,6 +46,7 @@ enum DragMode {
     OpacitySlider,
     AutoSwitchToggle { start_x: i32, initial_state: bool, has_moved: bool },
     AutostartToggle { start_x: i32, initial_state: bool, has_moved: bool },
+    TabMasterToggle { start_x: i32, initial_state: bool, has_moved: bool },
     MonitorMasterToggle { start_x: i32, initial_state: bool, has_moved: bool },
     MonitorOpacitySlider,
 }
@@ -566,13 +567,12 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                         font_small,
                     );
                 } else {
-                    let card_h = (56.0 * scale).round() as i32;
-
-                    // 卡片 0：启用多标签增强 (Tab Utility)
+                    // 卡片 0：启用多标签增强 (Tab Utility) - 独立置顶总开关卡片（参考任务栏监控）
                     let card0_top = card_top_base;
-                    let is_hov_0 = hovered == Some(40);
+                    let card0_h = (56.0 * scale).round() as i32;
+                    let is_hov_0 = hovered == Some(60);
                     render_toggle_card(
-                        hdc, pad_x, card0_top, pad_x + card_w, card0_top + card_h, scale,
+                        hdc, pad_x, card0_top, pad_x + card_w, card0_top + card0_h, scale,
                         font_card_title, font_text,
                         &bundle.tab_module.enable_tab_module, &bundle.tab_module.enable_tab_module_desc,
                         config.tab_module.enabled,
@@ -580,64 +580,90 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                         is_hov_0,
                     );
 
-                    // 卡片 1：新建标签页打开当前目录 (Inherit Current Path)
-                    let card1_top = card0_top + card_h + card_gap;
-                    let is_hov_1 = hovered == Some(41);
-                    render_toggle_card(
-                        hdc, pad_x, card1_top, pad_x + card_w, card1_top + card_h, scale,
-                        font_card_title, font_text,
-                        &bundle.tab_module.inherit_current_path, &bundle.tab_module.inherit_current_path_desc,
-                        config.tab_module.inherit_current_path,
-                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-                        is_hov_1,
+                    // 卡片 1：快捷键与窗口接管 (Card T1: Shortcuts & Window Integration)
+                    let card1_top = card0_top + card0_h + card_gap;
+                    let card1_h = (134.0 * scale).round() as i32;
+                    let shortcuts_items = [
+                        (
+                            bundle.tab_module.wine_to_tab.as_str(),
+                            bundle.tab_module.wine_to_tab_desc.as_str(),
+                            config.tab_module.wine_to_tab,
+                            61usize,
+                        ),
+                        (
+                            bundle.tab_module.reopen_closed_tab.as_str(),
+                            bundle.tab_module.reopen_closed_tab_desc.as_str(),
+                            config.tab_module.reopen_closed,
+                            62usize,
+                        ),
+                    ];
+                    render_tab_group_card(
+                        hdc,
+                        pad_x,
+                        card1_top,
+                        pad_x + card_w,
+                        card1_top + card1_h,
+                        scale,
+                        font_card_title,
+                        font_text,
+                        &bundle.tab_module.shortcuts_group_title,
+                        &bundle.tab_module.shortcuts_group_desc,
+                        &shortcuts_items,
+                        config.tab_module.enabled,
+                        hovered,
+                        &bundle.settings.status_enabled,
+                        &bundle.settings.status_disabled,
                     );
 
-                    // 卡片 2：Win + E 自动转为新建标签页
-                    let card2_top = card1_top + card_h + card_gap;
-                    let is_hov_2 = hovered == Some(42);
-                    render_toggle_card(
-                        hdc, pad_x, card2_top, pad_x + card_w, card2_top + card_h, scale,
-                        font_card_title, font_text,
-                        &bundle.tab_module.wine_to_tab, &bundle.tab_module.wine_to_tab_desc,
-                        config.tab_module.wine_to_tab,
-                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-                        is_hov_2,
+                    // 卡片 2：智能行为与鼠标手势 (Card T2: Behaviors & Mouse Gestures)
+                    let card2_top = card1_top + card1_h + card_gap;
+                    let card2_h = (134.0 * scale).round() as i32;
+                    let behaviors_items = [
+                        (
+                            bundle.tab_module.tab_deduplication.as_str(),
+                            bundle.tab_module.tab_deduplication_desc.as_str(),
+                            config.tab_module.deduplication,
+                            63usize,
+                        ),
+                        (
+                            bundle.tab_module.double_click_duplicate.as_str(),
+                            bundle.tab_module.double_click_duplicate_desc.as_str(),
+                            config.tab_module.double_click_to_duplicate,
+                            64usize,
+                        ),
+                    ];
+                    render_tab_group_card(
+                        hdc,
+                        pad_x,
+                        card2_top,
+                        pad_x + card_w,
+                        card2_top + card2_h,
+                        scale,
+                        font_card_title,
+                        font_text,
+                        &bundle.tab_module.behaviors_group_title,
+                        &bundle.tab_module.behaviors_group_desc,
+                        &behaviors_items,
+                        config.tab_module.enabled,
+                        hovered,
+                        &bundle.settings.status_enabled,
+                        &bundle.settings.status_disabled,
                     );
 
-                    // 卡片 3：标签页智能去重 (Deduplication)
-                    let card3_top = card2_top + card_h + card_gap;
-                    let is_hov_3 = hovered == Some(43);
-                    render_toggle_card(
-                        hdc, pad_x, card3_top, pad_x + card_w, card3_top + card_h, scale,
-                        font_card_title, font_text,
-                        &bundle.tab_module.tab_deduplication, &bundle.tab_module.tab_deduplication_desc,
-                        config.tab_module.deduplication,
-                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-                        is_hov_3,
-                    );
-
-                    // 卡片 4：恢复已关闭标签页快捷键 (Ctrl+Shift+T)
-                    let card4_top = card3_top + card_h + card_gap;
-                    let is_hov_4 = hovered == Some(44);
-                    render_toggle_card(
-                        hdc, pad_x, card4_top, pad_x + card_w, card4_top + card_h, scale,
-                        font_card_title, font_text,
-                        &bundle.tab_module.reopen_closed_tab, &bundle.tab_module.reopen_closed_tab_desc,
-                        config.tab_module.reopen_closed,
-                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-                        is_hov_4,
-                    );
-
-                    // 卡片 5：双击标签页克隆当前路径 (Double-Click Clone)
-                    let card5_top = card4_top + card_h + card_gap;
-                    let is_hov_5 = hovered == Some(45);
-                    render_toggle_card(
-                        hdc, pad_x, card5_top, pad_x + card_w, card5_top + card_h, scale,
-                        font_card_title, font_text,
-                        &bundle.tab_module.double_click_duplicate, &bundle.tab_module.double_click_duplicate_desc,
-                        config.tab_module.double_click_to_duplicate,
-                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
-                        is_hov_5,
+                    // 卡片 3：操作指南与实用技巧 (Card T3: High-Efficiency Tips Card)
+                    let card3_top = card2_top + card2_h + card_gap;
+                    let card3_h = (68.0 * scale).round() as i32;
+                    render_tab_tips_card(
+                        hdc,
+                        pad_x,
+                        card3_top,
+                        pad_x + card_w,
+                        card3_top + card3_h,
+                        scale,
+                        font_card_title,
+                        font_small,
+                        &bundle,
+                        config.tab_module.enabled,
                     );
                 }
             }
@@ -1537,6 +1563,274 @@ unsafe fn render_tab_unsupported_view(
     }
 }
 
+/// 辅助渲染多标签增强分组设置卡片（专业卡片面板，包含板块标题、说明与多行配置子项）
+unsafe fn render_tab_group_card(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    font_title: windows::Win32::Graphics::Gdi::HFONT,
+    font_desc: windows::Win32::Graphics::Gdi::HFONT,
+    group_title: &str,
+    group_desc: &str,
+    items: &[(&str, &str, bool, usize)],
+    is_master_enabled: bool,
+    hovered: Option<usize>,
+    status_on: &str,
+    status_off: &str,
+) {
+    unsafe {
+        let (bg, border) = if is_master_enabled {
+            (COLORREF(0x00242424), COLORREF(0x00353535))
+        } else {
+            (COLORREF(0x001e1e1e), COLORREF(0x002a2a2a))
+        };
+        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+
+        let inner_x = left + (16.0 * scale).round() as i32;
+        let right_pad = (16.0 * scale).round() as i32;
+        let right_content = right - right_pad;
+
+        // 1. 头部区域 (Group Header)
+        let header_h = (46.0 * scale).round() as i32;
+        let header_bottom = top + header_h;
+
+        SelectObject(hdc, HGDIOBJ(font_title.0 as _));
+        SetTextColor(hdc, if is_master_enabled { COLORREF(0x00ffffff) } else { COLORREF(0x00787878) });
+        let mut g_title_buf: Vec<u16> = group_title.encode_utf16().collect();
+        let mut g_title_rect = RECT {
+            left: inner_x,
+            top: top + (7.0 * scale).round() as i32,
+            right: right_content,
+            bottom: top + (25.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut g_title_buf, &mut g_title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
+        SetTextColor(hdc, if is_master_enabled { COLORREF(0x008e8e8e) } else { COLORREF(0x00525252) });
+        let mut g_desc_buf: Vec<u16> = group_desc.encode_utf16().collect();
+        let mut g_desc_rect = RECT {
+            left: inner_x,
+            top: top + (26.0 * scale).round() as i32,
+            right: right_content,
+            bottom: header_bottom - (4.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut g_desc_buf, &mut g_desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        // 头部与子项行之间的轻微分割线
+        let sep_brush = CreateSolidBrush(COLORREF(0x002c2c2c));
+        let h_line_rect = RECT {
+            left: inner_x,
+            top: header_bottom - 1,
+            right: right_content,
+            bottom: header_bottom,
+        };
+        FillRect(hdc, &h_line_rect, sep_brush);
+
+        // 2. 逐行渲染子项
+        let row_h = (44.0 * scale).round() as i32;
+        let sw_w = (42.0 * scale).round() as i32;
+        let sw_h = (22.0 * scale).round() as i32;
+
+        for (idx, &(item_title, item_desc, is_on, hov_id)) in items.iter().enumerate() {
+            let row_top = header_bottom + idx as i32 * row_h;
+            let row_bottom = row_top + row_h;
+
+            if idx > 0 {
+                let r_line_rect = RECT {
+                    left: inner_x,
+                    top: row_top - 1,
+                    right: right_content,
+                    bottom: row_top,
+                };
+                FillRect(hdc, &r_line_rect, sep_brush);
+            }
+
+            let is_hov = is_master_enabled && hovered == Some(hov_id);
+            if is_hov {
+                let hov_rect = RECT {
+                    left: left + (4.0 * scale).round() as i32,
+                    top: row_top + 1,
+                    right: right - (4.0 * scale).round() as i32,
+                    bottom: row_bottom - 1,
+                };
+                let hov_brush = CreateSolidBrush(COLORREF(0x002c2c2c));
+                FillRect(hdc, &hov_rect, hov_brush);
+                let _ = DeleteObject(HGDIOBJ(hov_brush.0 as _));
+            }
+
+            let sw_right = right - right_pad;
+            let sw_left = sw_right - sw_w;
+            let sw_cy = row_top + row_h / 2;
+            let sw_top = sw_cy - sw_h / 2;
+            let sw_bottom = sw_top + sw_h;
+
+            let text_right_limit = sw_left - (72.0 * scale).round() as i32;
+
+            // 标题
+            SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
+            SetTextColor(hdc, if is_master_enabled { COLORREF(0x00ededed) } else { COLORREF(0x00666666) });
+            let mut t_buf: Vec<u16> = item_title.encode_utf16().collect();
+            let mut t_rect = RECT {
+                left: inner_x,
+                top: row_top + (5.0 * scale).round() as i32,
+                right: text_right_limit,
+                bottom: row_top + (23.0 * scale).round() as i32,
+            };
+            DrawTextW(hdc, &mut t_buf, &mut t_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            // 描述
+            SetTextColor(hdc, if is_master_enabled { COLORREF(0x00888888) } else { COLORREF(0x004e4e4e) });
+            let mut d_buf: Vec<u16> = item_desc.encode_utf16().collect();
+            let mut d_rect = RECT {
+                left: inner_x,
+                top: row_top + (24.0 * scale).round() as i32,
+                right: text_right_limit,
+                bottom: row_bottom - (4.0 * scale).round() as i32,
+            };
+            DrawTextW(hdc, &mut d_buf, &mut d_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            // 状态文字提示（开关左侧）
+            let (txt, txt_color) = if !is_master_enabled {
+                (if is_on { status_on } else { status_off }, COLORREF(0x004a4a4a))
+            } else if is_on {
+                (status_on, COLORREF(0x0050d268))
+            } else {
+                (status_off, COLORREF(0x00787878))
+            };
+            SetTextColor(hdc, txt_color);
+            let mut status_buf: Vec<u16> = txt.encode_utf16().collect();
+            let mut status_rect = RECT {
+                left: sw_left - (64.0 * scale).round() as i32,
+                top: row_top,
+                right: sw_left - (8.0 * scale).round() as i32,
+                bottom: row_bottom,
+            };
+            DrawTextW(hdc, &mut status_buf, &mut status_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+            // Toggle 开关槽体
+            let (sw_bg, sw_border) = if !is_master_enabled {
+                if is_on {
+                    (COLORREF(0x004a3e2e), COLORREF(0x00554838))
+                } else {
+                    (COLORREF(0x00262626), COLORREF(0x00333333))
+                }
+            } else if is_on {
+                (COLORREF(0x00d47800), COLORREF(0x00d47800)) // Win11 Accent Blue
+            } else {
+                (COLORREF(0x00323232), COLORREF(0x00525252))
+            };
+            draw_fluent_box(hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border);
+
+            // Toggle 滑块 Thumb
+            let thumb_margin = (2.0 * scale).round() as i32;
+            let thumb_radius = (sw_h - thumb_margin * 2) / 2;
+            let thumb_cx = if is_on {
+                sw_right - thumb_margin - thumb_radius
+            } else {
+                sw_left + thumb_margin + thumb_radius
+            };
+
+            let thumb_color = if is_master_enabled { COLORREF(0x00ffffff) } else { COLORREF(0x00777777) };
+            let thumb_brush = CreateSolidBrush(thumb_color);
+            let thumb_pen = CreatePen(PS_NULL, 0, COLORREF(0));
+            let old_b = SelectObject(hdc, HGDIOBJ(thumb_brush.0 as _));
+            let old_p = SelectObject(hdc, HGDIOBJ(thumb_pen.0 as _));
+            let _ = RoundRect(
+                hdc,
+                thumb_cx - thumb_radius,
+                sw_cy - thumb_radius,
+                thumb_cx + thumb_radius,
+                sw_cy + thumb_radius,
+                thumb_radius * 2,
+                thumb_radius * 2,
+            );
+            let _ = SelectObject(hdc, old_b);
+            let _ = SelectObject(hdc, old_p);
+            let _ = DeleteObject(HGDIOBJ(thumb_brush.0 as _));
+            let _ = DeleteObject(HGDIOBJ(thumb_pen.0 as _));
+        }
+
+        let _ = DeleteObject(HGDIOBJ(sep_brush.0 as _));
+    }
+}
+
+/// 辅助渲染多标签页高效技巧指南卡片 (Tips Card)
+unsafe fn render_tab_tips_card(
+    hdc: HDC,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    scale: f32,
+    font_bold: windows::Win32::Graphics::Gdi::HFONT,
+    font_small: windows::Win32::Graphics::Gdi::HFONT,
+    bundle: &crate::rules::LocaleBundle,
+    is_master_enabled: bool,
+) {
+    unsafe {
+        let (bg, border) = if is_master_enabled {
+            (COLORREF(0x00212121), COLORREF(0x00343434))
+        } else {
+            (COLORREF(0x001d1d1d), COLORREF(0x002a2a2a))
+        };
+        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+
+        let inner_x = left + (16.0 * scale).round() as i32;
+
+        SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
+        let title_color = if is_master_enabled { COLORREF(0x0050d268) } else { COLORREF(0x003e6845) };
+        SetTextColor(hdc, title_color);
+        let title_text = if !bundle.tab_module.tips_title.is_empty() {
+            bundle.tab_module.tips_title.as_str()
+        } else {
+            "💡 高效操作技巧指南"
+        };
+        let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
+        let mut title_rect = RECT {
+            left: inner_x,
+            top: top + (8.0 * scale).round() as i32,
+            right: right - (16.0 * scale).round() as i32,
+            bottom: top + (26.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        let line_color = if is_master_enabled { COLORREF(0x009e9e9e) } else { COLORREF(0x00555555) };
+        SetTextColor(hdc, line_color);
+
+        let line1 = if !bundle.tab_module.tips_line1.is_empty() {
+            bundle.tab_module.tips_line1.as_str()
+        } else {
+            "• 鼠标中键单击标签页可快速关闭；在标签栏空白处双击可快速新建标签页"
+        };
+        let mut l1_buf: Vec<u16> = line1.encode_utf16().collect();
+        let mut l1_rect = RECT {
+            left: inner_x,
+            top: top + (28.0 * scale).round() as i32,
+            right: right - (16.0 * scale).round() as i32,
+            bottom: top + (45.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut l1_buf, &mut l1_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+        let line2 = if !bundle.tab_module.tips_line2.is_empty() {
+            bundle.tab_module.tips_line2.as_str()
+        } else {
+            "• 按下 Ctrl+Tab 或 Ctrl+Shift+Tab 快捷键可在相邻标签页之间顺畅正反向轮转"
+        };
+        let mut l2_buf: Vec<u16> = line2.encode_utf16().collect();
+        let mut l2_rect = RECT {
+            left: inner_x,
+            top: top + (46.0 * scale).round() as i32,
+            right: right - (16.0 * scale).round() as i32,
+            bottom: top + (63.0 * scale).round() as i32,
+        };
+        DrawTextW(hdc, &mut l2_buf, &mut l2_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+}
+
 /// 辅助渲染 Fluent 胶囊 Tab 切换栏
 unsafe fn render_segmented_tabs(
     hdc: HDC,
@@ -2168,6 +2462,28 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
+            DragMode::TabMasterToggle { start_x, initial_state, ref mut has_moved } => {
+                let dx = x - start_x;
+                if dx.abs() > 4 {
+                    *has_moved = true;
+                }
+                let mut config = get_draft_config();
+                let new_state = if dx > 8 {
+                    true
+                } else if dx < -8 {
+                    false
+                } else {
+                    initial_state
+                };
+                if config.tab_module.enabled != new_state {
+                    config.tab_module.enabled = new_state;
+                    set_draft_config(config);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+                return;
+            }
             DragMode::MonitorMasterToggle { start_x, initial_state, ref mut has_moved } => {
                 let dx = x - start_x;
                 if dx.abs() > 4 {
@@ -2312,14 +2628,50 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
         }
         SettingsTab::TabModule => {
             if crate::win32::version::is_tab_module_supported() {
-                let card_h = (56.0 * scale).round() as i32;
+                let config = get_draft_config();
+                let card0_top = card_top_base;
+                let card0_h = (56.0 * scale).round() as i32;
+                let card1_top = card0_top + card0_h + card_gap;
+                let card1_h = (134.0 * scale).round() as i32;
+                let card2_top = card1_top + card1_h + card_gap;
+                let card2_h = (134.0 * scale).round() as i32;
+
                 if x >= pad_x && x <= pad_x + card_w {
-                    for i in 0..6 {
-                        let c_top = card_top_base + i * (card_h + card_gap);
-                        if y >= c_top && y <= c_top + card_h {
-                            new_hover = Some(40 + i as usize);
-                            is_pointer = true;
-                            break;
+                    // 卡片 0：总开关
+                    if y >= card0_top && y <= card0_top + card0_h {
+                        new_hover = Some(60);
+                        is_pointer = true;
+                    }
+                    // 卡片 1：快捷键与窗口接管（仅总开关开启时响应悬停高亮）
+                    else if y >= card1_top && y <= card1_top + card1_h {
+                        if config.tab_module.enabled {
+                            let header_h = (46.0 * scale).round() as i32;
+                            let row_h = (44.0 * scale).round() as i32;
+                            let r1_top = card1_top + header_h;
+                            let r2_top = r1_top + row_h;
+                            if y >= r1_top && y <= r1_top + row_h {
+                                new_hover = Some(61);
+                                is_pointer = true;
+                            } else if y >= r2_top && y <= r2_top + row_h {
+                                new_hover = Some(62);
+                                is_pointer = true;
+                            }
+                        }
+                    }
+                    // 卡片 2：智能行为与鼠标手势（仅总开关开启时响应悬停高亮）
+                    else if y >= card2_top && y <= card2_top + card2_h {
+                        if config.tab_module.enabled {
+                            let header_h = (46.0 * scale).round() as i32;
+                            let row_h = (44.0 * scale).round() as i32;
+                            let r1_top = card2_top + header_h;
+                            let r2_top = r1_top + row_h;
+                            if y >= r1_top && y <= r1_top + row_h {
+                                new_hover = Some(63);
+                                is_pointer = true;
+                            } else if y >= r2_top && y <= r2_top + row_h {
+                                new_hover = Some(64);
+                                is_pointer = true;
+                            }
                         }
                     }
                 }
@@ -2725,23 +3077,66 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
         }
         SettingsTab::TabModule => {
             if crate::win32::version::is_tab_module_supported() {
-                let card_h = (56.0 * scale).round() as i32;
+                let card0_top = card_top_base;
+                let card0_h = (56.0 * scale).round() as i32;
+                let card1_top = card0_top + card0_h + card_gap;
+                let card1_h = (134.0 * scale).round() as i32;
+                let card2_top = card1_top + card1_h + card_gap;
+                let card2_h = (134.0 * scale).round() as i32;
+
                 if x >= pad_x && x <= pad_x + card_w {
-                    for i in 0..6 {
-                        let c_top = card_top_base + i * (card_h + card_gap);
-                        if y >= c_top && y <= c_top + card_h {
-                            match i {
-                                0 => config.tab_module.enabled = !config.tab_module.enabled,
-                                1 => config.tab_module.inherit_current_path = !config.tab_module.inherit_current_path,
-                                2 => config.tab_module.wine_to_tab = !config.tab_module.wine_to_tab,
-                                3 => config.tab_module.deduplication = !config.tab_module.deduplication,
-                                4 => config.tab_module.reopen_closed = !config.tab_module.reopen_closed,
-                                5 => config.tab_module.double_click_to_duplicate = !config.tab_module.double_click_to_duplicate,
-                                _ => {}
+                    // 点击 卡片 0：总开关
+                    if y >= card0_top && y <= card0_top + card0_h {
+                        let old_state = config.tab_module.enabled;
+                        config.tab_module.enabled = !old_state;
+                        set_draft_config(config.clone());
+                        need_redraw = true;
+
+                        if let Ok(mut drag) = DRAG_MODE.lock() {
+                            *drag = DragMode::TabMasterToggle {
+                                start_x: x,
+                                initial_state: old_state,
+                                has_moved: false,
+                            };
+                        }
+                        unsafe {
+                            let _ = SetCapture(hwnd);
+                        }
+                    }
+                    // 点击 卡片 1：快捷键与窗口接管（仅总开关开启时响应）
+                    else if y >= card1_top && y <= card1_top + card1_h {
+                        if config.tab_module.enabled {
+                            let header_h = (46.0 * scale).round() as i32;
+                            let row_h = (44.0 * scale).round() as i32;
+                            let r1_top = card1_top + header_h;
+                            let r2_top = r1_top + row_h;
+                            if y >= r1_top && y <= r1_top + row_h {
+                                config.tab_module.wine_to_tab = !config.tab_module.wine_to_tab;
+                                set_draft_config(config.clone());
+                                need_redraw = true;
+                            } else if y >= r2_top && y <= r2_top + row_h {
+                                config.tab_module.reopen_closed = !config.tab_module.reopen_closed;
+                                set_draft_config(config.clone());
+                                need_redraw = true;
                             }
-                            set_draft_config(config.clone());
-                            need_redraw = true;
-                            break;
+                        }
+                    }
+                    // 点击 卡片 2：智能行为与鼠标手势（仅总开关开启时响应）
+                    else if y >= card2_top && y <= card2_top + card2_h {
+                        if config.tab_module.enabled {
+                            let header_h = (46.0 * scale).round() as i32;
+                            let row_h = (44.0 * scale).round() as i32;
+                            let r1_top = card2_top + header_h;
+                            let r2_top = r1_top + row_h;
+                            if y >= r1_top && y <= r1_top + row_h {
+                                config.tab_module.deduplication = !config.tab_module.deduplication;
+                                set_draft_config(config.clone());
+                                need_redraw = true;
+                            } else if y >= r2_top && y <= r2_top + row_h {
+                                config.tab_module.double_click_to_duplicate = !config.tab_module.double_click_to_duplicate;
+                                set_draft_config(config.clone());
+                                need_redraw = true;
+                            }
                         }
                     }
                 }
@@ -3017,5 +3412,23 @@ mod tests {
         assert!(desc_en.contains('\n'), "英文描述应包含分段换行符以保持整洁");
         assert!(desc_en.contains("17763.107"));
         assert!(!desc_en.is_empty());
+    }
+
+    #[test]
+    fn test_tab_module_settings_groups_and_tips_i18n() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        assert_eq!(zh.tab_module.shortcuts_group_title, "快捷键与窗口接管");
+        assert_eq!(zh.tab_module.behaviors_group_title, "智能行为与鼠标手势");
+        assert!(zh.tab_module.tips_title.contains("💡"));
+        assert!(zh.tab_module.tips_line1.contains("鼠标中键"));
+        assert!(zh.tab_module.tips_line2.contains("Ctrl+Tab"));
+
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+        assert_eq!(en.tab_module.shortcuts_group_title, "Shortcuts & Window Integration");
+        assert_eq!(en.tab_module.behaviors_group_title, "Smart Behaviors & Mouse Gestures");
+        assert!(en.tab_module.tips_title.contains("💡"));
+        assert!(en.tab_module.tips_line1.contains("Middle-click"));
+        assert!(en.tab_module.tips_line2.contains("Ctrl+Tab"));
     }
 }

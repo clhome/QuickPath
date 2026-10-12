@@ -125,7 +125,6 @@ fn main() {
         let tab_cfg = tab::TabConfig {
             enabled: config.tab_module.enabled,
             wine_to_tab: config.tab_module.wine_to_tab,
-            inherit_current_path: config.tab_module.inherit_current_path,
             deduplication: config.tab_module.deduplication,
             reopen_closed: config.tab_module.reopen_closed,
             double_click_to_duplicate: config.tab_module.double_click_to_duplicate,
@@ -488,7 +487,6 @@ pub fn update_global_config(new_config: AppConfig) {
                 let tab_cfg = tab::TabConfig {
                     enabled: new_config.tab_module.enabled,
                     wine_to_tab: new_config.tab_module.wine_to_tab,
-                    inherit_current_path: new_config.tab_module.inherit_current_path,
                     deduplication: new_config.tab_module.deduplication,
                     reopen_closed: new_config.tab_module.reopen_closed,
                     double_click_to_duplicate: new_config.tab_module.double_click_to_duplicate,

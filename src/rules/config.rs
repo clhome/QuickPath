@@ -65,8 +65,6 @@ pub struct TabModuleConfig {
     pub enabled: bool,
     /// Win + E 自动转为新建标签页
     pub wine_to_tab: bool,
-    /// 新建标签页打开当前目录（点击加号或按 Ctrl+T 时克隆当前路径）
-    pub inherit_current_path: bool,
     /// 标签页智能去重
     pub deduplication: bool,
     /// 恢复已关闭标签页快捷键 (Ctrl+Shift+T)
@@ -80,7 +78,6 @@ impl Default for TabModuleConfig {
         Self {
             enabled: true,
             wine_to_tab: true,
-            inherit_current_path: true,
             deduplication: true,
             reopen_closed: true,
             double_click_to_duplicate: true,
@@ -461,9 +458,9 @@ mod tests {
         let default_cfg = TabModuleConfig::default();
         assert!(default_cfg.enabled);
         assert!(default_cfg.wine_to_tab);
-        assert!(default_cfg.inherit_current_path);
         assert!(default_cfg.deduplication);
         assert!(default_cfg.reopen_closed);
+        assert!(default_cfg.double_click_to_duplicate);
 
         let app_cfg = AppConfig::default();
         assert_eq!(app_cfg.tab_module, default_cfg);
@@ -472,15 +469,14 @@ mod tests {
         let old_json = r#"{"hotkey": "Ctrl+Q"}"#;
         let parsed: AppConfig = serde_json::from_str(old_json).expect("必须成功解析缺失 tab_module 的旧配置");
         assert!(parsed.tab_module.enabled);
-        assert!(parsed.tab_module.inherit_current_path);
 
-        // 验证多语言语言包包含 tab_module
+        // 验证多语言语言包包含 tab_module 标题与新增分组
         let bundle_zh = crate::rules::I18n::get_bundle(&Language::ZhCN);
         assert!(!bundle_zh.tab_module.card_title.is_empty());
-        assert!(!bundle_zh.tab_module.inherit_current_path.is_empty());
+        assert!(!bundle_zh.tab_module.enable_tab_module.is_empty());
 
         let bundle_en = crate::rules::I18n::get_bundle(&Language::EnUS);
         assert!(!bundle_en.tab_module.card_title.is_empty());
-        assert!(!bundle_en.tab_module.inherit_current_path.is_empty());
+        assert!(!bundle_en.tab_module.enable_tab_module.is_empty());
     }
 }

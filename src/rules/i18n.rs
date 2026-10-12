@@ -287,25 +287,35 @@ pub struct TabModuleSection {
     #[serde(default)]
     pub enable_tab_module_desc: String,
     #[serde(default)]
+    pub shortcuts_group_title: String,
+    #[serde(default)]
+    pub shortcuts_group_desc: String,
+    #[serde(default)]
     pub wine_to_tab: String,
     #[serde(default)]
     pub wine_to_tab_desc: String,
-    #[serde(default)]
-    pub inherit_current_path: String,
-    #[serde(default)]
-    pub inherit_current_path_desc: String,
-    #[serde(default)]
-    pub tab_deduplication: String,
-    #[serde(default)]
-    pub tab_deduplication_desc: String,
     #[serde(default)]
     pub reopen_closed_tab: String,
     #[serde(default)]
     pub reopen_closed_tab_desc: String,
     #[serde(default)]
+    pub behaviors_group_title: String,
+    #[serde(default)]
+    pub behaviors_group_desc: String,
+    #[serde(default)]
+    pub tab_deduplication: String,
+    #[serde(default)]
+    pub tab_deduplication_desc: String,
+    #[serde(default)]
     pub double_click_duplicate: String,
     #[serde(default)]
     pub double_click_duplicate_desc: String,
+    #[serde(default)]
+    pub tips_title: String,
+    #[serde(default)]
+    pub tips_line1: String,
+    #[serde(default)]
+    pub tips_line2: String,
     #[serde(default)]
     pub unsupported_badge: String,
     #[serde(default)]

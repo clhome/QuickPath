@@ -20,7 +20,6 @@ use super::uia::trigger_new_tab;
 pub struct TabConfig {
     pub enabled: bool,
     pub wine_to_tab: bool,
-    pub inherit_current_path: bool,
     pub deduplication: bool,
     pub reopen_closed: bool,
     pub double_click_to_duplicate: bool,
@@ -31,7 +30,6 @@ impl Default for TabConfig {
         Self {
             enabled: true,
             wine_to_tab: true,
-            inherit_current_path: true,
             deduplication: true,
             reopen_closed: true,
             double_click_to_duplicate: true,
@@ -92,22 +90,8 @@ impl TabCoordinator {
         false
     }
 
-    /// 触发“新建标签页”意图（例如用户按下了 Ctrl+T 或点击了“+”新建按钮前）
-    /// 预存当前活动目录，为后续新 Tab 毫秒级重定向铺平道路
-    pub fn prepare_new_tab_inheritance(&self, explorer_hwnd: HWND) {
-        let cfg = self.get_config();
-        if !cfg.enabled || !cfg.inherit_current_path {
-            return;
-        }
-
-        // 获取当前活动 Tab 路径
-        if let Some(curr_path) = self.com_manager.get_active_tab_path(Some(explorer_hwnd)) {
-            if let Ok(mut pending) = self.pending_inherit_path.lock() {
-                *pending = Some((curr_path, Instant::now()));
-            }
-            // 标记旁路去重
-            self.bypass_deduplication.store(true, Ordering::SeqCst);
-        }
+    /// 预存当前活动目录（功能已废止，保留空实现兼容）
+    pub fn prepare_new_tab_inheritance(&self, _explorer_hwnd: HWND) {
     }
 
     /// 用户双击标签页克隆特定标签页到右侧 (Duplicate Tab)
@@ -175,24 +159,7 @@ impl TabCoordinator {
     }
 
     /// 当检测到新 Tab 加载完成，执行重定向并消除闪烁
-    pub fn on_tab_created(&self, explorer_hwnd: HWND) {
-        let cfg = self.get_config();
-        if !cfg.enabled || !cfg.inherit_current_path {
-            return;
-        }
-
-        let pending_opt = self.pending_inherit_path.lock().ok().and_then(|mut p| p.take());
-        if let Some((target_path, created_at)) = pending_opt {
-            // 仅在 3 秒内的有效触发周期响应
-            if created_at.elapsed() < Duration::from_millis(3000) {
-                // 立即重定向到当前目录（仅针对物理磁盘路径）
-                if is_physical_dir_path(&target_path) {
-                    let _ = self.com_manager.navigate_latest(explorer_hwnd, &target_path);
-                }
-            }
-        }
-
-        // 恢复去重校验
+    pub fn on_tab_created(&self, _explorer_hwnd: HWND) {
         self.bypass_deduplication.store(false, Ordering::SeqCst);
     }
 
@@ -227,20 +194,8 @@ impl TabCoordinator {
             let _ = SetForegroundWindow(target_hwnd);
         }
 
-        // 如果开启了新建标签页继承当前目录，则在此处预存路径
-        if cfg.inherit_current_path {
-            self.prepare_new_tab_inheritance(target_hwnd);
-        }
-
         // 触发在目标窗口中新建 Tab
         if trigger_new_tab(target_hwnd) {
-            // 如果继承路径开启，延时微任务做防闪烁定向
-            let this = self.clone_ref();
-            let raw_target = target_hwnd.0 as usize;
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(25));
-                this.on_tab_created(HWND(raw_target as *mut _));
-            });
             return true;
         }
 

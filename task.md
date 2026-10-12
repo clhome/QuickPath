@@ -909,26 +909,35 @@
   - [x] 运行 `cargo test` 确保全量 37 项测试通过
   - [x] 编译 Release 版本，清理测试脚本并交付
 
-## 阶段五十七：借鉴 ExplorerTabUtility 架构重构外部唤起与新窗口合并引擎
+## 阶段五十八：多标签增强设置界面专业重构与废弃选项剔除
 
 > **核心目标**：
-> 1. 彻底解决在 VSCode 等 IDE 中选中文件“在文件资源管理器中显示”依然弹出新窗口的缺陷；
-> 2. 引入 `EVENT_OBJECT_SHOW` 全局钩子与分层窗口透明隐蔽，确保 100% 捕获外部新开窗口且零闪烁；
-> 3. 超时窗口期由 300ms 拓宽至 2000ms，并通过 COM 穿透提取 `LocationURL` 与 `SelectedItems`，告别误触 Fail-Safe；
-> 4. 支持向 `ShellTabWindowClass` 投递 `WM_COMMAND (0xA21B)` 魔法指令极速新建 Tab 并完成定位。
+> 1. 独立的启用开关，独立一块（参考任务栏监控）；
+> 2. 去掉“新建标签页打开当前目录(Inherit Current Path)”废止功能及残留定义；
+> 3. 采用专业软件分组卡片（快捷键与窗口接管 + 智能行为与手势 + 高效操作 Tips 指南）重构排版，支持主从开关联动置灰。
 
-- [x] **57.1 事件捕获与无感隐蔽重构 (`src/tab/hook.rs`, `src/tab/coordinator.rs`)**
-  - [x] 注册 `EVENT_OBJECT_SHOW`（与 `EVENT_OBJECT_CREATE` 互补），确保外部新开 CabinetWClass 100% 捕获
-  - [x] 采用 `WS_EX_LAYERED` Alpha=0 透明度与离屏坐标，杜绝弹窗视觉闪烁同时保持 COM 活跃
-- [x] **57.2 智能异步等待与 ShellView COM 选中项穿透提取 (`src/tab/com.rs`, `src/tab/coordinator.rs`)**
-  - [x] 轮询等待时间拓宽至 2000ms（每 50ms 轮询），彻底解决冷启动初始化耗时导致的误判
-  - [x] 穿透提取新窗口的 `LocationURL` 与 `SelectedItems`，准确获得目标文件夹与待高亮文件
-- [x] **57.3 魔法消息 `0xA21B` 极速新建 Tab 与文件高亮选中 (`src/tab/uia.rs`, `src/tab/select.rs`, `src/tab/coordinator.rs`)**
-  - [x] 优先向 `ShellTabWindowClass` 投递 `WM_COMMAND (0xA21B)` 内部极速指令触发新建 Tab
-  - [x] 既有 Tab 快速激活或新 Tab 导航，异步重放文件列表选中项高亮，确认合并后安全销毁源窗口
-- [x] **57.4 全量单元测试、构建与实机验证交付**
-  - [x] 执行 `cargo test` 验证单元测试
-  - [x] 执行 `cargo build --release` 编译生产包并交付
+- [x] **58.1 清理废止的 `inherit_current_path` 功能与相关字段**
+  - [x] 从 `src/rules/config.rs`（`TabModuleConfig`）、`src/tab/coordinator.rs`（`TabConfig`）、`src/main.rs` 中彻底移除废弃字段与 dead check
+  - [x] 从 `src/rules/i18n.rs`、`locales/zh-CN.toml`、`locales/en-US.toml` 中移除 `inherit_current_path` 键值
+  - [x] 同步更新 `rules::config::tests::test_tab_module_config_defaults` 单元测试
+- [x] **58.2 扩充国际化语言包支持分组面板与 Tips 卡片 (`i18n.rs`, `locales/`)**
+  - [x] `TabModuleSection` 结构体新增分组标题、说明与 Tips 指南对应键值
+  - [x] 补齐 `zh-CN.toml` 与 `en-US.toml` 中分组卡片与操作技巧指南的专业本地化文本
+- [x] **58.3 重构多标签增强设置界面渲染引擎与专业卡片排版 (`src/ui/settings.rs`)**
+  - [x] 实现独立总开关置顶卡片（Card T0），支持点击与 `DragMode::TabMasterToggle` 拖拽
+  - [x] 实现“快捷键与窗口接管”分组卡片（Card T1，含 Win+E 与 Ctrl+Shift+T 行级子项、分割线与微 Hover）
+  - [x] 实现“智能行为与鼠标手势”分组卡片（Card T2，含智能去重与双击克隆行级子项、分割线与微 Hover）
+  - [x] 实现底部“💡 高效操作技巧指南”Tips 卡片（Card T3），打造家族式设计语言
+  - [x] 实现主从开关联动置灰机制（总开关关闭时子卡片及开关优雅置灰且禁用交互）
+- [x] **58.4 统一悬停命中、鼠标点击与拖拽交互引擎 (`src/ui/settings.rs`)**
+  - [x] 扩展 `DragMode` 支持 `TabMasterToggle` 并在 `WM_MOUSEMOVE` 中实现防抖拖拽
+  - [x] 重写 `SettingsTab::TabModule` 的 `handle_settings_mouse_move` 悬停测试
+  - [x] 重写 `SettingsTab::TabModule` 的 `handle_settings_mouse_down` 点击测试与总开关联动
+- [x] **58.5 全量编译检查、单元测试回归与交付验证**
+  - [x] 运行 `cargo check` 确保 0 警告 0 报错
+  - [x] 运行 `cargo test` 确保全量测试 100% 通过（38 项测试全绿）
+  - [x] 运行 `cargo build --release` 验证生产构建稳定性（成功生成体积轻量的可执行文件）
+
 
 
 
