@@ -2,7 +2,6 @@
 
 pub mod com;
 pub mod coordinator;
-pub mod history;
 pub mod hook;
 pub mod mouse;
 pub mod select;
@@ -11,7 +10,6 @@ pub mod uia;
 use std::sync::Arc;
 pub use com::ShellComManager;
 pub use coordinator::{TabConfig, TabCoordinator};
-pub use history::TabHistoryStack;
 pub use hook::TabHookGuard;
 pub use mouse::TabMouseGuard;
 

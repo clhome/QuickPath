@@ -295,10 +295,6 @@ pub struct TabModuleSection {
     #[serde(default)]
     pub wine_to_tab_desc: String,
     #[serde(default)]
-    pub reopen_closed_tab: String,
-    #[serde(default)]
-    pub reopen_closed_tab_desc: String,
-    #[serde(default)]
     pub behaviors_group_title: String,
     #[serde(default)]
     pub behaviors_group_desc: String,

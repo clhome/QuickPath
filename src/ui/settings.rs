@@ -582,19 +582,13 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
 
                     // 卡片 1：快捷键与窗口接管 (Card T1: Shortcuts & Window Integration)
                     let card1_top = card0_top + card0_h + card_gap;
-                    let card1_h = (134.0 * scale).round() as i32;
+                    let card1_h = (90.0 * scale).round() as i32;
                     let shortcuts_items = [
                         (
                             bundle.tab_module.wine_to_tab.as_str(),
                             bundle.tab_module.wine_to_tab_desc.as_str(),
                             config.tab_module.wine_to_tab,
                             61usize,
-                        ),
-                        (
-                            bundle.tab_module.reopen_closed_tab.as_str(),
-                            bundle.tab_module.reopen_closed_tab_desc.as_str(),
-                            config.tab_module.reopen_closed,
-                            62usize,
                         ),
                     ];
                     render_tab_group_card(
@@ -1804,7 +1798,7 @@ unsafe fn render_tab_tips_card(
         let line1 = if !bundle.tab_module.tips_line1.is_empty() {
             bundle.tab_module.tips_line1.as_str()
         } else {
-            "• 鼠标中键单击标签页可快速关闭；在标签栏空白处双击可快速新建标签页"
+            "• 鼠标中键单击标签页可快速关闭"
         };
         let mut l1_buf: Vec<u16> = line1.encode_utf16().collect();
         let mut l1_rect = RECT {
@@ -2632,7 +2626,7 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 let card0_top = card_top_base;
                 let card0_h = (56.0 * scale).round() as i32;
                 let card1_top = card0_top + card0_h + card_gap;
-                let card1_h = (134.0 * scale).round() as i32;
+                let card1_h = (90.0 * scale).round() as i32;
                 let card2_top = card1_top + card1_h + card_gap;
                 let card2_h = (134.0 * scale).round() as i32;
 
@@ -2648,12 +2642,8 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                             let header_h = (46.0 * scale).round() as i32;
                             let row_h = (44.0 * scale).round() as i32;
                             let r1_top = card1_top + header_h;
-                            let r2_top = r1_top + row_h;
                             if y >= r1_top && y <= r1_top + row_h {
                                 new_hover = Some(61);
-                                is_pointer = true;
-                            } else if y >= r2_top && y <= r2_top + row_h {
-                                new_hover = Some(62);
                                 is_pointer = true;
                             }
                         }
@@ -3080,7 +3070,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 let card0_top = card_top_base;
                 let card0_h = (56.0 * scale).round() as i32;
                 let card1_top = card0_top + card0_h + card_gap;
-                let card1_h = (134.0 * scale).round() as i32;
+                let card1_h = (90.0 * scale).round() as i32;
                 let card2_top = card1_top + card1_h + card_gap;
                 let card2_h = (134.0 * scale).round() as i32;
 
@@ -3109,13 +3099,8 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                             let header_h = (46.0 * scale).round() as i32;
                             let row_h = (44.0 * scale).round() as i32;
                             let r1_top = card1_top + header_h;
-                            let r2_top = r1_top + row_h;
                             if y >= r1_top && y <= r1_top + row_h {
                                 config.tab_module.wine_to_tab = !config.tab_module.wine_to_tab;
-                                set_draft_config(config.clone());
-                                need_redraw = true;
-                            } else if y >= r2_top && y <= r2_top + row_h {
-                                config.tab_module.reopen_closed = !config.tab_module.reopen_closed;
                                 set_draft_config(config.clone());
                                 need_redraw = true;
                             }

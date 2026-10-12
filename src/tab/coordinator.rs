@@ -11,7 +11,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::com::{is_physical_dir_path, ShellComManager};
-use super::history::TabHistoryStack;
 use super::select::{async_select_file_item, try_select_tab_item_by_title};
 use super::uia::trigger_new_tab;
 
@@ -21,7 +20,6 @@ pub struct TabConfig {
     pub enabled: bool,
     pub wine_to_tab: bool,
     pub deduplication: bool,
-    pub reopen_closed: bool,
     pub double_click_to_duplicate: bool,
 }
 
@@ -31,7 +29,6 @@ impl Default for TabConfig {
             enabled: true,
             wine_to_tab: true,
             deduplication: true,
-            reopen_closed: true,
             double_click_to_duplicate: true,
         }
     }
@@ -40,7 +37,6 @@ impl Default for TabConfig {
 pub struct TabCoordinator {
     config: Arc<parking_lot_or_std::RwLock<TabConfig>>,
     com_manager: Arc<ShellComManager>,
-    history_stack: TabHistoryStack,
     /// 记录最近一次由于“新建标签页继承当前目录”预存的目录路径及时间戳
     pending_inherit_path: Arc<parking_lot_or_std::Mutex<Option<(String, Instant)>>>,
     /// 是否正处于旁路去重模式（防止新建同路径 Tab 时被去重拦截）
@@ -58,7 +54,6 @@ impl TabCoordinator {
         Self {
             config: Arc::new(parking_lot_or_std::RwLock::new(TabConfig::default())),
             com_manager,
-            history_stack: TabHistoryStack::new(20),
             pending_inherit_path: Arc::new(parking_lot_or_std::Mutex::new(None)),
             bypass_deduplication: Arc::new(AtomicBool::new(false)),
             processing_new_windows: Arc::new(parking_lot_or_std::Mutex::new(std::collections::HashSet::new())),
@@ -133,24 +128,12 @@ impl TabCoordinator {
 
             std::thread::spawn(move || {
                 let h = HWND(raw_hwnd as *mut _);
-
-                // 5. 轮询等待新 Tab 在 COM 中正式挂载注册（最多 20 轮，每轮 25ms，共 500ms）
-                for _ in 0..20 {
-                    std::thread::sleep(Duration::from_millis(25));
-                    if com.get_tabs_count_for_hwnd(h) > initial_count {
-                        break;
-                    }
-                }
-
-                // 6. 稍微平稳等待 60ms 让新 Tab 内部视图框架与文件系统绑定完毕
-                std::thread::sleep(Duration::from_millis(60));
-
                 if is_physical_dir_path(&target_path) {
-                    let _ = com.navigate_latest(h, &target_path);
+                    let _ = com.wait_and_navigate_new_tab(h, initial_count, &target_path);
                 }
 
                 // 维持旁路状态一段时间，杜绝并发去重消除
-                std::thread::sleep(Duration::from_millis(600));
+                std::thread::sleep(Duration::from_millis(400));
                 bypass.store(false, Ordering::SeqCst);
             });
         } else {
@@ -231,47 +214,8 @@ impl TabCoordinator {
         false
     }
 
-    /// 记录 Tab 关闭事件
-    pub fn record_tab_closed(&self, path: String) {
-        let cfg = self.get_config();
-        if cfg.enabled && cfg.reopen_closed {
-            self.history_stack.push(path);
-        }
-    }
-
-    /// 恢复最近关闭的 Tab (Ctrl+Shift+T)
-    pub fn reopen_last_closed_tab(&self) -> bool {
-        let cfg = self.get_config();
-        if !cfg.enabled || !cfg.reopen_closed {
-            return false;
-        }
-
-        if let Some(reopen_path) = self.history_stack.pop() {
-            let tabs = self.com_manager.get_all_tabs();
-            if let Some(host) = tabs.first() {
-                let host_hwnd = host.hwnd();
-                // 在现有窗口新建 Tab 并按需导航
-                if trigger_new_tab(host_hwnd) {
-                    if is_physical_dir_path(&reopen_path) {
-                        let com = self.com_manager.clone();
-                        let raw_host = host_hwnd.0 as usize;
-                        std::thread::spawn(move || {
-                            std::thread::sleep(Duration::from_millis(30));
-                            let _ = com.navigate_latest(HWND(raw_host as *mut _), &reopen_path);
-                        });
-                    }
-                    return true;
-                }
-            } else {
-                // 无存活窗口，调用系统命令打开
-                let _ = std::process::Command::new("explorer.exe")
-                    .arg(&reopen_path)
-                    .spawn();
-                return true;
-            }
-        }
-
-        false
+    pub fn com_manager(&self) -> &Arc<ShellComManager> {
+        &self.com_manager
     }
 
     /// 捕获新产生的外部顶级窗口并合并为 Tab
@@ -490,7 +434,6 @@ impl TabCoordinator {
         Arc::new(Self {
             config: self.config.clone(),
             com_manager: self.com_manager.clone(),
-            history_stack: self.history_stack.clone(),
             pending_inherit_path: self.pending_inherit_path.clone(),
             bypass_deduplication: self.bypass_deduplication.clone(),
             processing_new_windows: self.processing_new_windows.clone(),

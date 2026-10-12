@@ -67,8 +67,6 @@ pub struct TabModuleConfig {
     pub wine_to_tab: bool,
     /// 标签页智能去重
     pub deduplication: bool,
-    /// 恢复已关闭标签页快捷键 (Ctrl+Shift+T)
-    pub reopen_closed: bool,
     /// 双击标签页自动在右侧复制当前路径标签页 (Duplicate Tab)
     pub double_click_to_duplicate: bool,
 }
@@ -79,7 +77,6 @@ impl Default for TabModuleConfig {
             enabled: true,
             wine_to_tab: true,
             deduplication: true,
-            reopen_closed: true,
             double_click_to_duplicate: true,
         }
     }
@@ -459,7 +456,6 @@ mod tests {
         assert!(default_cfg.enabled);
         assert!(default_cfg.wine_to_tab);
         assert!(default_cfg.deduplication);
-        assert!(default_cfg.reopen_closed);
         assert!(default_cfg.double_click_to_duplicate);
 
         let app_cfg = AppConfig::default();

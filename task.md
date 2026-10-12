@@ -938,6 +938,59 @@
   - [x] 运行 `cargo test` 确保全量测试 100% 通过（38 项测试全绿）
   - [x] 运行 `cargo build --release` 验证生产构建稳定性（成功生成体积轻量的可执行文件）
 
+## 阶段五十九：恢复已关闭标签页快捷键 (Ctrl+Shift+T) 完整闭环研发
+
+> **问题根因**：
+> 1. 缺少键盘监听：没有任何机制拦截 `Ctrl + Shift + T` 唤起恢复；
+> 2. 缺少关闭追踪：关闭 Tab 时未捕获物理路径，导致 `history_stack` 永远为空；
+> 3. 恢复逻辑脆弱：原 `reopen_last_closed_tab` 未锁定前台宿主且缺少挂载轮询与 Bypass 保护。
+
+- [x] **59.1 构建全局低级键盘钩子引擎 (`src/tab/keyboard.rs`, `src/tab/mod.rs`)**
+  - [x] 实现 `TabKeyboardGuard` 基于 `WH_KEYBOARD_LL` 监听键盘按键
+  - [x] 拦截 `Ctrl + Shift + T`：当前台为 Explorer 或桌面时唤起 `coordinator.reopen_last_closed_tab()` 并吃掉按键；非 Explorer 应用透明放行
+  - [x] 拦截 `Ctrl + W` / `Ctrl + F4` / `Alt + F4`：当前台为 Explorer 时提取活动 Tab 路径压入历史栈并放行关闭指令
+  - [x] 接入 `TabModule` 的 `start` / `stop` 完整生命周期托管
+- [x] **59.2 实现鼠标关闭标签页探测与历史压栈 (`src/tab/mouse.rs`)**
+  - [x] 扩展 `find_tab_item_at_point` 支持关闭按钮命中判断与中键探测
+  - [x] 监听 `WM_MBUTTONDOWN`：中键点击 TabItem 时提取对应路径并压入历史栈
+  - [x] 监听 `WM_LBUTTONDOWN`：点击 TabItem 右侧关闭按钮或窗口右上角关闭按钮时提取对应路径并压入历史栈
+- [x] **59.3 重构恢复调度引擎与前台挂载导航 (`src/tab/coordinator.rs`)**
+  - [x] 优先锁定当前前台 Explorer 宿主窗口，保证新 Tab 在用户当前视区打开
+  - [x] 激活 Bypass 去重保护，防止恢复路径被智能去重机制消除
+  - [x] 引入 `initial_count` 挂载就绪轮询与防闪烁精准物理路径导航
+  - [x] 无存活 Explorer 窗口时平滑降级调用系统 `explorer.exe <path>` 恢复
+- [x] **59.4 全量编译检查、单元测试与交付验证**
+  - [x] 编写键盘状态判断与恢复栈调度测试（39 项单元测试全绿）
+  - [x] 运行 `cargo test` 确保全量测试 100% 通过
+  - [x] 运行 `cargo build --release` 验证生产构建并热更新运行
+
+## 阶段六十：彻底删除“恢复已关闭标签页 (Ctrl+Shift+T)”功能与架构极致精简
+
+> **背景与决策**：
+> 经深入可行性验证，Windows 11 原生 XAML 标签页缺乏关闭通知且 COM 状态异步竞态，外部模拟极其脆弱且存在全局鼠标键盘卡顿风险。恪守 KISS 原则与事实优先原则，坚决彻底删除该功能，卸载键盘钩子，精简 UI 布局。
+
+- [x] **60.1 配置模型与协调器裁剪 (`src/rules/config.rs`, `src/tab/coordinator.rs`, `src/tab/mod.rs`)**
+  - [x] 从 `TabModuleConfig` 移除 `reopen_closed` 字段，保持旧配置反序列化兼容
+  - [x] 从 `TabConfig` 移除 `reopen_closed` 字段与 `history_stack` 历史栈
+  - [x] 清理 `reopen_last_closed_tab`、`record_tab_closed` 等接口与单测
+- [x] **60.2 彻底卸载低级键盘钩子引擎 (`src/tab/keyboard.rs`, `src/tab/mod.rs`)**
+  - [x] 删除 `src/tab/keyboard.rs` 文件
+  - [x] 从 `TabModule` 中彻底移除 `TabKeyboardGuard` 及其全部生命周期托管
+- [x] **60.3 简化低级鼠标钩子引擎 (`src/tab/mouse.rs`)**
+  - [x] 移除对中键关闭、X 按钮关闭及右上角关闭的 UIA 探测逻辑
+  - [x] 恢复为只专注于“双击标签页克隆 (Double-Click Duplicate)”的极简高效实现
+- [x] **60.4 国际化与设置中心 UI 布局自适应重构 (`locales/`, `src/rules/i18n.rs`, `src/ui/settings.rs`)**
+  - [x] 移除中英文语言包中的对应键值
+  - [x] 重构 Card T1（“快捷键与窗口接管”）为优雅的单项卡片，移除多余分割线并自适应调整高度
+  - [x] 自适应上移 Card T2 与 Tips 卡片坐标，确保专业美观的视觉呈现
+  - [x] 清理悬停、点击与拖拽状态处理中的废弃逻辑
+- [x] **60.5 清理临时文件、全量单元测试与交付验证**
+  - [x] 清理 `test/test_tab_reopen.rs`
+  - [x] 运行 `cargo test` 确保全量单元测试 100% 通过（37 项测试全绿）
+  - [x] 运行 `cargo build --release` 编译验证并交付成果
+
+
+
 
 
 

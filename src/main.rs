@@ -126,7 +126,6 @@ fn main() {
             enabled: config.tab_module.enabled,
             wine_to_tab: config.tab_module.wine_to_tab,
             deduplication: config.tab_module.deduplication,
-            reopen_closed: config.tab_module.reopen_closed,
             double_click_to_duplicate: config.tab_module.double_click_to_duplicate,
         };
         tab_module.update_config(tab_cfg);
@@ -488,7 +487,6 @@ pub fn update_global_config(new_config: AppConfig) {
                     enabled: new_config.tab_module.enabled,
                     wine_to_tab: new_config.tab_module.wine_to_tab,
                     deduplication: new_config.tab_module.deduplication,
-                    reopen_closed: new_config.tab_module.reopen_closed,
                     double_click_to_duplicate: new_config.tab_module.double_click_to_duplicate,
                 };
                 tab_mod.update_config(tab_cfg);
