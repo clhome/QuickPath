@@ -3,18 +3,10 @@
 use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-    SetClipboardData,
-};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
-use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, SendMessageW, WM_COMMAND,
-};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, SendMessageW, WM_COMMAND};
 
 const CM_COPY_SRC_PATH_TO_CLIP: usize = 2029;
 const CM_COPY_TRG_PATH_TO_CLIP: usize = 2030;
-const CF_UNICODETEXT: u32 = 13;
 
 #[derive(Debug, Clone)]
 pub struct TotalCmdFolder {
@@ -33,10 +25,19 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
 
     unsafe {
         let mut hwnd = FindWindowExW(None, None, class_pcwstr, PCWSTR::null()).unwrap_or_default();
-        while !hwnd.0.is_null() {
-            // 备份用户当前的剪贴板内容
-            let backup_clip = get_clipboard_text();
+        if hwnd.0.is_null() {
+            return results;
+        }
 
+        // P0 安全守卫：在枚举前完整快照剪贴板（含文件列表 CF_HDROP、截图位图等）
+        // 若剪贴板被占用或关键格式无法保真备份，宁可放弃扫描，绝不破坏用户剪贴板！
+        let snapshot = match crate::win32::clipboard::ClipboardSnapshot::capture() {
+            Ok(s) => s,
+            Err(_) => return results,
+        };
+        let mut guard = crate::win32::clipboard::ClipboardRestoreGuard::new(snapshot);
+
+        while !hwnd.0.is_null() {
             // 1. 获取源/当前活动面板路径
             let _ = SendMessageW(
                 hwnd,
@@ -44,7 +45,7 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
                 Some(WPARAM(CM_COPY_SRC_PATH_TO_CLIP)),
                 Some(LPARAM(0)),
             );
-            if let Some(src_path) = get_clipboard_text() {
+            if let Some(src_path) = crate::win32::clipboard::get_clipboard_text() {
                 let clean_path = src_path.trim().trim_end_matches('\\').to_string();
                 if !clean_path.is_empty() && Path::new(&clean_path).is_dir() {
                     results.push(TotalCmdFolder {
@@ -63,7 +64,7 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
                 Some(WPARAM(CM_COPY_TRG_PATH_TO_CLIP)),
                 Some(LPARAM(0)),
             );
-            if let Some(trg_path) = get_clipboard_text() {
+            if let Some(trg_path) = crate::win32::clipboard::get_clipboard_text() {
                 let clean_path = trg_path.trim().trim_end_matches('\\').to_string();
                 if !clean_path.is_empty() && Path::new(&clean_path).is_dir() {
                     results.push(TotalCmdFolder {
@@ -75,78 +76,12 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
                 }
             }
 
-            // 还原用户的剪贴板
-            if let Some(ref text) = backup_clip {
-                set_clipboard_text(text);
-            } else {
-                let _ = OpenClipboard(None);
-                let _ = EmptyClipboard();
-                let _ = CloseClipboard();
-            }
-
             hwnd = FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
         }
+
+        // 扫描完成，立即恢复用户原始剪贴板
+        guard.restore_now();
     }
 
     results
-}
-
-fn get_clipboard_text() -> Option<String> {
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return None;
-        }
-
-        if IsClipboardFormatAvailable(CF_UNICODETEXT).is_err() {
-            let _ = CloseClipboard();
-            return None;
-        }
-
-        let handle = GetClipboardData(CF_UNICODETEXT);
-        if handle.is_err() {
-            let _ = CloseClipboard();
-            return None;
-        }
-
-        let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(handle.unwrap().0 as _));
-        if ptr.is_null() {
-            let _ = CloseClipboard();
-            return None;
-        }
-
-        let wide_slice = std::slice::from_raw_parts(ptr as *const u16, 4096);
-        let len = wide_slice.iter().position(|&c| c == 0).unwrap_or(0);
-        let result = String::from_utf16_lossy(&wide_slice[..len]);
-
-        let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(ptr as _));
-        let _ = CloseClipboard();
-
-        Some(result)
-    }
-}
-
-fn set_clipboard_text(text: &str) {
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return;
-        }
-        let _ = EmptyClipboard();
-
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-        let bytes_len = wide.len() * 2;
-
-        if let Ok(hglobal) = GlobalAlloc(GHND, bytes_len) {
-            let ptr = GlobalLock(hglobal);
-            if !ptr.is_null() {
-                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes_len);
-                let _ = GlobalUnlock(hglobal);
-                let _ = SetClipboardData(
-                    CF_UNICODETEXT,
-                    Some(windows::Win32::Foundation::HANDLE(hglobal.0 as _)),
-                );
-            }
-        }
-
-        let _ = CloseClipboard();
-    }
 }

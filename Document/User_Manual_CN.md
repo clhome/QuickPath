@@ -88,7 +88,7 @@ QuickPath 为完全绿色的免安装单文件应用程序：
 
 ### 3.2 配置文件存储策略（双模式）
 - **便携模式 (Portable Mode)**：若程序同级目录下存在 `quickpath.json`，QuickPath 将自动切换为绿色便携存储，所有修改与状态均保存在本地目录中；
-- **标准安装模式 (Standard Mode)**：若同级目录未发现该文件，配置将默认保存在系统当前用户的 `%APPDATA%\QuickPath\config.json` 中。
+- **标准安装模式 (Standard Mode)**：若同级目录未发现该文件，配置将默认保存在系统当前用户的 `%APPDATA%\QuickPath\config.json` 中，程序在保存时采用原子写入并自动维护 `config.json.bak` 备份，出现损坏时自动隔离并恢复。
 
 ### 3.3 开机静默自启（免 UAC 弹窗）
 - QuickPath 内置通过 **Windows 任务计划程序 (Task Scheduler)** 注册开机启动项；
@@ -136,7 +136,7 @@ QuickPath 为完全绿色的免安装单文件应用程序：
 
 | 文件管理器 | 适配原理与特性说明 |
 | :--- | :--- |
-| **Windows 11 资源管理器** | 原生适配 **多标签页 (Tabs)**。突破传统 COM 无法识别活动 Tab 的限制，精准感知当前处于前台高亮的标签页目录 |
+| **Windows 11 资源管理器** | 原生适配 **活动标签页 (Active Tab)**。精准捕获前台窗口当前处于激活状态的高亮标签页目录（后台未激活标签页不参与枚举） |
 | **Windows 10 资源管理器** | 深度支持标准 `CabinetWClass` 单窗口极速枚举 |
 | **Directory Opus (DOpus)** | 通过 `dopusrt` 命令行桥接，毫秒级提取活动 Lister 与窗格真实路径 |
 | **Total Commander (TC)** | 左右窗格自适应感知，通过标准消息管道提取路径，并在操作完毕后无损还原用户剪贴板 |

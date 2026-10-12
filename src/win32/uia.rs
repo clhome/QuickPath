@@ -8,10 +8,6 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
-use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
-};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationValuePattern,
     TreeScope_Descendants, UIA_ValuePatternId,
@@ -33,67 +29,6 @@ struct ScoredCandidate {
     auto_id: String,
     val: String,
     rect: RECT,
-}
-
-/// 安全读取系统剪贴板文本
-fn get_clipboard_text() -> Option<String> {
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return None;
-        }
-        let h_data = GetClipboardData(13); // CF_UNICODETEXT = 13
-        let res = if let Ok(h) = h_data {
-            if !h.0.is_null() {
-                let ptr = GlobalLock(windows::Win32::Foundation::HGLOBAL(h.0));
-                if !ptr.is_null() {
-                    let u16_ptr = ptr as *const u16;
-                    let mut len = 0;
-                    while *u16_ptr.add(len) != 0 {
-                        len += 1;
-                    }
-                    let slice = std::slice::from_raw_parts(u16_ptr, len);
-                    let text = String::from_utf16_lossy(slice);
-                    let _ = GlobalUnlock(windows::Win32::Foundation::HGLOBAL(h.0));
-                    Some(text)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        let _ = CloseClipboard();
-        res
-    }
-}
-
-/// 安全向系统剪贴板设置文本
-fn set_clipboard_text(text: &str) -> bool {
-    unsafe {
-        for _ in 0..5 {
-            if OpenClipboard(None).is_ok() {
-                let _ = EmptyClipboard();
-                let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-                let bytes = wide.len() * 2;
-                if let Ok(h) = GlobalAlloc(GHND, bytes) {
-                    if !h.0.is_null() {
-                        let ptr = GlobalLock(h);
-                        if !ptr.is_null() {
-                            std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
-                            let _ = GlobalUnlock(h);
-                            let _ = SetClipboardData(13, Some(windows::Win32::Foundation::HANDLE(h.0)));
-                        }
-                    }
-                }
-                let _ = CloseClipboard();
-                return true;
-            }
-            thread::sleep(Duration::from_millis(15));
-        }
-        false
-    }
 }
 
 /// 模拟快捷键 Ctrl + A 全选
@@ -322,7 +257,7 @@ pub fn inject_path_to_wps_dialog(dialog_hwnd: HWND, target_path: &str) -> bool {
                 old_text, should_restore_name
             ));
 
-            // 4. 双重确保聚焦：UIA 聚焦 + 鼠标微点中心点并光速复原光标
+            // 4. 双重确保聚焦：UIA 聚焦 + 鼠标微点中心点并瞬间复原光标
             let _ = elem.SetFocus();
             if elem_rect.right > elem_rect.left && elem_rect.bottom > elem_rect.top {
                 let mut orig_pt = POINT::default();
@@ -334,43 +269,33 @@ pub fn inject_path_to_wps_dialog(dialog_hwnd: HWND, target_path: &str) -> bool {
                 mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                 thread::sleep(Duration::from_millis(20));
                 mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                // 瞬间将鼠标恢复至原位，用户毫无察觉
                 let _ = SetCursorPos(orig_pt.x, orig_pt.y);
             }
             thread::sleep(Duration::from_millis(40));
 
-            // 5. 备份用户原有剪贴板
-            let backup_clip = get_clipboard_text();
-
-            // 6. 将目标文件夹路径写入剪贴板，并通过物理快捷键 Ctrl+A -> Ctrl+V 注入（彻底突破 Qt UIA SetValue 限制！）
-            if set_clipboard_text(&target_folder) {
-                log_debug("UIA_INJECT: Path set to clipboard, simulating Ctrl+A and Ctrl+V");
+            // 5. 将目标文件夹路径安全注入（通过 with_temporary_clipboard_text 严密保护用户原剪贴板）
+            let inject_res = crate::win32::clipboard::with_temporary_clipboard_text(&target_folder, || {
+                log_debug("UIA_INJECT: Path set to clipboard safely, simulating Ctrl+A and Ctrl+V");
                 simulate_ctrl_a();
                 thread::sleep(Duration::from_millis(30));
                 simulate_ctrl_v();
                 thread::sleep(Duration::from_millis(50));
-            } else {
-                // 剪贴板失败兜底：调用 UIA SetValue
+            });
+
+            if let Err(e) = inject_res {
+                log_debug(&format!(
+                    "UIA_INJECT: 剪贴板安全守卫拒绝或放弃写入: {:?}, 降级使用 UIA SetValue",
+                    e
+                ));
                 let bstr_folder = BSTR::from(target_folder.as_str());
                 let _ = val_pattern.SetValue(&bstr_folder);
             }
 
-            // 7. 立即还原用户的原有剪贴板，保护用户数据隐私与一致性
-            if let Some(ref old_clip) = backup_clip {
-                set_clipboard_text(old_clip);
-            } else {
-                // 若用户剪贴板原本为空，清空剪贴板
-                if OpenClipboard(None).is_ok() {
-                    let _ = EmptyClipboard();
-                    let _ = CloseClipboard();
-                }
-            }
-
-            // 8. 触发回车，促使 WPS 另存为窗口导航至目标目录
+            // 6. 触发回车，促使 WPS 另存为窗口导航至目标目录
             log_debug("UIA_INJECT: Simulating Enter key press for directory navigation");
             simulate_enter();
 
-            // 9. 优雅恢复原文件名（给予充足时间让 WPS Qt 视图载入新目录并刷新）
+            // 7. 优雅恢复原文件名（给予充足时间让 WPS Qt 视图载入新目录并刷新）
             if should_restore_name {
                 let saved_name = old_text.clone();
                 let hwnd_raw_sub = hwnd.0 as usize;
@@ -386,7 +311,18 @@ pub fn inject_path_to_wps_dialog(dialog_hwnd: HWND, target_path: &str) -> bool {
                             let cur_val = new_pattern.CurrentValue().map(|b| b.to_string()).unwrap_or_default();
                             log_debug(&format!("UIA_RESTORE_CHECK: cur_val='{}', saved_name='{}'", cur_val, saved_name));
 
-                            // 通过物理粘贴恢复原文件名并选中
+                            // 智能输入防覆盖保护 (P2 8.2)：若用户在等待窗口期内已经输入了新文件名，严禁覆盖！
+                            if !cur_val.is_empty()
+                                && cur_val != saved_name
+                                && !cur_val.ends_with('\\')
+                                && !cur_val.ends_with('/')
+                            {
+                                log_debug("UIA_RESTORE_SKIP: 检测到用户已手动键入新文件名，放弃自动恢复以保护输入");
+                                CoUninitialize();
+                                return;
+                            }
+
+                            // 聚焦编辑框
                             let _ = new_elem.SetFocus();
                             if new_rect.right > new_rect.left && new_rect.bottom > new_rect.top {
                                 let mut orig_pt = POINT::default();
@@ -399,18 +335,15 @@ pub fn inject_path_to_wps_dialog(dialog_hwnd: HWND, target_path: &str) -> bool {
                                 let _ = SetCursorPos(orig_pt.x, orig_pt.y);
                             }
 
-                            let sub_clip = get_clipboard_text();
-                            if set_clipboard_text(&saved_name) {
+                            // 安全恢复原文件名，保护原剪贴板无损
+                            let _ = crate::win32::clipboard::with_temporary_clipboard_text(&saved_name, || {
                                 simulate_ctrl_a();
                                 thread::sleep(Duration::from_millis(20));
                                 simulate_ctrl_v();
                                 thread::sleep(Duration::from_millis(20));
                                 simulate_ctrl_a(); // 再次全选原文件名，方便用户直接改名
-                            }
-                            if let Some(old) = sub_clip {
-                                set_clipboard_text(&old);
-                            }
-                            log_debug(&format!("UIA_RESTORE_DONE: Restored filename to '{}'", saved_name));
+                            });
+                            log_debug(&format!("UIA_RESTORE_DONE: Restored filename to '{}' safely", saved_name));
                         }
                     }
                     CoUninitialize();
@@ -423,3 +356,4 @@ pub fn inject_path_to_wps_dialog(dialog_hwnd: HWND, target_path: &str) -> bool {
 
     true
 }
+

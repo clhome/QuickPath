@@ -1,4 +1,5 @@
 pub mod autostart;
+pub mod clipboard;
 pub mod dpi;
 pub mod events;
 pub mod hotkey;

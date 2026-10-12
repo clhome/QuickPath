@@ -684,6 +684,35 @@
   - [x] 运行 `cargo test` 确保全量测试通过
   - [x] 编译 Release 并重启常驻进程验证
 
+## 阶段四十六：v1.1.3 核心缺陷修复与可靠性止血改造（P0 / P1 / P3）
+- [x] **46.1 P0：系统剪贴板安全防护与 RAII 还原卫士 (`clipboard.rs` / `uia.rs` / `xyplorer.rs` / `totalcmd.rs`)**
+  - [x] 实现 `src/win32/clipboard.rs`，支持 `EnumClipboardFormats` 全格式遍历与 `GlobalLock` 内存深拷贝备份
+  - [x] 占用冲突指数退避重试（最多 3 次），备份失败或存在超限/非保真数据时坚决放弃物理注入
+  - [x] 基于 RAII `Drop` 特征无遗漏自动还原所有格式，彻底移除粗暴的 `EmptyClipboard` 清空操作
+  - [x] 重构 `uia.rs`、`xyplorer.rs` 与 `totalcmd.rs` 全面接入剪贴板安全卫士
+- [x] **46.2 P1：配置模型容灾韧性与原子文件落盘 (`config.rs`)**
+  - [x] `AppConfig` 及内嵌模型全面配置 `#[serde(default)]`，添加 `schema_version`
+  - [x] 重构 `save()` 采用临时文件写入 + `sync_all` + 原子替换，并维护 `.bak` 备份
+  - [x] 重构 `load()` 优先从 `.bak` 容灾回退；仍失败则将损坏文件隔离重命名为 `.bad.<timestamp>`，绝不静默覆盖
+- [x] **46.3 P1：启动自愈去强制化与用户设置绝对尊重 (`config.rs`)**
+  - [x] 移除每次启动无差别重置 `floating_bar_auto_show = true` 的强制逻辑
+  - [x] 移除每次启动无差别删除黑名单浏览器的 `retain` 逻辑
+  - [x] 引入 `applied_migrations` 标记机制，仅执行受控的单次迁移
+- [x] **46.4 P1：开机自启引号转义与写后回读一致性核对 (`autostart.rs`)**
+  - [x] 对可执行文件路径统一使用双引号转义包裹，解决空格目录下自启失效问题
+  - [x] 增加写后注册表键值原样回读校验，真实反映自启开启状态与失败原因
+- [x] **46.5 P3：文档一致性清账、规范路径与开源许可证统一**
+  - [x] 统一开源协议：将根目录 `LICENSE` 替换为标准 GPL-3.0 官方文本
+  - [x] 规范配置文件路径：规范化 `ProjectDirs` 并更新文档保持路径一致
+  - [x] 修正 Win11 标签页文案，客观表述活动标签页支持现状
+- [x] **46.6 阶段单元测试验证、代码审计与发布构建校验**
+  - [x] 增加剪贴板备份恢复与配置损坏容灾的单元测试覆盖
+  - [x] 运行 `cargo test` 确保全量测试 100% 通过（22 个用例全绿）
+  - [x] 运行 `cargo check` 确保无编译警告与错误
+  - [x] 运行 `cargo build --release` 完成优化生产构建验证
+
+
+
 
 
 

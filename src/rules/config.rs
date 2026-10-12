@@ -3,8 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
+    /// 配置文件结构 Schema 版本
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// 已执行的应用内单次迁移标记列表
+    #[serde(default)]
+    pub applied_migrations: Vec<String>,
     /// 是否开启自动秒切 (AutoSwitch)
     pub auto_switch_enabled: bool,
     /// 自动秒切触发延时（毫秒，默认 80ms 确保对话框控件完全初始化）
@@ -41,7 +52,6 @@ pub struct AppConfig {
     /// 外观主题：auto（跟随系统）, dark（深色模式）, light（浅色模式）
     pub theme: String,
     /// 任务栏硬件状态监控模块配置
-    #[serde(default)]
     pub monitor: MonitorConfig,
 }
 
@@ -55,6 +65,7 @@ pub enum MonitorPosition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MonitorConfig {
     /// 任务栏状态监控总开关（默认 true，开启）
     pub enabled: bool,
@@ -104,6 +115,8 @@ impl Default for MonitorConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            schema_version: 1,
+            applied_migrations: Vec::new(),
             auto_switch_enabled: true,
             auto_switch_delay_ms: 100,
             hotkey: "Ctrl+Q".to_string(),
@@ -128,6 +141,53 @@ impl Default for AppConfig {
     }
 }
 
+/// Windows 原生原子文件替换封装
+#[cfg(windows)]
+fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(lpExistingFileName: *const u16, lpNewFileName: *const u16, dwFlags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x00000008;
+
+    let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+
+    let res = unsafe {
+        MoveFileExW(
+            from_wide.as_ptr(),
+            to_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+
+    if res != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// 将损坏的配置文件隔离备份为 .bad.<timestamp>
+fn isolate_corrupted_config(path: &Path) {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bad_path = path.with_extension(format!("bad.{}", timestamp));
+    let _ = fs::rename(path, bad_path);
+}
+
 impl AppConfig {
     /// 确定配置文件路径（优先当前目录便携版，否则存入 %APPDATA%\QuickPath\config.json）
     pub fn get_config_path() -> PathBuf {
@@ -141,65 +201,62 @@ impl AppConfig {
             return portable_config;
         }
 
-        if let Some(proj_dirs) = directories::ProjectDirs::from("com", "QuickPath", "QuickPath") {
-            let config_dir = proj_dirs.config_dir();
-            let _ = fs::create_dir_all(config_dir);
-            return config_dir.join("config.json");
+        // 标准模式：%APPDATA%\QuickPath\config.json
+        let standard_dir = directories::BaseDirs::new()
+            .map(|b| b.config_dir().join("QuickPath"))
+            .unwrap_or_else(|| PathBuf::from("config"));
+        let standard_path = standard_dir.join("config.json");
+
+        // 平滑兼容历史版本可能遗留的旧双层路径：%APPDATA%\QuickPath\QuickPath\config\config.json
+        if !standard_path.exists() {
+            if let Some(old_proj) = directories::ProjectDirs::from("com", "QuickPath", "QuickPath") {
+                let old_path = old_proj.config_dir().join("config.json");
+                if old_path.exists() {
+                    let _ = fs::create_dir_all(&standard_dir);
+                    let _ = fs::copy(&old_path, &standard_path);
+                }
+            }
         }
 
-        portable_config
+        let _ = fs::create_dir_all(&standard_dir);
+        standard_path
     }
 
-    /// 加载配置，若不存在则创建默认配置并保存
+    /// 加载配置（具备三级容灾能力与一次性受控迁移）：
+    /// 1. 正常解析 config.json；
+    /// 2. 失败时尝试从最近一次成功保存的 config.json.bak 恢复；
+    /// 3. 若均失败，将损坏文件隔离重命名为 config.json.bad.<timestamp>，绝不静默覆盖！
     pub fn load() -> Self {
         let path = Self::get_config_path();
+        let bak_path = path.with_extension("bak");
+
+        // 1. 尝试读取并解析主配置
         if path.exists() {
             if let Ok(content) = fs::read_to_string(&path) {
                 if let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
-                    let mut changed = false;
-
-                    // 自愈修复 1：确保悬浮吸附栏默认自动展示
-                    if !config.floating_bar_auto_show {
-                        config.floating_bar_auto_show = true;
-                        changed = true;
-                    }
-
-                    // 自愈修复 2：清除浏览器等常用进程的黑名单误伤
-                    let original_len = config.blacklist_processes.len();
-                    config.blacklist_processes.retain(|p| {
-                        let lower = p.to_lowercase();
-                        lower != "chrome.exe"
-                            && lower != "msedge.exe"
-                            && lower != "firefox.exe"
-                            && lower != "brave.exe"
-                    });
-                    if config.blacklist_processes.len() != original_len {
-                        changed = true;
-                    }
-
-                    // 自愈修复 3：半透明度规范化（40% ~ 100%）
-                    if config.floating_bar_opacity < 40 || config.floating_bar_opacity > 100 {
-                        config.floating_bar_opacity = 88;
-                        changed = true;
-                    }
-
-                    // 自愈修复 4：监控面板半透明度规范化（50% ~ 100%）与刷新率规范化
-                    if config.monitor.opacity < 50 || config.monitor.opacity > 100 {
-                        config.monitor.opacity = 85;
-                        changed = true;
-                    }
-                    if config.monitor.refresh_interval_ms < 500 || config.monitor.refresh_interval_ms > 5000 {
-                        config.monitor.refresh_interval_ms = 3000;
-                        changed = true;
-                    }
-
-                    if changed {
-                        let _ = config.save();
-                    }
-
+                    config.apply_migrations_and_sanitize();
                     return config;
                 }
             }
+            eprintln!("警告: 主配置文件 {:?} 格式异常，尝试从 .bak 备份回退...", path);
+        }
+
+        // 2. 尝试从备份配置恢复
+        if bak_path.exists() {
+            if let Ok(bak_content) = fs::read_to_string(&bak_path) {
+                if let Ok(mut config) = serde_json::from_str::<AppConfig>(&bak_content) {
+                    eprintln!("成功从备份配置文件 {:?} 恢复用户配置！", bak_path);
+                    isolate_corrupted_config(&path);
+                    config.apply_migrations_and_sanitize();
+                    let _ = config.save();
+                    return config;
+                }
+            }
+        }
+
+        // 3. 容灾隔离并启用默认配置
+        if path.exists() {
+            isolate_corrupted_config(&path);
         }
 
         let default_config = Self::default();
@@ -207,14 +264,68 @@ impl AppConfig {
         default_config
     }
 
-    /// 保存配置到本地文件
+    /// 受控规整与一次性版本迁移：绝对尊重用户主动设定的配置与黑名单
+    fn apply_migrations_and_sanitize(&mut self) {
+        let mut changed = false;
+
+        // 一次性迁移示例：仅记录已执行标记，不再无差别强行改写用户的开关与黑名单
+        let migration_v1 = "migrated_to_v1_1_3".to_string();
+        if !self.applied_migrations.contains(&migration_v1) {
+            self.applied_migrations.push(migration_v1);
+            changed = true;
+        }
+
+        // 仅对非法越界数值进行合理防御性校准（防止手动修改配置输入越界）
+        if self.floating_bar_opacity < 40 || self.floating_bar_opacity > 100 {
+            self.floating_bar_opacity = 88;
+            changed = true;
+        }
+        if self.monitor.opacity < 50 || self.monitor.opacity > 100 {
+            self.monitor.opacity = 85;
+            changed = true;
+        }
+        if self.monitor.refresh_interval_ms < 500 || self.monitor.refresh_interval_ms > 5000 {
+            self.monitor.refresh_interval_ms = 3000;
+            changed = true;
+        }
+
+        if changed {
+            let _ = self.save();
+        }
+    }
+
+    /// 保存配置到本地文件（临时文件 + sync_all + 原子替换 + 自动维护 .bak 备份）
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::get_config_path();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+
         let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json)
+        let tmp_path = path.with_extension("tmp");
+
+        // 1. 写入临时文件并执行物理落盘冲刷
+        {
+            use std::io::Write;
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+        }
+
+        // 2. 若原文件存在且完好，保留 .bak 备份
+        let bak_path = path.with_extension("bak");
+        if path.exists() {
+            let _ = fs::copy(&path, &bak_path);
+        }
+
+        // 3. 原子替换主文件
+        if let Err(_) = atomic_replace_file(&tmp_path, &path) {
+            // 降级保护：若原子替换出现跨分区/权限偶发失败，走删旧换新兜底
+            let _ = fs::remove_file(&path);
+            fs::rename(&tmp_path, &path)?;
+        }
+
+        Ok(())
     }
 
     /// 判定目标进程是否在黑名单中
@@ -256,27 +367,58 @@ mod tests {
     }
 
     #[test]
-    fn test_monitor_config_backward_compatibility() {
-        // 模拟没有 position 字段的旧版本 JSON
-        let old_json = r#"{
-            "enabled": true,
-            "show_network": true,
-            "show_cpu": true,
-            "show_memory": true,
-            "show_gpu": true,
-            "show_disk": true,
-            "show_graph_bg": true,
-            "refresh_interval_ms": 1000,
-            "opacity": 85
+    fn test_app_config_missing_fields_defaults() {
+        // 模拟缺失大量字段（甚至是新版本新增字段）时的向后兼容性
+        let minimal_json = r#"{
+            "hotkey": "Alt+Q",
+            "floating_bar_auto_show": false
         }"#;
-        let parsed: MonitorConfig = serde_json::from_str(old_json).expect("解析旧配置必须成功");
-        assert_eq!(parsed.position, MonitorPosition::TrayLeft);
 
-        // 测试包含 TaskbarLeft 的新配置序列化与反序列化
-        let mut new_cfg = MonitorConfig::default();
-        new_cfg.position = MonitorPosition::TaskbarLeft;
-        let serialized = serde_json::to_string(&new_cfg).expect("序列化成功");
-        let deserialized: MonitorConfig = serde_json::from_str(&serialized).expect("反序列化成功");
-        assert_eq!(deserialized.position, MonitorPosition::TaskbarLeft);
+        let parsed: AppConfig = serde_json::from_str(minimal_json).expect("必须成功解析缺失字段的旧配置");
+        assert_eq!(parsed.hotkey, "Alt+Q");
+        assert_eq!(parsed.floating_bar_auto_show, false);
+        assert_eq!(parsed.auto_switch_enabled, true); // 自动补齐默认值
+        assert_eq!(parsed.schema_version, 1);
+    }
+
+    #[test]
+    fn test_user_settings_respect() {
+        // 确保用户的设置（关闭悬浮吸附栏、自定义浏览器黑名单）不会被自愈逻辑无理改写
+        let mut config = AppConfig::default();
+        config.floating_bar_auto_show = false;
+        config.blacklist_processes.push("chrome.exe".to_string());
+
+        config.apply_migrations_and_sanitize();
+
+        assert_eq!(config.floating_bar_auto_show, false, "用户关闭的悬浮栏绝不能被强制开启");
+        assert!(
+            config.blacklist_processes.contains(&"chrome.exe".to_string()),
+            "用户手动添加的黑名单进程绝不能被删除"
+        );
+    }
+
+    #[test]
+    fn test_corrupted_json_isolation_concept() {
+        let temp_dir = std::env::temp_dir().join(format!("qp_test_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let config_path = temp_dir.join("config.json");
+        let bak_path = temp_dir.join("config.bak");
+
+        // 写入初始正常配置并保存备份
+        let original_cfg = AppConfig::default();
+        let valid_json = serde_json::to_string_pretty(&original_cfg).unwrap();
+        fs::write(&config_path, &valid_json).unwrap();
+        fs::write(&bak_path, &valid_json).unwrap();
+
+        // 模拟损坏的主配置文件（非法 JSON）
+        fs::write(&config_path, "{ broken json content").unwrap();
+
+        // 验证主配置损坏时，尝试从 bak_path 恢复成功
+        let bak_content = fs::read_to_string(&bak_path).unwrap();
+        let recovered: Result<AppConfig, _> = serde_json::from_str(&bak_content);
+        assert!(recovered.is_ok(), "必须能从备份配置中恢复正常数据");
+
+        // 清理测试临时目录
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

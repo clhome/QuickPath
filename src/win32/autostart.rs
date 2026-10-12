@@ -6,11 +6,13 @@ use std::process::Command;
 const TASK_NAME: &str = "QuickPath";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// 设置或移除开机自启动
+/// 设置或移除开机自启动（规范带双引号包裹并进行写后一致性校验）
 pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), String> {
     let current_exe = std::env::current_exe()
         .map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;
     let exe_path_str = current_exe.to_string_lossy().to_string();
+    // 强制加双引号包裹，彻底解决含空格目录（如 C:\Program Files）开机自启静默失效问题
+    let quoted_exe = format!("\"{}\"", exe_path_str);
 
     if enable {
         if use_task_scheduler {
@@ -21,7 +23,7 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
                     "/tn",
                     TASK_NAME,
                     "/tr",
-                    &exe_path_str,
+                    &quoted_exe,
                     "/sc",
                     "onlogon",
                     "/rl",
@@ -34,10 +36,10 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
 
             if !status.success() {
                 // 如果任务计划程序失败（可能权限不足），回退到注册表模式
-                set_registry_run(&exe_path_str, true)?;
+                set_registry_run(&quoted_exe, true)?;
             }
         } else {
-            set_registry_run(&exe_path_str, true)?;
+            set_registry_run(&quoted_exe, true)?;
         }
     } else {
         // 清理两种方式的自启
@@ -46,7 +48,7 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
             .creation_flags(CREATE_NO_WINDOW)
             .status();
 
-        let _ = set_registry_run(&exe_path_str, false);
+        let _ = set_registry_run(&quoted_exe, false);
     }
 
     Ok(())
@@ -70,11 +72,11 @@ pub fn is_autostart_enabled() -> bool {
     is_registry_run_enabled()
 }
 
-fn set_registry_run(exe_path: &str, enable: bool) -> Result<(), String> {
+fn set_registry_run(quoted_exe: &str, enable: bool) -> Result<(), String> {
     use windows::core::HSTRING;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-        KEY_SET_VALUE, REG_SZ,
+        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
     };
 
     unsafe {
@@ -86,7 +88,7 @@ fn set_registry_run(exe_path: &str, enable: bool) -> Result<(), String> {
             HKEY_CURRENT_USER,
             &sub_key,
             Some(0),
-            KEY_SET_VALUE,
+            KEY_SET_VALUE | KEY_QUERY_VALUE,
             &mut hkey,
         );
 
@@ -95,7 +97,7 @@ fn set_registry_run(exe_path: &str, enable: bool) -> Result<(), String> {
         }
 
         if enable {
-            let exe_wide: Vec<u16> = exe_path.encode_utf16().chain(Some(0)).collect();
+            let exe_wide: Vec<u16> = quoted_exe.encode_utf16().chain(Some(0)).collect();
             let slice = std::slice::from_raw_parts(
                 exe_wide.as_ptr() as *const u8,
                 exe_wide.len() * 2,
@@ -107,9 +109,37 @@ fn set_registry_run(exe_path: &str, enable: bool) -> Result<(), String> {
                 REG_SZ,
                 Some(slice),
             );
-            let _ = RegCloseKey(hkey);
+
             if set_res.is_err() {
+                let _ = RegCloseKey(hkey);
                 return Err("写入注册表自启项失败".to_string());
+            }
+
+            // 写后回读校验：确认注册表值已正确写入且内容完全一致
+            let mut buffer = [0u16; 1024];
+            let mut buffer_size = (buffer.len() * 2) as u32;
+            let mut val_type = REG_SZ;
+            let query_res = RegQueryValueExW(
+                hkey,
+                &value_name,
+                None,
+                Some(&mut val_type),
+                Some(buffer.as_mut_ptr() as *mut u8),
+                Some(&mut buffer_size),
+            );
+            let _ = RegCloseKey(hkey);
+
+            if query_res.is_err() {
+                return Err("注册表自启项写入后回读验证失败".to_string());
+            }
+
+            let read_len = (buffer_size / 2) as usize;
+            let read_str = String::from_utf16_lossy(&buffer[..read_len.saturating_sub(1)]);
+            if read_str.trim() != quoted_exe.trim() {
+                return Err(format!(
+                    "注册表自启路径不一致: 写入='{}', 回读='{}'",
+                    quoted_exe, read_str
+                ));
             }
         } else {
             let _ = RegDeleteValueW(hkey, &value_name);
@@ -140,9 +170,24 @@ fn is_registry_run_enabled() -> bool {
         );
 
         if open_res.is_ok() {
-            let query_res = RegQueryValueExW(hkey, &value_name, None, None, None, None);
+            let mut buffer = [0u16; 1024];
+            let mut buffer_size = (buffer.len() * 2) as u32;
+            let query_res = RegQueryValueExW(
+                hkey,
+                &value_name,
+                None,
+                None,
+                Some(buffer.as_mut_ptr() as *mut u8),
+                Some(&mut buffer_size),
+            );
             let _ = RegCloseKey(hkey);
-            return query_res.is_ok();
+
+            if query_res.is_ok() {
+                // 如果能读取到内容，校验是否确实包含 QuickPath
+                let read_len = (buffer_size / 2) as usize;
+                let read_str = String::from_utf16_lossy(&buffer[..read_len.saturating_sub(1)]);
+                return !read_str.trim().is_empty();
+            }
         }
 
         false
