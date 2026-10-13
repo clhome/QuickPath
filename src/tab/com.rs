@@ -450,11 +450,27 @@ impl ShellComManager {
         .flatten()
     }
 
-    /// 获取指定窗口下当前有效 Tab 的数量
-    pub fn get_tabs_count_for_hwnd(&self, hwnd: HWND) -> usize {
-        let tabs = self.get_all_tabs();
+    /// 获取指定窗口下当前有效 Tab 的数量。
+    ///
+    /// **无法确认时必须返回 `None`**（报告 P1-01）：`get_all_tabs` 在 STA 超时时会
+    /// 退化为空列表，若在这里折算成 `0`，调用方就会把“查询失败”当成“本来没有标签”，
+    /// 进而用“计数 > 0”错误地证明“新标签已创建”。
+    pub fn get_tabs_count_for_hwnd_checked(&self, hwnd: HWND) -> Option<usize> {
+        let timeout = Duration::from_millis(150);
+        let tabs = self.dispatch(
+            |reply| ComRequest::GetAllTabs {
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        )?;
         let raw = hwnd.0 as usize;
-        tabs.into_iter().filter(|t| t.hwnd_raw == raw).count()
+        Some(tabs.into_iter().filter(|t| t.hwnd_raw == raw).count())
+    }
+
+    /// 获取指定窗口下当前有效 Tab 的数量（兼容旧调用：查询失败时按 0 处理）
+    pub fn get_tabs_count_for_hwnd(&self, hwnd: HWND) -> usize {
+        self.get_tabs_count_for_hwnd_checked(hwnd).unwrap_or(0)
     }
 
     /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航。
@@ -1088,6 +1104,29 @@ mod tests {
         assert_eq!(snapshot.worker_rebuilds, 1, "通道断开必须重建 worker 并重试");
         assert_eq!(snapshot.timeouts, 0, "通道断开不应被计为超时");
         assert_eq!(manager.generation(), 2);
+    }
+
+    /// P1-01：STA 无响应时标签计数必须返回 `None`，绝不能把“超时”折算成 `0`，
+    /// 否则调用方会用宿主原有标签错误地证明“新标签已创建”。
+    #[test]
+    fn test_checked_tab_count_returns_none_when_worker_never_replies() {
+        let (tx, rx) = channel::<ComRequest>();
+        // 保持接收端存活但永不回复，模拟“STA 线程卡死”：
+        // 通道仍连通，因此 dispatch 不会走断连重建分支，只能超时。
+        std::mem::forget(rx);
+        let manager = ShellComManager::new_with_worker(StaWorker { tx, generation: 1 });
+
+        let start = Instant::now();
+        assert_eq!(
+            manager.get_tabs_count_for_hwnd_checked(HWND(std::ptr::null_mut())),
+            None,
+            "STA 无响应时基线计数必须是 None（而不是某些被误当成 0 的值）"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(1000),
+            "必须在有界超时内返回，实际 {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

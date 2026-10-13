@@ -97,16 +97,22 @@ unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LP
                 && !notify_raw.is_null()
                 && let Some(target) = TabCoordinator::quick_wine_target()
             {
-                unsafe {
-                    let _ = PostMessageW(
+                // 只有 PostMessageW 确认投递成功才吞键；投递失败必须放行给系统原生 Win+E，
+                // 否则会变成“按键被吞且没有任何结果”（报告 P1-01）
+                let posted = unsafe {
+                    PostMessageW(
                         Some(HWND(notify_raw as *mut _)),
                         WM_QUICKPATH_WINE_TO_TAB,
                         WPARAM(target.0 as usize),
                         LPARAM(0),
-                    );
+                    )
+                };
+                if posted.is_ok() {
+                    return LRESULT(1);
                 }
-                // 仅在“配置允许接管 + 确实存在宿主 + 消息已投递”时才吞掉系统 Win+E
-                return LRESULT(1);
+                crate::dialog::detector::log_debug(
+                    "TAB_KEYBOARD: 宿主消息投递失败，放行系统原生 Win+E",
+                );
             }
         }
     }

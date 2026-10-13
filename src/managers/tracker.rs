@@ -30,23 +30,14 @@ impl WindowTracker {
         Self::default()
     }
 
-    /// 当系统前台窗口改变时调用，若为文件管理器则记录该状态
-    pub fn on_foreground_change(&mut self, hwnd: HWND, class_name: &str, config: &AppConfig) {
-        if is_file_manager_class(class_name) {
-            // 优先通过短路加速通道提取，避免阻塞
-            let active_folder = if config.enable_win11_tabs && class_name == "CabinetWClass" {
-                super::explorer::get_active_explorer_folder_fast()
-                    .or_else(|| get_current_active_folder(config))
-            } else {
-                get_current_active_folder(config)
-            };
-
-            if let Some(folder) = active_folder {
-                self.last_manager_path = Some(folder);
-                self.last_manager_time = Some(Instant::now());
-                self.last_manager_hwnd = Some(hwnd);
-            }
-        }
+    /// 记录一次由后台扫描/极速路径确认的文件管理器目录。
+    ///
+    /// 审计报告 P1-02：探测本身必须在后台线程完成，宿主消息线程只负责
+    /// 把结果写回这里；因此这里只做纯赋值，不含任何跨进程调用。
+    pub fn note_manager_folder(&mut self, path: String, hwnd: HWND) {
+        self.last_manager_path = Some(path);
+        self.last_manager_time = Some(Instant::now());
+        self.last_manager_hwnd = Some(hwnd);
     }
 
     /// 获取最推荐的自动秒切目标目录 (AutoSwitch 路径)
@@ -68,8 +59,26 @@ impl WindowTracker {
             }
         }
 
-        // 3. 扫描其他第三方文件管理器（DOpus / TotalCmd / XYplorer）
-        if let Some(folder) = get_current_active_folder(config) {
+        // 3. 其他第三方文件管理器（DOpus / TotalCmd / XYplorer）。
+        //
+        // 报告 P1-02：优先取后台 scanner 已扫描的缓存（零预算、绝不阻塞）；
+        // 仅在缓存完全未命中时才做一次有界的同步探测（且受 ipc 失败冷却保护，
+        // 挂起的管理器不会每次都被重新白等）。调用方（对话框链路）在此前已调用过
+        // `get_all_candidates`，它刚触发过一轮后台扫描，因此缓存未命中是少数情况。
+        for candidate in super::scanner::scan_within(
+            config.enable_dopus,
+            config.enable_totalcmd,
+            config.enable_xyplorer,
+            std::time::Duration::ZERO,
+        ) {
+            if candidate.is_active && is_fast_valid_folder(&candidate.path) {
+                self.last_manager_path = Some(candidate.path.clone());
+                self.last_manager_time = Some(Instant::now());
+                return Some(candidate.path);
+            }
+        }
+
+        if let Some(folder) = probe_active_folder(config) {
             self.last_manager_path = Some(folder.clone());
             self.last_manager_time = Some(Instant::now());
             return Some(folder);
@@ -236,9 +245,12 @@ pub fn is_file_manager_class(class_name: &str) -> bool {
 
 /// 实时扫描当前活跃的第三方/资源管理器目录（需要“新鲜度”，故保持同步但全程有界）。
 ///
+/// **调用约束（报告 P1-02）**：本函数含跨进程调用，**绝不能在宿主消息线程上前台事件里直接调**，
+/// 必须丢到后台线程执行，结果再经 `note_manager_folder` 写回。
+///
 /// **全局预算**：三个管理器共享 `SCAN_BUDGET`，
-/// 避免“多个管理器同时挂起时把等待时间串行叠加成秒级”的主线程卡顿。
-fn get_current_active_folder(config: &AppConfig) -> Option<String> {
+/// 避免“多个管理器同时挂起时把等待时间串行叠加成秒级”的卡顿。
+pub fn probe_active_folder(config: &AppConfig) -> Option<String> {
     const SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(900);
     let started = Instant::now();
     let over_budget = |started: &Instant| started.elapsed() > SCAN_BUDGET;

@@ -211,6 +211,74 @@ fn simulate_enter() {
     }
 }
 
+/// 全局输入放行的纯判定：三个条件必须同时成立。
+///
+/// 抽成纯函数是为了单测能直接审视这项 AND 语义，而不是“看代码觉得对”。
+fn guarded_input_allowed(identity_ok: bool, foreground_ok: bool, focus_ok: bool) -> bool {
+    identity_ok && foreground_ok && focus_ok
+}
+
+/// 全局输入动作的校验上下文（审计报告 P0-02）。
+///
+/// WPS Qt 自绘对话框会丢弃 UIA `SetValue`，因此必须保留物理键鼠；
+/// 代价是每一个按键/点击之前都要重新满足：
+/// ① 窗口身份未变（HWND + PID + 创建时间 + 类名）；
+/// ② 目标窗口仍是前台窗口；
+/// ③ 目标编辑框确实持有键盘焦点。
+struct InputContext<'a> {
+    identity: &'a WindowIdentity,
+    elem: &'a IUIAutomationElement,
+}
+
+impl InputContext<'_> {
+    fn ready(&self, action: &str) -> bool {
+        let identity_ok = self.identity.verify();
+        let foreground_ok = identity_ok && self.identity.is_foreground();
+        let focus_ok = unsafe {
+            self.elem
+                .CurrentHasKeyboardFocus()
+                .map(|focused| focused.as_bool())
+                .unwrap_or(false)
+        };
+
+        if !guarded_input_allowed(identity_ok, foreground_ok, focus_ok) {
+            log_debug(&format!(
+                "UIA_GUARD: {} 前置校验未通过 (identity={} foreground={} focus={})，取消全局输入",
+                action, identity_ok, foreground_ok, focus_ok
+            ));
+            return false;
+        }
+        true
+    }
+}
+
+/// 受保护的 Ctrl+A：先复核身份/前台/焦点，再发送全局按键
+fn simulate_ctrl_a_checked(ctx: &InputContext<'_>) -> bool {
+    if !ctx.ready("Ctrl+A") {
+        return false;
+    }
+    simulate_ctrl_a();
+    true
+}
+
+/// 受保护的 Ctrl+V：同上
+fn simulate_ctrl_v_checked(ctx: &InputContext<'_>) -> bool {
+    if !ctx.ready("Ctrl+V") {
+        return false;
+    }
+    simulate_ctrl_v();
+    true
+}
+
+/// 受保护的 Enter（导航终点，发送前必须先做一次完整终审）
+fn simulate_enter_checked(ctx: &InputContext<'_>) -> bool {
+    if !ctx.ready("Enter") {
+        return false;
+    }
+    simulate_enter();
+    true
+}
+
 /// 智能寻找 WPS 文件对话框中的主“文件名”编辑框元素与对应 ValuePattern
 fn find_wps_edit_element(
     uia: &IUIAutomation,
@@ -401,6 +469,21 @@ unsafe fn focus_edit_element(identity: &WindowIdentity, elem: &IUIAutomationElem
         mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
         let _ = SetCursorPos(orig_pt.x, orig_pt.y);
         thread::sleep(Duration::from_millis(40));
+
+        // 点击兜底后必须重新确认编辑框确实拿到了键盘焦点，
+        // 否则不得视为“已聚焦”，绝不据此发送后续全局按键（报告 P0-02）
+        if !identity.verify() {
+            log_debug("UIA_FOCUS: 物理点击后窗口身份已变化，判定聚焦失败");
+            return false;
+        }
+        if !elem
+            .CurrentHasKeyboardFocus()
+            .map(|focused| focused.as_bool())
+            .unwrap_or(false)
+        {
+            log_debug("UIA_FOCUS: 物理点击后编辑框仍未获得键盘焦点，判定聚焦失败");
+            return false;
+        }
         true
     }
 }
@@ -422,19 +505,42 @@ fn paths_equal(a: &str, b: &str) -> bool {
 ///
 /// 任一环节失败或回读不一致都返回 false —— 调用方据此绝不发送 Enter，
 /// 从根上避免“路径没写进去却按了回车”造成的错误导航或误提交。
-unsafe fn write_path_and_verify(pattern: &IUIAutomationValuePattern, target: &str) -> bool {
+unsafe fn write_path_and_verify(
+    pattern: &IUIAutomationValuePattern,
+    target: &str,
+    ctx: &InputContext<'_>,
+) -> bool {
     unsafe {
-        // 路径 1：受保护的剪贴板临时注入（快照 + 事务化恢复用户原剪贴板）
-        let clipboard_injected = match crate::win32::clipboard::with_temporary_clipboard_text(
+        // 0. 进入写入流程前先做一次前置校验（报告 P0-02）
+        if !ctx.ready("写入路径") {
+            return false;
+        }
+
+        // 路径 1：受保护的剪贴板临时注入（快照 + 事务化恢复用户原剪贴板）。
+        // 每次 Ctrl+A / Ctrl+V 之前都重新核验身份、前台与控件焦点；
+        // 任一环节不满足即立即中止，绝不把全局按键发给错误窗口。
+        let mut sequence_ok = false;
+        let clipboard_result = crate::win32::clipboard::with_temporary_clipboard_text(
             target,
             || {
-                simulate_ctrl_a();
+                if !simulate_ctrl_a_checked(ctx) {
+                    return;
+                }
                 thread::sleep(Duration::from_millis(30));
-                simulate_ctrl_v();
+                if !simulate_ctrl_v_checked(ctx) {
+                    return;
+                }
                 thread::sleep(Duration::from_millis(50));
+                sequence_ok = true;
             },
-        ) {
-            Ok(()) => true,
+        );
+
+        let clipboard_injected = match clipboard_result {
+            Ok(()) if sequence_ok => true,
+            Ok(()) => {
+                log_debug("UIA_INJECT: 物理按键前置校验未通过，本次剪贴板注入已中止");
+                false
+            }
             Err(err) => {
                 log_debug(&format!(
                     "UIA_INJECT: 剪贴板安全守卫拒绝或恢复失败({:?})，降级使用 UIA SetValue",
@@ -549,15 +655,24 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
             return false;
         }
 
+        let ctx = InputContext {
+            identity: &identity,
+            elem: &elem,
+        };
+
         // 6. 写入目标目录并回读校验；不一致绝不发送 Enter
-        if !write_path_and_verify(&val_pattern, target_folder) {
+        if !write_path_and_verify(&val_pattern, target_folder, &ctx) {
             log_debug("UIA_REJECT: 路径写入后回读不一致，绝不发送 Enter");
             return false;
         }
 
-        // 7. 仅在此刻（写入已确证）才触发导航
-        log_debug("UIA_INJECT: 路径已写入并回读一致，发送 Enter 触发目录导航");
-        simulate_enter();
+        // 7. Enter 是导航终点：发送前再做一次完整终审（身份 + 前台 + 控件焦点），
+        //    任一不满足即取消，绝不把全局 Enter 发给其他应用（报告 P0-02）
+        if !simulate_enter_checked(&ctx) {
+            log_debug("UIA_REJECT: Enter 终审未通过，未发送任何全局输入");
+            return false;
+        }
+        log_debug("UIA_INJECT: 路径已写入并回读一致，Enter 终审通过，触发目录导航");
 
         // 8. 优雅恢复原文件名（尽力而为，不影响本次注入结果）
         if should_restore_name {
@@ -615,14 +730,24 @@ fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String) {
             return;
         }
 
-        let restored = crate::win32::clipboard::with_temporary_clipboard_text(&saved_name, || {
-            simulate_ctrl_a();
+        let ctx = InputContext {
+            identity: &identity,
+            elem: &elem,
+        };
+        let mut sequence_ok = false;
+        let clipboard_ok = crate::win32::clipboard::with_temporary_clipboard_text(&saved_name, || {
+            if !simulate_ctrl_a_checked(&ctx) {
+                return;
+            }
             thread::sleep(Duration::from_millis(20));
-            simulate_ctrl_v();
+            if !simulate_ctrl_v_checked(&ctx) {
+                return;
+            }
             thread::sleep(Duration::from_millis(20));
-            simulate_ctrl_a(); // 再次全选原文件名，方便用户直接改名
+            sequence_ok = simulate_ctrl_a_checked(&ctx); // 再次全选原文件名，方便用户直接改名
         })
         .is_ok();
+        let restored = clipboard_ok && sequence_ok;
 
         log_debug(&format!(
             "UIA_RESTORE_DONE: restore_requested='{}' clipboard_ok={}",
@@ -688,5 +813,15 @@ mod tests {
         // 前缀相同但并非同一目录：必须判为不一致（避免误按 Enter）
         assert!(!paths_equal(r"C:\Users\Test2", r"C:\Users\Test"));
         assert!(!paths_equal("", r"C:\Users\Test"));
+    }
+
+    #[test]
+    fn test_guarded_input_requires_all_three_conditions() {
+        // 身份 + 前台 + 控件焦点三项必须全部成立才允许发出全局输入（报告 P0-02）
+        assert!(guarded_input_allowed(true, true, true));
+        assert!(!guarded_input_allowed(false, true, true));
+        assert!(!guarded_input_allowed(true, false, true));
+        assert!(!guarded_input_allowed(true, true, false));
+        assert!(!guarded_input_allowed(false, false, false));
     }
 }

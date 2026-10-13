@@ -1,14 +1,22 @@
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Once;
 use std::thread;
 use std::time::Duration;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
+use windows::core::w;
+use windows::Win32::Foundation::{GlobalFree, HINSTANCE, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
     GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GHND, GMEM_MOVEABLE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, RegisterClassW,
+    TranslateMessage, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
 };
 
 /// 剪贴板标准格式常量定义
@@ -120,6 +128,110 @@ fn open_clipboard_with_retry(hwnd: Option<HWND>, max_retries: u32) -> bool {
     false
 }
 
+/// 进程级剪贴板 owner 窗口句柄（懒创建，跨线程可用）
+static CLIPBOARD_OWNER: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+static OWNER_INIT: Once = Once::new();
+
+unsafe extern "system" fn clipboard_owner_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    // owner 窗口永不可见、不需要处理任何业务消息（本模块不使用延迟渲染），
+    // 仅作为 `OpenClipboard` 的合法 owner 存在，交由默认窗口过程处理即可。
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// 懒创建并返回进程唯一的隐藏 owner 窗口句柄。
+///
+/// **审计报告 P0-01**：Win32 明确约定「以 `NULL` 打开剪贴板后 `EmptyClipboard` 会把
+/// owner 置为 `NULL`，从而导致 `SetClipboardData` 失败」。因此所有会调用
+/// `EmptyClipboard` / `SetClipboardData` 的写路径都必须以有效 HWND 打开剪贴板。
+/// 这里在专用线程上创建一个隐藏顶层窗口并跑消息泵，使句柄在进程存活期内始终有效。
+fn clipboard_owner() -> Option<HWND> {
+    OWNER_INIT.call_once(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<usize>();
+        let spawned = thread::Builder::new()
+            .name("QuickPath-ClipboardOwner".to_string())
+            .spawn(move || unsafe {
+                let class_name = w!("QuickPath_ClipboardOwner_Class");
+                let hinstance = GetModuleHandleW(None)
+                    .map(|h| HINSTANCE(h.0))
+                    .unwrap_or_default();
+                let wc = WNDCLASSW {
+                    lpfnWndProc: Some(clipboard_owner_proc),
+                    hInstance: hinstance,
+                    lpszClassName: class_name,
+                    ..Default::default()
+                };
+                let _ = RegisterClassW(&wc);
+
+                let created = CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    class_name,
+                    w!("QuickPath Clipboard Owner"),
+                    WINDOW_STYLE::default(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+
+                match created {
+                    Ok(hwnd) if !hwnd.0.is_null() => {
+                        let _ = tx.send(hwnd.0 as usize);
+                        let mut msg = MSG::default();
+                        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                    _ => {
+                        let _ = tx.send(0);
+                    }
+                }
+            });
+
+        if spawned.is_err() {
+            return;
+        }
+        if let Ok(raw) = rx.recv_timeout(Duration::from_secs(3))
+            && raw != 0
+        {
+            CLIPBOARD_OWNER.store(raw as *mut _, Ordering::SeqCst);
+        }
+    });
+
+    let raw = CLIPBOARD_OWNER.load(Ordering::SeqCst);
+    if raw.is_null() {
+        return None;
+    }
+    let hwnd = HWND(raw);
+    unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }
+}
+
+/// 以合法 owner 打开剪贴板（**所有写路径必须先经过这里**）。
+/// owner 无法建立时一律返回 false，调用方按“写入失败”处理（fail-closed）。
+fn open_clipboard_for_write(max_retries: u32) -> bool {
+    match clipboard_owner() {
+        Some(owner) => open_clipboard_with_retry(Some(owner), max_retries),
+        None => false,
+    }
+}
+
+/// 以 owner（若可用）打开剪贴板用于只读捕获；owner 不可用时退回 `NULL`（只读不受影响）。
+fn open_clipboard_for_read(max_retries: u32) -> bool {
+    match clipboard_owner() {
+        Some(owner) => open_clipboard_with_retry(Some(owner), max_retries),
+        None => open_clipboard_with_retry(None, max_retries),
+    }
+}
+
 /// 剪贴板快照数据，存储全量枚举格式的原始内存块副本
 pub struct ClipboardSnapshot {
     /// 各格式数据 (format_id, raw_bytes)
@@ -144,7 +256,7 @@ impl ClipboardSnapshot {
     /// 完整捕获当前系统剪贴板的所有格式数据
     /// 若剪贴板被占用或关键格式无法保真备份，返回 Err 坚决不碰剪贴板
     pub fn capture() -> Result<Self, ClipboardSafetyError> {
-        if !open_clipboard_with_retry(None, 4) {
+        if !open_clipboard_for_read(4) {
             return Err(ClipboardSafetyError::Busy);
         }
 
@@ -385,7 +497,8 @@ impl ClipboardSnapshot {
 
     /// 单次恢复尝试：清空（仅首次）后逐格式写回，返回是否全部成功
     fn restore_attempt(&mut self) -> Result<bool, ClipboardRestoreError> {
-        if !open_clipboard_with_retry(None, 4) {
+        // 必须是“写路径”：以有效 owner 打开，否则 EmptyClipboard 会把 owner 置空
+        if !open_clipboard_for_write(4) {
             return Err(ClipboardRestoreError::Busy);
         }
 
@@ -550,7 +663,8 @@ impl Drop for ClipboardRestoreGuard {
 
 /// 临时向系统剪贴板写入 Unicode 文本，并返回写入后的剪贴板序列号
 fn set_raw_clipboard_text_tracked(text: &str) -> Option<u32> {
-    if !open_clipboard_with_retry(None, 4) {
+    // 必须是“写路径”：以有效 owner 打开，否则 EmptyClipboard 会把 owner 置空
+    if !open_clipboard_for_write(4) {
         return None;
     }
 
@@ -642,7 +756,7 @@ where
 
 /// 安全读取当前剪贴板的纯文本（若剪贴板无纯文本则返回 None）
 pub fn get_clipboard_text() -> Option<String> {
-    if !open_clipboard_with_retry(None, 4) {
+    if !open_clipboard_for_read(4) {
         return None;
     }
     unsafe {
@@ -671,6 +785,7 @@ pub fn get_clipboard_text() -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use windows::Win32::System::DataExchange::GetClipboardOwner;
 
     static CLIP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -717,7 +832,7 @@ mod tests {
 
         let original_text = get_clipboard_text();
 
-        assert!(open_clipboard_with_retry(None, 10), "测试初始化必须成功打开剪贴板");
+        assert!(open_clipboard_for_write(10), "测试初始化必须以合法 owner 打开剪贴板");
         unsafe {
             let _ = EmptyClipboard();
             if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, dib_data.len()) {
@@ -742,7 +857,7 @@ mod tests {
         });
         assert!(res.is_ok());
 
-        if open_clipboard_with_retry(None, 4) {
+        if open_clipboard_for_read(4) {
             unsafe {
                 if let Ok(h) = GetClipboardData(CF_DIB) {
                     assert!(!h.0.is_null(), "恢复后剪贴板必须仍持有有效 CF_DIB");
@@ -802,7 +917,7 @@ mod tests {
         dib_data[14..16].copy_from_slice(&24u16.to_le_bytes()); // biBitCount = 24
         dib_data[20..24].copy_from_slice(&4u32.to_le_bytes()); // biSizeImage = 4
 
-        assert!(open_clipboard_with_retry(None, 10), "测试初始化必须成功打开剪贴板");
+        assert!(open_clipboard_for_write(10), "测试初始化必须以合法 owner 打开剪贴板");
         unsafe {
             let _ = EmptyClipboard();
             if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, dib_data.len()) {
@@ -847,7 +962,7 @@ mod tests {
         // 幂等：重复调用不得再动剪贴板
         assert_eq!(snap.restore(), Ok(RestoreStatus::AlreadyRestored));
 
-        assert!(open_clipboard_with_retry(None, 10));
+        assert!(open_clipboard_for_read(10));
         unsafe {
             let restored = GetClipboardData(CF_DIB);
             assert!(restored.is_ok(), "重试成功后剪贴板必须重新持有 CF_DIB");
@@ -981,7 +1096,7 @@ mod tests {
 
     /// 用指定字节块占用多个剪贴板格式，并顺带写入一段 Unicode 文本
     fn seed_clipboard_formats(entries: &[(u32, &[u8])]) {
-        assert!(open_clipboard_with_retry(None, 10), "测试必须能打开剪贴板");
+        assert!(open_clipboard_for_write(10), "测试必须以合法 owner 打开剪贴板");
         unsafe {
             let _ = EmptyClipboard();
             for (format, bytes) in entries {
@@ -1075,6 +1190,47 @@ mod tests {
         // 占用解除后必须能正常完成恢复
         assert_eq!(snap.restore(), Ok(RestoreStatus::Restored));
         let _ = set_raw_clipboard_text("qp_busy_seed");
+    }
+
+    /// P0-01：所有写路径必须以「有效窗口」为 owner 打开剪贴板；
+    /// 且 `EmptyClipboard` 后 owner 必须生效、`SetClipboardData` 必须真正成功。
+    #[test]
+    fn test_clipboard_owner_window_makes_writes_succeed() {
+        let _guard = clip_test_lock();
+
+        let owner = clipboard_owner().expect("必须能够创建进程级剪贴板 owner 窗口");
+        assert!(!owner.0.is_null(), "owner 句柄不得为空");
+        unsafe {
+            assert!(IsWindow(Some(owner)).as_bool(), "owner 必须是存活窗口");
+        }
+
+        assert!(
+            open_clipboard_with_retry(Some(owner), 10),
+            "以合法 owner 必须能打开剪贴板"
+        );
+        unsafe {
+            assert!(EmptyClipboard().is_ok(), "以合法 owner 清空剪贴板必须成功");
+            assert_eq!(
+                GetClipboardOwner().ok(),
+                Some(owner),
+                "EmptyClipboard 后 owner 必须是我们传入的窗口（而不是 NULL）"
+            );
+
+            let wide: Vec<u16> = "qp_owner_probe".encode_utf16().chain(Some(0)).collect();
+            let bytes = wide.len() * 2;
+            let handle = prod_alloc(bytes).expect("分配必须成功");
+            let ptr = prod_lock(handle);
+            assert!(!ptr.is_null());
+            std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr, bytes);
+            prod_unlock(handle);
+            assert!(
+                prod_set(CF_UNICODETEXT, handle),
+                "以合法 owner 写入必须成功（P0-01 的核心断言）"
+            );
+            let _ = CloseClipboard();
+        }
+
+        assert_eq!(get_clipboard_text().as_deref(), Some("qp_owner_probe"));
     }
 }
 

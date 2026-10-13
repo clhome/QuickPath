@@ -1315,6 +1315,55 @@
 3. **第三批**：Actions pin SHA、锁 toolchain、全仓格式化后才能上的 fmt/clippy/audit 门禁、Authenticode 签名、`build.rs` 改生成到 `OUT_DIR`
 4. **真机验收**：报告 §11 Windows 11 回归矩阵（含“挂起 DOpus/TotalCMD/XYplorer 时主界面仍可响应”与“COM 请求人为挂起后不得永久饥饿”）——这两条现在有了代码级实现与单测，但仍需真机复现
 
+---
+
+## 阶段六十九：审计报告 v1.2.2 第一批四项修复（P0-01 / P0-02 / P1-01 / P1-02）
+
+> **依据**：`test/QuickPath_审计评分报告_v1.2.2.md`（固定提交 `85e14c4`，综合 7.6 / B-，“不宜稳定发布”）。
+> **范围（用户确认）**：只做报告 §10「第一批：稳定版前必须完成」四项；第二批（钩子回滚 / 自启有界 / AppState 所有权 / COM worker 上限监控）与第三批（发布工程）本轮不做。
+> **P0-02 口径（用户确认）**：保留物理键鼠（阶段 36.7/36.8 已实测 WPS Qt 会丢弃 UIA `SetValue`，纯 UIA 会让 WPS 注入彻底失效），改为**逐动作核验**——即报告给出的“若暂时保留全局输入”分支。
+
+- [x] **69.1 P0-01 剪贴板 owner 合法化（`src/win32/clipboard.rs`）**
+  - [x] 新增进程级隐藏 owner 窗口：独立线程注册窗口类 + 消息泵，`Once` 懒创建，句柄在进程存活期内始终有效
+  - [x] 新增 `open_clipboard_for_write()`（**所有写路径唯一入口**，`OpenClipboard(Some(owner))`）；owner 建立失败即 fail-closed 返回失败
+  - [x] 新增 `open_clipboard_for_read()`（owner 可用则用，否则退回 `NULL`，只读不受影响）
+  - [x] `set_raw_clipboard_text_tracked` / `restore_attempt`（`EmptyClipboard`+`SetClipboardData`）改走写路径；`capture` / `get_clipboard_text` 改走读路径
+  - [x] 新增单测 `test_clipboard_owner_window_makes_writes_succeed`：断言 owner 是存活窗口、`EmptyClipboard` 后 `GetClipboardOwner()==owner`（非 NULL）、`SetClipboardData` 成功
+  - [x] 实测证据（临时探针，已移除）：本机 `OpenClipboard(NULL)`+`EmptyClipboard` 后 `GetClipboardOwner()` 确为 NULL；`SetClipboardData` 在本机 Win11 仍返回 Ok，但 owner 为空已违反 Win32 owner 契约（延迟渲染/跨进程取数不可靠），修复后 owner 恒有效
+  - [x] 测试内的 “种入剪贴板” 辅助函数一并改走 `open_clipboard_for_write`，避免测试自身复现该缺陷
+- [x] **69.2 P0-02 WPS 全局输入逐动作核验（`src/win32/uia.rs`）**
+  - [x] 新增 `InputContext`（身份 + 前台 + 控件焦点）与 `ready()` 前置校验；抽 `guarded_input_allowed()` 纯函数供单测审视 AND 语义
+  - [x] 新增 `simulate_ctrl_a_checked` / `simulate_ctrl_v_checked` / `simulate_enter_checked`：每次全局按键前复核 ①窗口身份(HWND+PID+创建时间+类名) ②前台窗口 ③编辑框 `CurrentHasKeyboardFocus()`
+  - [x] `write_path_and_verify` 去掉裸 `simulate_ctrl_a/v`，改为逐动作受保护调用，校验不通过即中止（不再“按了但内容没写”）
+  - [x] **Enter 终审**：导航终点发送前再做一次完整核验，不通过则零全局输入地放弃
+  - [x] 物理点击兜底（`focus_edit_element`）：点击后必须重新 `verify()` 且确认 `CurrentHasKeyboardFocus()`，否则判定聚焦失败
+  - [x] 原文件名恢复线程同样接入 `InputContext`，恢复阶段也不再有未受保护的全局按键
+  - [x] 新增单测 `test_guarded_input_requires_all_three_conditions`
+- [x] **69.3 P1-01 Win+E 吞键闭环（`src/tab/keyboard.rs`、`src/tab/com.rs`、`src/main.rs`）**
+  - [x] 钩子仅在 `PostMessageW` 返回成功时才 `return LRESULT(1)`；投递失败放行系统原生 Win+E（绝不“吞键且无结果”）
+  - [x] 新增 `ShellComManager::get_tabs_count_for_hwnd_checked() -> Option<usize>`：STA 超时返回 `None`，绝不把“查询失败”折算成 `0`；旧方法保留并委托（兼容 `coordinator` 既有调用）
+  - [x] `handle_wine_to_tab_request`：基线 `None`（首个计数查询超时）时不冒险新建，直接补偿原生窗口；等待新标签阶段只有“计数可读且 > 基线”才确认成功
+  - [x] 新增单测 `test_checked_tab_count_returns_none_when_worker_never_replies`（通道连通但 worker 永不回复 → 必须 `None` 且在有界超时内返回）
+- [x] **69.4 P1-02 前台变化扫描异步化（`src/main.rs`、`src/managers/tracker.rs`）**
+  - [x] 删除 `WindowTracker::on_foreground_change`（同步跨进程扫描），改为 `note_manager_folder()`（纯赋值）
+  - [x] 新增 `WM_QUICKPATH_MANAGER_SCAN_RESULT` + `ManagerScanResult`：后台线程跑 `probe_active_folder()`，结果经 `Box` 裸指针回传宿主消息线程
+  - [x] **generation + HWND 双校验**：只有世代号仍是当前值、且当前前台窗口仍是请求窗口时才采纳；`Box` 在投递失败时由发送方回收，不泄漏
+  - [x] 仅 Win11 资源管理器极速路径（微秒级、无跨进程等待）保留同步；其余（含 CabinetWClass 极速未命中）一律后台化
+  - [x] `get_auto_switch_target` 第三方分支改为**先取后台 scanner 零预算缓存**，仅缓存完全未命中时才做一次有界同步探测（受 ipc 失败冷却保护），把对话框链路最常见的阻塞面也一并消掉
+
+### 门禁与自证（本轮）
+
+- `cargo test --all-targets`：**88 项全绿**（基线 85 → 88，新增 3 项）
+- `cargo clippy --all-targets`：**182 条告警，与修复前基线完全持平**（逐条 `sort|uniq -c` 比对，未新增任何告警）
+- `cargo build --release`：通过
+- 本轮未做：第二批 / 第三批；报告 §11 真机验收矩阵（WPS Alt+Tab 焦点抢占、Win+E 连按 100 次、挂起三管理器主线程延迟 P99）仍待在 Windows 11 真机复现
+
+### 本轮遗留（已在代码注释中标注，供后续批次）
+
+1. 对话框链路仍保留一次**有界**（900ms，且受 10s failure cooldown 保护）的第三方同步探测作为缓存未命中兜底；要彻底满足报告 P1-02 的 `P99 < 50ms` 硬门限，需把候选收集整体移到后台并让吸附条只消费快照。
+2. `coordinator.rs` 合并链路（非 Win+E）仍使用旧 `get_tabs_count_for_hwnd()`（失败按 0），与本轮 Win+E 的严格口径不一致，属下一步统一项。
+3. `build.rs` 改写源码树、Actions 未 pin SHA、无 fmt/clippy/audit 门禁、无 Authenticode——仍属第三批发布工程。
+
 
 
 

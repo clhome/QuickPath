@@ -42,6 +42,8 @@ const WM_QUICKPATH_RETRY_CHECK: u32 = 0x0400 + 102;
 const WM_QUICKPATH_INJECT_FAILED: u32 = 0x0400 + 103;
 /// Win+E 接管请求（由低级键盘钩子投递；钩子自身只做识别与投递，不做重活）
 const WM_QUICKPATH_WINE_TO_TAB: u32 = tab::keyboard::WM_QUICKPATH_WINE_TO_TAB;
+/// 后台文件管理器扫描结果回传（携带 generation + 目标 HWND，报告 P1-02）
+const WM_QUICKPATH_MANAGER_SCAN_RESULT: u32 = 0x0400 + 105;
 /// 对话框控件异步初始化期间的最大探测次数与间隔
 /// （合计约 1.2s：慢速机器/首次加载的 shell 扩展常需数百毫秒才出现
 ///  DirectUIHWND / ComboBoxEx32 / Edit，过短会导致完全不弹窗）
@@ -63,6 +65,17 @@ pub struct AppState {
     pub last_switched_path: Option<String>,
     /// 已为哪个对话框实例补过一次失败重试（防止无限重试）
     pub retried_dialog: Option<HWND>,
+    /// 文件管理器后台扫描的单调世代号：只有仍对应当前前台窗口的结果才会被采纳
+    pub manager_scan_generation: u64,
+}
+
+/// 后台文件管理器扫描结果：经宿主窗口消息回传（报告 P1-02）。
+/// 以裸指针在 `WPARAM` 中传递，接收方用 `Box::from_raw` 回收；
+/// 投递失败时发送方自行回收，绝不泄漏。
+struct ManagerScanResult {
+    generation: u64,
+    hwnd_raw: usize,
+    path: Option<String>,
 }
 
 fn main() {
@@ -156,6 +169,7 @@ fn main() {
             last_switched_dialog: None,
             last_switched_path: None,
             retried_dialog: None,
+            manager_scan_generation: 0,
         });
 
         MAIN_APP_STATE.store(Box::into_raw(state), Ordering::SeqCst);
@@ -207,6 +221,29 @@ unsafe extern "system" fn host_wnd_proc(
         }
         WM_QUICKPATH_WINE_TO_TAB => {
             handle_wine_to_tab_request(HWND(wparam.0 as *mut _));
+            LRESULT(0)
+        }
+        WM_QUICKPATH_MANAGER_SCAN_RESULT => {
+            let raw = wparam.0 as *mut ManagerScanResult;
+            if !raw.is_null() {
+                // 无论是否采纳，都必须回收后台线程移交过来的 Box
+                let payload = unsafe { Box::from_raw(raw) };
+                let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+                if !state_ptr.is_null() {
+                    let state = unsafe { &mut *state_ptr };
+                    let current_fg = win32::events::get_active_foreground_window();
+                    // 只接受“仍对应当前前台窗口”的本次世代结果，
+                    // 避免用户已切走后把一个陈旧目录写进追踪器
+                    if payload.generation == state.manager_scan_generation
+                        && current_fg.0 as usize == payload.hwnd_raw
+                        && let Some(path) = payload.path
+                    {
+                        state
+                            .tracker
+                            .note_manager_folder(path, HWND(payload.hwnd_raw as *mut _));
+                    }
+                }
+            }
             LRESULT(0)
         }
         WM_QUICKPATH_RETRY_CHECK => {
@@ -364,8 +401,57 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
 
     let class_name = dialog::detector::get_window_class_name(fg_hwnd);
 
-    // 1. 如果切入的是文件管理器，更新追踪器时间戳与路径
-    state.tracker.on_foreground_change(fg_hwnd, &class_name, &state.config);
+    // 1. 如果切入的是文件管理器，更新追踪器状态。
+    //
+    // 审计报告 P1-02：第三方管理器（DOpus / TotalCmd / XYplorer）的探测是跨进程
+    // 有界调用（单次上限可达数百毫秒），绝不能在宿主消息线程里同步等待。
+    // 这里只在“Win11 资源管理器极速路径”上保留同步（微秒级、无跨进程等待），
+    // 其余一律投递后台线程扫描，结果携带 generation 回传，
+    // 只有仍对应当前前台窗口的结果才会被采纳。
+    if managers::tracker::is_file_manager_class(&class_name) {
+        state.manager_scan_generation = state.manager_scan_generation.wrapping_add(1);
+        let generation = state.manager_scan_generation;
+
+        let mut resolved_fast = false;
+        if state.config.enable_win11_tabs
+            && class_name == "CabinetWClass"
+            && let Some(folder) = managers::explorer::get_active_explorer_folder_fast()
+        {
+            state.tracker.note_manager_folder(folder, fg_hwnd);
+            resolved_fast = true;
+        }
+
+        if !resolved_fast {
+            let host_raw = HOST_HWND.load(Ordering::SeqCst) as usize;
+            if host_raw != 0 {
+                let config = state.config.clone();
+                let hwnd_raw = fg_hwnd.0 as usize;
+                thread::spawn(move || {
+                    let path = managers::tracker::probe_active_folder(&config);
+                    let raw = Box::into_raw(Box::new(ManagerScanResult {
+                        generation,
+                        hwnd_raw,
+                        path,
+                    }));
+                    let delivered = unsafe {
+                        let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                        !host_ptr.is_null()
+                            && PostMessageW(
+                                Some(HWND(host_ptr as *mut _)),
+                                WM_QUICKPATH_MANAGER_SCAN_RESULT,
+                                WPARAM(raw as usize),
+                                LPARAM(0),
+                            )
+                            .is_ok()
+                    };
+                    if !delivered {
+                        // 宿主已退出或投递失败：由发送方回收，避免泄漏
+                        drop(unsafe { Box::from_raw(raw) });
+                    }
+                });
+            }
+        }
+    }
 
     // 2. 检查是否切入了文件对话框
     if let Some(dlg_info) = detect_file_dialog(fg_hwnd) {
@@ -555,22 +641,35 @@ fn handle_wine_to_tab_request(target: HWND) {
     thread::spawn(move || {
         let target = HWND(target_raw as *mut _);
         let com = coordinator.com_manager().clone();
-        let count_before = com.get_tabs_count_for_hwnd(target);
+
+        // 基线计数必须“确实读到”：STA 超时时 `get_all_tabs` 会退化为空列表，
+        // 若把查询失败当 0，就会用宿主原有标签误判“新标签已出现”（报告 P1-01）。
+        // 基线未知时不冒险新建，直接补偿原生窗口，保证每次 Win+E 都有可见结果。
+        let Some(count_before) = com.get_tabs_count_for_hwnd_checked(target) else {
+            dialog::detector::log_debug(
+                "WINE_TO_TAB: 首个标签计数查询超时，无法证明新建成功，补偿打开原生窗口",
+            );
+            launch_native_explorer_window();
+            return;
+        };
 
         if !coordinator.wine_to_tab_in(target) {
             launch_native_explorer_window();
             return;
         }
 
-        // 等待新标签在 Shell COM 中注册（最多 800ms）；未确认成功则走原生兜底
+        // 等待新标签在 Shell COM 中注册（最多 800ms）；
+        // 只有“计数确实可读且大于基线”才认定为成功，超时/读不到均走原生兜底
         for _ in 0..8 {
             thread::sleep(Duration::from_millis(100));
-            if com.get_tabs_count_for_hwnd(target) > count_before {
+            if let Some(count) = com.get_tabs_count_for_hwnd_checked(target)
+                && count > count_before
+            {
                 return;
             }
         }
         dialog::detector::log_debug(&format!(
-            "WINE_TO_TAB: host=0x{:X} 新标签未出现，补偿打开原生窗口",
+            "WINE_TO_TAB: host=0x{:X} 新标签未出现或计数不可读，补偿打开原生窗口",
             target_raw
         ));
         launch_native_explorer_window();
