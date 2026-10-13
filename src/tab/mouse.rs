@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,9 +22,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::coordinator::TabCoordinator;
+use super::owner::CoordinatorSlot;
 
-static COORDINATOR_MOUSE_PTR: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+static MOUSE_SLOT: CoordinatorSlot = CoordinatorSlot::new();
 static LAST_LBUTTON_CLICK: Mutex<Option<(Instant, POINT)>> = Mutex::new(None);
+
+/// 卸载时等待在途回调退出的上限（超时则宁可泄漏也不 UAF）
+const UNLOAD_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct TabMouseGuard {
     hook: HHOOK,
@@ -34,8 +37,7 @@ pub struct TabMouseGuard {
 
 impl TabMouseGuard {
     pub fn new(coordinator: Arc<TabCoordinator>) -> Result<Self, String> {
-        let raw_ptr = Arc::into_raw(coordinator.clone()) as *mut core::ffi::c_void;
-        COORDINATOR_MOUSE_PTR.store(raw_ptr, Ordering::SeqCst);
+        MOUSE_SLOT.install(&coordinator);
 
         unsafe {
             let hook = SetWindowsHookExW(
@@ -64,11 +66,11 @@ impl Drop for TabMouseGuard {
                 let _ = UnhookWindowsHookEx(self.hook);
             }
         }
-        let ptr = COORDINATOR_MOUSE_PTR.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Arc::from_raw(ptr as *const TabCoordinator);
-            }
+        // 先摘指针再等在途回调归零，最后才释放唯一那份所有权（报告 R-04）
+        if !MOUSE_SLOT.release(UNLOAD_DRAIN_TIMEOUT) {
+            crate::dialog::detector::log_debug(
+                "TAB_MOUSE: 卸载时有回调仍在执行，已按安全优先故意保留引用",
+            );
         }
     }
 }
@@ -110,12 +112,9 @@ unsafe extern "system" fn mouse_ll_proc(code: i32, wparam: WPARAM, lparam: LPARA
             let root_wnd = unsafe { GetAncestor(target_wnd, GA_ROOT) };
 
             if TabCoordinator::is_explorer_window(root_wnd) {
-                let raw_ptr = COORDINATOR_MOUSE_PTR.load(Ordering::SeqCst);
-                if !raw_ptr.is_null() {
-                    let coordinator = unsafe { Arc::from_raw(raw_ptr as *const TabCoordinator) };
-                    let coordinator_clone = coordinator.clone();
-                    let _ = Arc::into_raw(coordinator); // 保持指针不被 drop
-
+                // 受控借用后提升为独立强引用：工作线程的存活不依赖静态指针
+                if let Some(coordinator) = MOUSE_SLOT.borrow() {
+                    let coordinator_clone = coordinator.to_owned();
                     let raw_root = root_wnd.0 as usize;
                     thread::spawn(move || {
                         let root_hwnd = HWND(raw_root as *mut _);

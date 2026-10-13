@@ -275,4 +275,33 @@ mod tests {
         assert_eq!(pick_tab_index_for_selection(&tabs, "", 0), None);
         assert_eq!(pick_tab_index_for_selection(&names(&["", ""]), "src", 0), None);
     }
+
+    /// P-02 架构不变式守卫：STA 线程（`tab/com.rs`）与 STA 链路（`managers/explorer.rs`）
+    /// 上**不得**出现 UIA 调用 —— UIA 一旦挂起会永久堵死整个 Shell COM 队列。
+    /// UIA 只能出现在各自的专用线程里（本文件 / `tab/uia.rs` / `win32/uia.rs`）。
+    #[test]
+    fn test_sta_worker_source_never_calls_uia() {
+        let sources = [
+            ("tab/com.rs", include_str!("com.rs")),
+            ("managers/explorer.rs", include_str!("../managers/explorer.rs")),
+        ];
+
+        for (name, source) in sources {
+            // 先剔除注释行，避免架构说明文字本身触发误报
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            for forbidden in ["IUIAutomation", "CUIAutomation", "Accessibility", "UIA_"] {
+                assert!(
+                    !code.contains(forbidden),
+                    "{} 属于 STA 链路，禁止使用 UIA（命中 `{}`）",
+                    name,
+                    forbidden
+                );
+            }
+        }
+    }
 }

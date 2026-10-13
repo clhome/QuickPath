@@ -98,8 +98,17 @@ fn clipboard_sequence_number() -> u32 {
 
 impl std::error::Error for ClipboardSafetyError {}
 
+/// 测试期强制「剪贴板被占用」注入（同进程内无法真实模拟跨进程独占）
+#[cfg(test)]
+static TEST_FORCE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// 带指数退避的剪贴板独占打开函数
 fn open_clipboard_with_retry(hwnd: Option<HWND>, max_retries: u32) -> bool {
+    #[cfg(test)]
+    if TEST_FORCE_BUSY.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+
     for i in 0..max_retries {
         unsafe {
             if OpenClipboard(hwnd).is_ok() {
@@ -407,42 +416,100 @@ impl ClipboardSnapshot {
     }
 }
 
+/// 单格式写回所需的底层句柄操作。
+///
+/// 生产环境为真实 Win32 调用；测试可替换其中任一项注入故障，
+/// 从而覆盖「分配失败 / 加锁失败 / 设置失败」三条分支的**句柄回收路径**
+///（报告 P0-01 明确要求补充这三类故障注入）。
+#[derive(Clone, Copy)]
+struct HandleOps {
+    alloc: fn(usize) -> Option<HGLOBAL>,
+    lock: fn(HGLOBAL) -> *mut u8,
+    unlock: fn(HGLOBAL),
+    free: fn(HGLOBAL),
+    set: fn(u32, HGLOBAL) -> bool,
+}
+
+const PROD_HANDLE_OPS: HandleOps = HandleOps {
+    alloc: prod_alloc,
+    lock: prod_lock,
+    unlock: prod_unlock,
+    free: prod_free,
+    set: prod_set,
+};
+
+fn prod_alloc(len: usize) -> Option<HGLOBAL> {
+    unsafe { GlobalAlloc(GMEM_MOVEABLE, len).ok() }
+}
+
+fn prod_lock(handle: HGLOBAL) -> *mut u8 {
+    unsafe { GlobalLock(handle) as *mut u8 }
+}
+
+fn prod_unlock(handle: HGLOBAL) {
+    unsafe {
+        let _ = GlobalUnlock(handle);
+    }
+}
+
+fn prod_free(handle: HGLOBAL) {
+    unsafe {
+        let _ = GlobalFree(Some(handle));
+    }
+}
+
+fn prod_set(format: u32, handle: HGLOBAL) -> bool {
+    unsafe { SetClipboardData(format, Some(HANDLE(handle.0))).is_ok() }
+}
+
 /// 将单格式数据写回剪贴板，全程检查句柄返回值。
 ///
 /// 剪贴板数据句柄的所有权只在 `SetClipboardData` 成功那一刻交接给系统；
 /// 此前任一环节失败都必须 `GlobalFree`，否则造成内存泄漏。
 fn write_clipboard_format(format: u32, data: &[u8]) -> bool {
+    #[cfg(test)]
+    if TEST_FAIL_FORMAT.load(std::sync::atomic::Ordering::SeqCst) == format {
+        // 端到端用例沿用的“该格式写回必失败”注入，等价于 SetClipboardData 失败
+        let ops = HandleOps {
+            set: |_, _| false,
+            ..PROD_HANDLE_OPS
+        };
+        return write_clipboard_format_with(format, data, &ops);
+    }
+
+    write_clipboard_format_with(format, data, &PROD_HANDLE_OPS)
+}
+
+fn write_clipboard_format_with(format: u32, data: &[u8], ops: &HandleOps) -> bool {
     if data.is_empty() {
+        // 空数据无内容可写（也就没有可交接的句柄）
         return true;
     }
 
-    #[cfg(test)]
-    if TEST_FAIL_FORMAT.load(std::sync::atomic::Ordering::SeqCst) == format {
+    let Some(handle) = (ops.alloc)(data.len()) else {
+        return false;
+    };
+    if handle.0.is_null() {
         return false;
     }
 
-    unsafe {
-        let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, data.len()) else {
-            return false;
-        };
-        if handle.0.is_null() {
-            return false;
-        }
-
-        let ptr = GlobalLock(handle);
-        if ptr.is_null() {
-            let _ = GlobalFree(Some(handle));
-            return false;
-        }
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
-        let _ = GlobalUnlock(handle);
-
-        if SetClipboardData(format, Some(HANDLE(handle.0))).is_err() {
-            let _ = GlobalFree(Some(handle));
-            return false;
-        }
-        true
+    let ptr = (ops.lock)(handle);
+    if ptr.is_null() {
+        // 加锁失败：句柄尚未交接给系统，必须自行释放
+        (ops.free)(handle);
+        return false;
     }
+    unsafe {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+    }
+    (ops.unlock)(handle);
+
+    if !(ops.set)(format, handle) {
+        // 设置失败：句柄所有权同样尚未交接，必须自行释放
+        (ops.free)(handle);
+        return false;
+    }
+    true
 }
 
 /// RAII 守卫：确保离开作用域时无论如何自动执行剪贴板还原
@@ -524,6 +591,14 @@ fn set_raw_clipboard_text(text: &str) -> bool {
     set_raw_clipboard_text_tracked(text).is_some()
 }
 
+/// 清空剪贴板文本内容。
+///
+/// 供第三方文件管理器探测使用：每次探测前先清空，
+/// 避免“对端超时/未响应”时把上一次的陈旧路径当成本次结果读回来。
+pub fn clear_clipboard_text() -> bool {
+    set_raw_clipboard_text("")
+}
+
 /// 安全地在受保护的环境下临时使用剪贴板注入文本：
 /// 1. 尝试完整快照当前剪贴板（含文件列表 CF_HDROP、位图、文本等）；
 /// 2. 若快照失败（被占/不可保真），直接返回 Err，绝不修改剪贴板；
@@ -599,9 +674,16 @@ mod tests {
 
     static CLIP_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// 串行化剪贴板用例。即使某个用例 panic，也不要因为锁中毒而掩盖其他用例的真实结果。
+    fn clip_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        CLIP_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_clipboard_safety_temporary_text_and_restore() {
-        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        let _guard = clip_test_lock();
         let initial_text = get_clipboard_text().unwrap_or_else(|| "initial_qp_test_data".to_string());
         let _ = set_raw_clipboard_text(&initial_text);
 
@@ -619,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_clipboard_safety_bitmap_dib_preservation() {
-        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        let _guard = clip_test_lock();
         // 构造合法的最简 1x1 24-bit DIB 内存块
         let mut dib_data = [0u8; 40 + 4];
         dib_data[0..4].copy_from_slice(&40u32.to_le_bytes()); // biSize = 40
@@ -688,6 +770,22 @@ mod tests {
         }
     }
 
+    /// 测试期「剪贴板被占用」故障注入（同进程内无法真实模拟跨进程独占）
+    struct BusyInjection;
+
+    impl BusyInjection {
+        fn enable() -> Self {
+            TEST_FORCE_BUSY.store(true, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for BusyInjection {
+        fn drop(&mut self) {
+            TEST_FORCE_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     impl Drop for FailInjection {
         fn drop(&mut self) {
             TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
@@ -723,7 +821,7 @@ mod tests {
     /// 清除故障后重试必须能补齐（只补写失败格式，不重复清空已恢复内容）。
     #[test]
     fn test_restore_partial_failure_is_reported_and_retryable() {
-        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        let _guard = clip_test_lock();
         seed_dib_clipboard();
 
         let mut snap = ClipboardSnapshot::capture().expect("含 DIB 的剪贴板必须可被安全捕获");
@@ -760,7 +858,7 @@ mod tests {
     /// P0-01：写入临时内容后若第三方（用户）已复制新内容，恢复必须主动放弃覆盖
     #[test]
     fn test_restore_refuses_to_overwrite_newer_user_content() {
-        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        let _guard = clip_test_lock();
         assert!(set_raw_clipboard_text("qp_snapshot_seed"));
 
         let mut snap = ClipboardSnapshot::capture().expect("文本剪贴板必须可被安全捕获");
@@ -788,7 +886,7 @@ mod tests {
     /// P0-01：`with_temporary_clipboard_text` 必须把恢复失败向上传播，而不是静默返回 Ok
     #[test]
     fn test_temporary_clipboard_text_propagates_restore_failure() {
-        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        let _guard = clip_test_lock();
         assert!(set_raw_clipboard_text("qp_propagate_seed"));
 
         let _inject = FailInjection::enable(CF_UNICODETEXT);
@@ -810,6 +908,173 @@ mod tests {
 
         drop(_inject);
         let _ = set_raw_clipboard_text("qp_propagate_seed");
+    }
+
+    /// P0-01：分配失败 / 加锁失败 / 设置失败三条分支的回退行为与句柄回收
+    #[test]
+    fn test_single_format_failure_paths_release_handle() {
+        let _guard = clip_test_lock();
+        static FREE_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+        fn counting_free(_handle: HGLOBAL) {
+            FREE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let data = b"quickpath-fault-injection-probe";
+
+        // 1) 分配失败：无句柄可回收，必须直接返回失败
+        let alloc_fail = HandleOps {
+            alloc: |_| None,
+            free: counting_free,
+            ..PROD_HANDLE_OPS
+        };
+        FREE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(!write_clipboard_format_with(CF_DIB, data, &alloc_fail));
+        assert_eq!(FREE_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // 2) 加锁失败：已分配成功，必须回收句柄（否则泄漏）
+        let lock_fail = HandleOps {
+            lock: |_| std::ptr::null_mut(),
+            free: counting_free,
+            ..PROD_HANDLE_OPS
+        };
+        FREE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(!write_clipboard_format_with(CF_DIB, data, &lock_fail));
+        assert_eq!(
+            FREE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "加锁失败必须释放句柄"
+        );
+
+        // 3) 设置失败：拷贝已完成，但所有权未交接，必须回收句柄
+        let set_fail = HandleOps {
+            set: |_, _| false,
+            free: counting_free,
+            ..PROD_HANDLE_OPS
+        };
+        FREE_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(!write_clipboard_format_with(CF_DIB, data, &set_fail));
+        assert_eq!(
+            FREE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "设置失败必须释放句柄"
+        );
+
+        // 空数据：无可交接内容，视为成功且不分配句柄
+        assert!(write_clipboard_format_with(CF_DIB, &[], &alloc_fail));
+    }
+
+    /// 写入一个 CF_HDROP（文件列表）数据块（DROPFILES + 宽字符双 NUL 结尾文件名表）
+    fn hdrop_blob(files: &[&str]) -> Vec<u8> {
+        let mut blob = vec![0u8; 20];
+        blob[0..4].copy_from_slice(&20u32.to_le_bytes()); // pFiles 偏移
+        blob[16..20].copy_from_slice(&1i32.to_le_bytes()); // fWide = TRUE
+        for file in files {
+            for unit in file.encode_utf16() {
+                blob.extend_from_slice(&unit.to_le_bytes());
+            }
+            blob.extend_from_slice(&0u16.to_le_bytes());
+        }
+        blob.extend_from_slice(&0u16.to_le_bytes());
+        blob
+    }
+
+    /// 用指定字节块占用多个剪贴板格式，并顺带写入一段 Unicode 文本
+    fn seed_clipboard_formats(entries: &[(u32, &[u8])]) {
+        assert!(open_clipboard_with_retry(None, 10), "测试必须能打开剪贴板");
+        unsafe {
+            let _ = EmptyClipboard();
+            for (format, bytes) in entries {
+                let handle = prod_alloc(bytes.len()).expect("分配必须成功");
+                let ptr = prod_lock(handle);
+                assert!(!ptr.is_null());
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                prod_unlock(handle);
+                assert!(prod_set(*format, handle), "格式 {} 必须写回成功", format);
+            }
+            let wide: Vec<u16> = "qp_multiformat_seed".encode_utf16().chain(Some(0)).collect();
+            let bytes = wide.len() * 2;
+            let handle = prod_alloc(bytes).expect("分配必须成功");
+            let ptr = prod_lock(handle);
+            std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr, bytes);
+            prod_unlock(handle);
+            assert!(prod_set(CF_UNICODETEXT, handle));
+            let _ = CloseClipboard();
+        }
+    }
+
+    /// 恢复后重新捕获，断言原快照的每个格式字节完全一致
+    fn assert_snapshot_roundtrip(original: &ClipboardSnapshot, label: &str) {
+        let after = ClipboardSnapshot::capture()
+            .unwrap_or_else(|err| panic!("{}: 恢复后应能再次安全捕获: {:?}", label, err));
+        for (format, data) in &original.items {
+            let got = after.items.iter().find(|(f, _)| f == format).map(|(_, d)| d);
+            assert_eq!(got, Some(data), "{}: 格式 {} 必须在恢复后字节完全一致", label, format);
+        }
+    }
+
+    /// P0-01：文件列表（CF_HDROP）+ 注册格式 + Unicode 文本混合剪贴板必须完整往返
+    #[test]
+    fn test_hdrop_and_registered_format_survive_temporary_text_injection() {
+        let _guard = clip_test_lock();
+
+        let hdrop = hdrop_blob(&[r"C:\QuickPath\a.txt", r"D:\QuickPath\b.txt"]);
+        let registered = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(
+                windows::core::w!("QuickPathProbeFormat"),
+            )
+        };
+        assert!(registered != 0, "注册剪贴板格式必须成功");
+        let registered_bytes = b"quickpath-registered-format-probe".to_vec();
+
+        seed_clipboard_formats(&[(CF_HDROP, &hdrop), (registered, &registered_bytes)]);
+
+        let before = ClipboardSnapshot::capture()
+            .expect("含 CF_HDROP 与注册格式的剪贴板必须可安全捕获");
+        assert!(before.items.iter().any(|(f, _)| *f == CF_HDROP), "快照必须含 CF_HDROP");
+        assert!(
+            before.items.iter().any(|(f, _)| *f == registered),
+            "快照必须含注册格式"
+        );
+
+        with_temporary_clipboard_text("C:\\TemporaryInjection", || {
+            assert_eq!(
+                get_clipboard_text().as_deref(),
+                Some("C:\\TemporaryInjection"),
+                "闭包内部应为临时注入文本"
+            );
+        })
+        .expect("临时注入与恢复必须成功");
+
+        assert_snapshot_roundtrip(&before, "CF_HDROP+注册格式+文本");
+    }
+
+    /// P0-01：剪贴板被其他进程/线程独占时，捕获/恢复必须返回结构化 Busy，且绝不置 restored
+    #[test]
+    fn test_clipboard_busy_is_reported_and_never_claims_success() {
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_busy_seed"));
+
+        let mut snap = ClipboardSnapshot::capture().expect("空闲时必须可捕获");
+
+        {
+            let _busy = BusyInjection::enable();
+            assert_eq!(
+                ClipboardSnapshot::capture().err(),
+                Some(ClipboardSafetyError::Busy),
+                "被占用时捕获必须报 Busy"
+            );
+            assert_eq!(
+                snap.restore(),
+                Err(ClipboardRestoreError::Busy),
+                "被占用时恢复必须报 Busy，绝不得报告成功"
+            );
+            assert!(!snap.restored, "被占用时绝不能标记为已恢复");
+        }
+
+        // 占用解除后必须能正常完成恢复
+        assert_eq!(snap.restore(), Ok(RestoreStatus::Restored));
+        let _ = set_raw_clipboard_text("qp_busy_seed");
     }
 }
 

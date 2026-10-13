@@ -119,47 +119,32 @@ impl WindowTracker {
             }
         }
 
-        // 2. Directory Opus
-        if config.enable_dopus {
-            for f in get_dopus_folders() {
-                let norm = normalize_path(&f.path);
-                if seen.insert(norm.to_lowercase()) {
-                    list.push(FolderCandidate {
-                        path: norm,
-                        title: f.title,
-                        source: "Directory Opus".to_string(),
-                        is_active: f.is_active,
-                    });
-                }
-            }
-        }
+        // 2~4. Directory Opus / Total Commander / XYplorer：
+        // 跨进程扫描移到后台 worker（有界 IPC + 失败冷却 + 结果缓存），
+        // 宿主消息线程只做“有预算的等待”：正常情况拿到最新结果，
+        // 管理器挂起时最多等一个预算就用缓存继续（报告 P-03）。
+        if config.enable_dopus || config.enable_totalcmd || config.enable_xyplorer {
+            let budget = if super::scanner::has_cached_result() {
+                super::scanner::DEFAULT_BUDGET
+            } else {
+                super::scanner::FIRST_SCAN_BUDGET
+            };
 
-        // 3. Total Commander
-        if config.enable_totalcmd {
-            for f in get_totalcmd_folders() {
-                let norm = normalize_path(&f.path);
-                if seen.insert(norm.to_lowercase()) {
-                    list.push(FolderCandidate {
-                        path: norm,
-                        title: f.title,
-                        source: "Total Commander".to_string(),
-                        is_active: f.is_active,
-                    });
-                }
-            }
-        }
-
-        // 4. XYplorer
-        if config.enable_xyplorer {
-            for f in get_xyplorer_folders() {
-                let norm = normalize_path(&f.path);
-                if seen.insert(norm.to_lowercase()) {
-                    list.push(FolderCandidate {
-                        path: norm,
-                        title: f.title,
-                        source: "XYplorer".to_string(),
-                        is_active: f.is_active,
-                    });
+            for candidate in super::scanner::scan_within(
+                config.enable_dopus,
+                config.enable_totalcmd,
+                config.enable_xyplorer,
+                budget,
+            ) {
+                // 缓存可能来自上一次扫描：当前配置已关闭的管理器一律不再展示
+                let enabled = match candidate.source.as_str() {
+                    "Directory Opus" => config.enable_dopus,
+                    "Total Commander" => config.enable_totalcmd,
+                    "XYplorer" => config.enable_xyplorer,
+                    _ => true,
+                };
+                if enabled && seen.insert(candidate.path.to_lowercase()) {
+                    list.push(candidate);
                 }
             }
         }
@@ -249,7 +234,15 @@ pub fn is_file_manager_class(class_name: &str) -> bool {
     )
 }
 
+/// 实时扫描当前活跃的第三方/资源管理器目录（需要“新鲜度”，故保持同步但全程有界）。
+///
+/// **全局预算**：三个管理器共享 `SCAN_BUDGET`，
+/// 避免“多个管理器同时挂起时把等待时间串行叠加成秒级”的主线程卡顿。
 fn get_current_active_folder(config: &AppConfig) -> Option<String> {
+    const SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(900);
+    let started = Instant::now();
+    let over_budget = |started: &Instant| started.elapsed() > SCAN_BUDGET;
+
     // 遍历顺序：DOpus -> TotalCmd -> XYplorer -> 资源管理器
     if config.enable_dopus {
         for f in get_dopus_folders() {
@@ -259,7 +252,7 @@ fn get_current_active_folder(config: &AppConfig) -> Option<String> {
         }
     }
 
-    if config.enable_totalcmd {
+    if config.enable_totalcmd && !over_budget(&started) {
         for f in get_totalcmd_folders() {
             if f.is_active && is_fast_valid_folder(&f.path) {
                 return Some(normalize_path(&f.path));
@@ -267,7 +260,7 @@ fn get_current_active_folder(config: &AppConfig) -> Option<String> {
         }
     }
 
-    if config.enable_xyplorer {
+    if config.enable_xyplorer && !over_budget(&started) {
         for f in get_xyplorer_folders() {
             if f.is_active && is_fast_valid_folder(&f.path) {
                 return Some(normalize_path(&f.path));
@@ -311,7 +304,8 @@ pub fn is_fast_valid_folder(path: &str) -> bool {
     Path::new(trimmed).is_dir()
 }
 
-fn normalize_path(path: &str) -> String {
+/// 路径归一化：scanner 模块（同属 managers）也要复用同一套规则，避免两处实现漂移
+pub(super) fn normalize_path(path: &str) -> String {
     let mut p = path.trim().replace('/', "\\");
     while p.ends_with('\\') && p.len() > 3 {
         p.pop();

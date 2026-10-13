@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
@@ -12,14 +13,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::coordinator::TabCoordinator;
+use super::owner::CoordinatorSlot;
 
 /// 自定义消息：Win+E 已被钩子拦截，请宿主窗口消息线程接管
 ///（新建标签页；失败时补偿打开原生资源管理器窗口）
 pub const WM_QUICKPATH_WINE_TO_TAB: u32 = 0x0400 + 104;
 
-static COORDINATOR_KEYBOARD_PTR: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+static COORDINATOR_SLOT: CoordinatorSlot = CoordinatorSlot::new();
 /// 宿主导出窗口句柄：钩子只向它投递消息，自身不做任何重活
 static NOTIFY_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// 卸载时等待在途回调退出的上限（超时则宁可泄漏也不 UAF，见 `CoordinatorSlot::release`）
+const UNLOAD_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct TabKeyboardGuard {
     hook: HHOOK,
@@ -28,8 +33,7 @@ pub struct TabKeyboardGuard {
 
 impl TabKeyboardGuard {
     pub fn new(coordinator: Arc<TabCoordinator>, notify_hwnd: HWND) -> Result<Self, String> {
-        let raw_ptr = Arc::into_raw(coordinator.clone()) as *mut core::ffi::c_void;
-        COORDINATOR_KEYBOARD_PTR.store(raw_ptr, Ordering::SeqCst);
+        COORDINATOR_SLOT.install(&coordinator);
         NOTIFY_HWND.store(notify_hwnd.0 as *mut _, Ordering::SeqCst);
 
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_proc), None, 0) };
@@ -52,12 +56,11 @@ impl TabKeyboardGuard {
 
     /// 安装失败时归还静态引用，避免句柄未建立却泄漏一个强引用
     fn release_static_refs() {
-        let ptr = COORDINATOR_KEYBOARD_PTR.swap(std::ptr::null_mut(), Ordering::SeqCst);
         let _ = NOTIFY_HWND.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Arc::from_raw(ptr as *const TabCoordinator);
-            }
+        if !COORDINATOR_SLOT.release(UNLOAD_DRAIN_TIMEOUT) {
+            crate::dialog::detector::log_debug(
+                "TAB_KEYBOARD: 卸载时有回调仍在执行，已按安全优先故意保留引用",
+            );
         }
     }
 }
@@ -84,12 +87,8 @@ unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LP
         && (wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize)
         && unsafe { keyboard_ll_should_swallow(lparam) }
     {
-        let raw_ptr = COORDINATOR_KEYBOARD_PTR.load(Ordering::SeqCst);
-        if !raw_ptr.is_null() {
-            // 受控引用计数：只借用一份强引用（绝不接管静态指针的所有权），
-            // 离开作用域即归还，避免在钩子回调里做任何所有权交接。
-            unsafe { Arc::increment_strong_count(raw_ptr as *const TabCoordinator) };
-            let coordinator = unsafe { Arc::from_raw(raw_ptr as *const TabCoordinator) };
+        // 受控借用：只借一份强引用，绝不接管静态指针的所有权（报告 R-04）
+        if let Some(coordinator) = COORDINATOR_SLOT.borrow() {
             let cfg = coordinator.get_config();
 
             let notify_raw = NOTIFY_HWND.load(Ordering::SeqCst);

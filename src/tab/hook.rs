@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -9,8 +9,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::coordinator::TabCoordinator;
+use super::owner::CoordinatorSlot;
 
-static COORDINATOR_PTR: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+static HOOK_SLOT: CoordinatorSlot = CoordinatorSlot::new();
+
+/// 卸载时等待在途回调退出的上限（超时则宁可泄漏也不 UAF）
+const UNLOAD_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct TabHookGuard {
     hook: HWINEVENTHOOK,
@@ -19,8 +23,7 @@ pub struct TabHookGuard {
 
 impl TabHookGuard {
     pub fn new(coordinator: Arc<TabCoordinator>) -> Result<Self, String> {
-        let raw_ptr = Arc::into_raw(coordinator.clone()) as *mut core::ffi::c_void;
-        COORDINATOR_PTR.store(raw_ptr, Ordering::SeqCst);
+        HOOK_SLOT.install(&coordinator);
 
         unsafe {
             // 同时监听 EVENT_OBJECT_CREATE 至 EVENT_OBJECT_SHOW，确保外部新窗口 100% 捕获
@@ -53,11 +56,11 @@ impl Drop for TabHookGuard {
                 let _ = UnhookWinEvent(self.hook);
             }
         }
-        let ptr = COORDINATOR_PTR.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Arc::from_raw(ptr as *const TabCoordinator);
-            }
+        // 先摘指针再等在途回调归零，最后才释放唯一那份所有权（报告 R-04）
+        if !HOOK_SLOT.release(UNLOAD_DRAIN_TIMEOUT) {
+            crate::dialog::detector::log_debug(
+                "TAB_HOOK: 卸载时有回调仍在执行，已按安全优先故意保留引用",
+            );
         }
     }
 }
@@ -75,12 +78,10 @@ unsafe extern "system" fn win_event_proc(
         return;
     }
 
-    let raw_ptr = COORDINATOR_PTR.load(Ordering::SeqCst);
-    if raw_ptr.is_null() {
+    // 受控借用（报告 R-04）：槽位已卸载则直接返回，绝不触碰已释放的指针
+    let Some(coordinator) = HOOK_SLOT.borrow() else {
         return;
-    }
-
-    let coordinator = unsafe { &*(raw_ptr as *const TabCoordinator) };
+    };
 
     match event {
         EVENT_OBJECT_CREATE | EVENT_OBJECT_SHOW => {

@@ -1,14 +1,15 @@
 #![allow(dead_code)]
 
 use std::fs;
-use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+use super::ipc::{self, Manager};
+
+/// dopus.lister 窗口必须属于以下进程镜像之一，否则视为同类名伪装窗口，不发送协议消息
+const EXPECTED_PROCESS_NAMES: [&str; 1] = ["dopus.exe"];
 
 #[derive(Debug, Clone)]
 pub struct DopusFolder {
@@ -22,6 +23,11 @@ pub struct DopusFolder {
 pub fn get_dopus_folders() -> Vec<DopusFolder> {
     let mut results = Vec::new();
 
+    // 冷却窗口内不重试（上次超时/失败后避免每次前台切换都白等一个超时）
+    if !ipc::try_enter(Manager::Dopus) {
+        return results;
+    }
+
     let class_name: Vec<u16> = "dopus.lister".encode_utf16().chain(Some(0)).collect();
     let class_pcwstr = PCWSTR(class_name.as_ptr());
 
@@ -31,23 +37,46 @@ pub fn get_dopus_folders() -> Vec<DopusFolder> {
             return results;
         }
 
+        // 进程镜像核对：只对真正的 dopus.exe 窗口发送协议消息
+        if !ipc::window_process_matches(hwnd, &EXPECTED_PROCESS_NAMES) {
+            crate::dialog::detector::log_debug(
+                "IPC: 命中 dopus.lister 类名但进程镜像不符，已跳过（疑似伪装窗口）",
+            );
+            ipc::report_failure(Manager::Dopus);
+            return results;
+        }
+
         let temp_dir = std::env::temp_dir();
         let info_file = temp_dir.join("quickpath_dopus.xml");
 
-        // 尝试找到 dopusrt.exe
-        if let Some(dopusrt) = find_dopusrt() {
-            let info_arg = format!("\"{}\",paths", info_file.display());
-            let _ = Command::new(&dopusrt)
-                .args(["/info", &info_arg])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
+        // 尝试找到 dopusrt.exe（可信绝对路径）
+        let Some(dopusrt) = find_dopusrt() else {
+            ipc::report_failure(Manager::Dopus);
+            return results;
+        };
 
-            if info_file.exists() {
-                if let Ok(content) = fs::read_to_string(&info_file) {
-                    parse_dopus_xml(&content, hwnd, &mut results);
-                }
-                let _ = fs::remove_file(&info_file);
+        let info_arg = format!("\"{}\",paths", info_file.display());
+        // 有界执行：dopusrt 卡住时直接 kill，绝不无限等待
+        if !ipc::run_bounded(&dopusrt, &["/info".to_string(), info_arg]) {
+            crate::dialog::detector::log_debug("IPC: dopusrt.exe 超时或被终止，进入冷却");
+            ipc::report_failure(Manager::Dopus);
+            let _ = fs::remove_file(&info_file);
+            return results;
+        }
+
+        let mut parsed = false;
+        if info_file.exists() {
+            if let Ok(content) = fs::read_to_string(&info_file) {
+                parse_dopus_xml(&content, hwnd, &mut results);
+                parsed = true;
             }
+            let _ = fs::remove_file(&info_file);
+        }
+
+        if parsed {
+            ipc::report_success(Manager::Dopus);
+        } else {
+            ipc::report_failure(Manager::Dopus);
         }
     }
 
@@ -141,7 +170,7 @@ fn parse_dopus_xml(xml: &str, hwnd: HWND, results: &mut Vec<DopusFolder>) {
                 if let Some(end) = line.rfind("</path>") {
                     if start + 1 < end {
                         let path_str = line[start + 1..end].trim();
-                        if !path_str.is_empty() && Path::new(path_str).is_dir() {
+                        if !path_str.is_empty() && std::path::Path::new(path_str).is_dir() {
                             results.push(DopusFolder {
                                 path: path_str.to_string(),
                                 title: if is_active {

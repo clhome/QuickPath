@@ -1,13 +1,16 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use std::sync::mpsc::{channel, Sender};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::Mutex;
+use std::collections::VecDeque;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::core::{Interface, BSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
     COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
 use windows::Win32::System::Variant::VARIANT;
@@ -92,95 +95,275 @@ impl ComRequest {
     }
 }
 
-/// STA 线程上的 Shell COM 管理器
-pub struct ShellComManager {
+/// STA worker 句柄：每个 worker 独占一条请求队列与一个 STA 线程
+struct StaWorker {
     tx: Sender<ComRequest>,
+    generation: u64,
+}
+
+/// 连续超时阈值：达到即认定该 STA worker 已卡死并重建
+const MAX_CONSECUTIVE_TIMEOUTS: u64 = 2;
+/// 耗时样本环大小
+const LATENCY_SAMPLES: usize = 256;
+/// 每处理多少次请求输出一次埋点汇总
+const STATS_LOG_EVERY: u64 = 500;
+
+/// STA 队列埋点快照（P50/P95/P99、队列深度、超时率、重建次数）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ComStatsSnapshot {
+    pub requests: u64,
+    pub timeouts: u64,
+    pub worker_rebuilds: u64,
+    pub queue_depth: u64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+}
+
+impl ComStatsSnapshot {
+    pub fn timeout_rate(&self) -> f64 {
+        if self.requests == 0 {
+            0.0
+        } else {
+            self.timeouts as f64 / self.requests as f64
+        }
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "req={} timeout={} ({:.2}%) rebuild={} depth={} p50={:.1}ms p95={:.1}ms p99={:.1}ms",
+            self.requests,
+            self.timeouts,
+            self.timeout_rate() * 100.0,
+            self.worker_rebuilds,
+            self.queue_depth,
+            self.p50_ms,
+            self.p95_ms,
+            self.p99_ms
+        )
+    }
+}
+
+#[derive(Default)]
+struct ComStats {
+    requests: AtomicU64,
+    timeouts: AtomicU64,
+    consecutive_timeouts: AtomicU64,
+    worker_rebuilds: AtomicU64,
+    queue_depth: AtomicU64,
+    latencies_us: Mutex<VecDeque<u64>>,
+}
+
+impl ComStats {
+    fn record_request(&self) {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// 记录一次成功：重置连续超时计数，采样耗时，并按节奏输出埋点
+    fn record_success(&self, elapsed: Duration) {
+        self.consecutive_timeouts.store(0, Ordering::SeqCst);
+        {
+            let mut samples = self
+                .latencies_us
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if samples.len() >= LATENCY_SAMPLES {
+                samples.pop_front();
+            }
+            samples.push_back(elapsed.as_micros() as u64);
+        }
+
+        let requests = self.requests.load(Ordering::SeqCst);
+        if requests != 0 && requests.is_multiple_of(STATS_LOG_EVERY) {
+            crate::dialog::detector::log_debug(&format!(
+                "COM_STATS: {}",
+                self.snapshot().describe()
+            ));
+        }
+    }
+
+    /// 记录一次超时，返回当前连续超时次数
+    fn record_timeout(&self) -> u64 {
+        self.timeouts.fetch_add(1, Ordering::SeqCst);
+        self.consecutive_timeouts.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn snapshot(&self) -> ComStatsSnapshot {
+        let mut samples: Vec<u64> = self
+            .latencies_us
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .copied()
+            .collect();
+        samples.sort_unstable();
+
+        ComStatsSnapshot {
+            requests: self.requests.load(Ordering::SeqCst),
+            timeouts: self.timeouts.load(Ordering::SeqCst),
+            worker_rebuilds: self.worker_rebuilds.load(Ordering::SeqCst),
+            queue_depth: self.queue_depth.load(Ordering::SeqCst),
+            p50_ms: percentile_ms(&samples, 50.0),
+            p95_ms: percentile_ms(&samples, 95.0),
+            p99_ms: percentile_ms(&samples, 99.0),
+        }
+    }
+}
+
+fn percentile_ms(sorted_us: &[u64], percentile: f64) -> f64 {
+    if sorted_us.is_empty() {
+        return 0.0;
+    }
+    let rank = ((percentile / 100.0) * (sorted_us.len() as f64 - 1.0)).round() as usize;
+    sorted_us[rank.min(sorted_us.len() - 1)] as f64 / 1000.0
+}
+
+/// STA 线程上的 Shell COM 管理器。
+///
+/// **架构不变式**：Shell COM 请求全部在单独的 STA 线程上串行执行；
+/// UIA 调用（`tab::select` / `tab::uia` / `win32::uia`）一律在各自的专用线程里发起，
+/// **绝不允许在 STA 线程内调用 UIA** —— UIA 一旦挂起会永久堵死整个 COM 队列。
+///
+/// 审计报告 P-02：`deadline` 只能丢弃“尚未开始”的请求，无法中断已经开始的 COM 调用
+/// （`IShellWindows` 枚举没有可取消版本）。因此这里补上 **circuit breaker**：
+/// 连续多次超时即判定该 worker 已卡死，**放弃该 worker 的结果并重建新 worker**，
+/// 让后续请求立即回到可用队列，而不是一起饿死。被放弃的线程会在当前调用返回后
+/// 因通道断开而自行退出；若永远不返回，则线程泄漏（宁可泄漏一个 worker，也不永久饿死）。
+pub struct ShellComManager {
+    worker: Mutex<StaWorker>,
+    stats: ComStats,
 }
 
 impl ShellComManager {
     pub fn new() -> Self {
-        let (tx, rx) = channel::<ComRequest>();
+        Self {
+            worker: Mutex::new(spawn_sta_worker(1)),
+            stats: ComStats::default(),
+        }
+    }
 
-        thread::Builder::new()
-            .name("QuickPath-ShellComSTA".to_string())
-            .spawn(move || {
-                unsafe {
-                    let _ = CoInitializeEx(
-                        None,
-                        COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
-                    );
+    #[cfg(test)]
+    fn new_with_worker(worker: StaWorker) -> Self {
+        Self {
+            worker: Mutex::new(worker),
+            stats: ComStats::default(),
+        }
+    }
+
+    /// STA 队列埋点快照（P50/P95/P99、队列深度、超时率、重建次数）
+    pub fn stats(&self) -> ComStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    fn worker_sender(&self) -> Sender<ComRequest> {
+        self.worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .tx
+            .clone()
+    }
+
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .generation
+    }
+
+    /// 放弃当前 worker，换一个全新 STA 线程继续服务
+    fn rebuild_worker(&self) -> Sender<ComRequest> {
+        let mut guard = self
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let generation = guard.generation + 1;
+        let fresh = spawn_sta_worker(generation);
+        // 丢弃旧 Sender：卡死的 worker 在下次通道轮询时会发现断开而退出
+        let _old = std::mem::replace(&mut *guard, fresh);
+        drop(_old);
+
+        self.stats.worker_rebuilds.fetch_add(1, Ordering::SeqCst);
+        self.stats.consecutive_timeouts.store(0, Ordering::SeqCst);
+        crate::dialog::detector::log_debug(&format!(
+            "COM_CIRCUIT_BREAKER: 连续超时 {} 次，已重建 STA worker (gen={}) | {}",
+            MAX_CONSECUTIVE_TIMEOUTS,
+            generation,
+            self.stats.snapshot().describe()
+        ));
+        guard.tx.clone()
+    }
+
+    /// 统一的请求投递：负责埋点、超时计数、circuit breaker 与一次性重试
+    fn dispatch<T>(&self, make: impl Fn(Sender<T>) -> ComRequest, timeout: Duration) -> Option<T> {
+        let (reply_tx, reply_rx) = channel::<T>();
+        let mut sender = self.worker_sender();
+        self.stats.record_request();
+
+        for attempt in 0..2 {
+            self.stats.queue_depth.fetch_add(1, Ordering::SeqCst);
+            let request = make(reply_tx.clone());
+            let started = Instant::now();
+            let delivered = sender.send(request).is_ok();
+            let reply = if delivered {
+                reply_rx.recv_timeout(timeout)
+            } else {
+                Err(RecvTimeoutError::Disconnected)
+            };
+            self.stats.queue_depth.fetch_sub(1, Ordering::SeqCst);
+
+            match reply {
+                Ok(value) => {
+                    self.stats.record_success(started.elapsed());
+                    return Some(value);
                 }
-
-                while let Ok(req) = rx.recv() {
-                    // 若调用方已超时放弃该请求，直接丢弃，不执行耗时 COM 操作，彻底杜绝队列积压
-                    if std::time::Instant::now() > req.deadline() {
+                Err(RecvTimeoutError::Timeout) => {
+                    // 超时可能是“这次真的很慢”，也可能是 worker 已卡死：交给 circuit breaker 判定
+                    let consecutive = self.stats.record_timeout();
+                    if consecutive >= MAX_CONSECUTIVE_TIMEOUTS {
+                        let _ = self.rebuild_worker();
+                    }
+                    return None;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    // worker 线程已消失（panic / 通道断开）：重建后重试一次
+                    if attempt == 0 {
+                        sender = self.rebuild_worker();
                         continue;
                     }
-
-                    match req {
-                        ComRequest::GetAllTabs { reply, .. } => {
-                            let tabs = enumerate_shell_tabs();
-                            let _ = reply.send(tabs);
-                        }
-                        ComRequest::GetActiveTabPath { target_hwnd_raw, reply, .. } => {
-                            let hwnd_opt = target_hwnd_raw.map(|raw| HWND(raw as *mut _));
-                            let path = get_active_tab_path_internal(hwnd_opt);
-                            let _ = reply.send(path);
-                        }
-                        ComRequest::Navigate { hwnd_raw, target_path, reply, .. } => {
-                            let hwnd = HWND(hwnd_raw as *mut _);
-                            let ok = navigate_internal(hwnd, &target_path);
-                            let _ = reply.send(ok);
-                        }
-                        ComRequest::NavigateLatest { hwnd_raw, target_path, reply, .. } => {
-                            let hwnd = HWND(hwnd_raw as *mut _);
-                            let ok = navigate_latest_internal(hwnd, &target_path);
-                            let _ = reply.send(ok);
-                        }
-                        ComRequest::GetWindowTargetInfo { target_hwnd_raw, reply, .. } => {
-                            let hwnd = HWND(target_hwnd_raw as *mut _);
-                            let info = get_window_target_info_internal(hwnd);
-                            let _ = reply.send(info);
-                        }
-                        ComRequest::TryNavigateNewTab { host_hwnd_raw, count_before, target_path, reply, .. } => {
-                            let hwnd = HWND(host_hwnd_raw as *mut _);
-                            let ok = try_navigate_new_tab_internal(hwnd, count_before, &target_path);
-                            let _ = reply.send(ok);
-                        }
-                        ComRequest::FindTabIndexByPath { host_hwnd_raw, target_path, reply, .. } => {
-                            let hwnd = HWND(host_hwnd_raw as *mut _);
-                            let idx = find_tab_index_by_path_internal(hwnd, &target_path);
-                            let _ = reply.send(idx);
-                        }
-                    }
+                    return None;
                 }
-            })
-            .expect("创建 ShellComManager STA 线程失败");
-
-        Self { tx }
+            }
+        }
+        None
     }
 
     /// 获取所有打开且可见有效的资源管理器 Tab（带 150ms 超时）
     pub fn get_all_tabs(&self) -> Vec<ShellTabInfo> {
         let timeout = Duration::from_millis(150);
-        let deadline = std::time::Instant::now() + timeout;
-        let (reply_tx, reply_rx) = channel();
-        if self.tx.send(ComRequest::GetAllTabs { reply: reply_tx, deadline }).is_err() {
-            return Vec::new();
-        }
-        reply_rx.recv_timeout(timeout).unwrap_or_default()
+        self.dispatch(
+            |reply| ComRequest::GetAllTabs {
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        )
+        .unwrap_or_default()
     }
 
     /// 获取活动 Tab 路径（带 150ms 超时）
     pub fn get_active_tab_path(&self, target_hwnd: Option<HWND>) -> Option<String> {
         let timeout = Duration::from_millis(150);
-        let deadline = std::time::Instant::now() + timeout;
-        let (reply_tx, reply_rx) = channel();
         let target_hwnd_raw = target_hwnd.map(|h| h.0 as usize);
-        if self.tx.send(ComRequest::GetActiveTabPath { target_hwnd_raw, reply: reply_tx, deadline }).is_err() {
-            return None;
-        }
-        reply_rx.recv_timeout(timeout).ok().flatten()
+        self.dispatch(
+            |reply| ComRequest::GetActiveTabPath {
+                target_hwnd_raw,
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        )
+        .flatten()
     }
 
     /// 在指定宿主窗口内查找目标路径对应的已有 Tab 索引（0-based，带 250ms 超时）
@@ -190,20 +373,18 @@ impl ShellComManager {
     /// 因此这里做有限次重试。
     pub fn find_tab_index_by_path(&self, host_hwnd: HWND, target_path: &str) -> Option<usize> {
         const ATTEMPTS: usize = 3;
+        let host_hwnd_raw = host_hwnd.0 as usize;
         for attempt in 0..ATTEMPTS {
             let timeout = Duration::from_millis(250);
-            let deadline = std::time::Instant::now() + timeout;
-            let (reply_tx, reply_rx) = channel();
-            let host_hwnd_raw = host_hwnd.0 as usize;
-            if self.tx.send(ComRequest::FindTabIndexByPath {
-                host_hwnd_raw,
-                target_path: target_path.to_string(),
-                reply: reply_tx,
-                deadline,
-            }).is_err() {
-                return None;
-            }
-            if let Ok(result) = reply_rx.recv_timeout(timeout) {
+            if let Some(result) = self.dispatch(
+                |reply| ComRequest::FindTabIndexByPath {
+                    host_hwnd_raw,
+                    target_path: target_path.to_string(),
+                    reply,
+                    deadline: Instant::now() + timeout,
+                },
+                timeout,
+            ) {
                 return result;
             }
             // 超时：短暂让出后重试，最后一次仍失败才认定“未找到”
@@ -217,51 +398,56 @@ impl ShellComManager {
     /// 请求重定向某个 Explorer 窗口或标签页（带 200ms 超时）
     pub fn navigate(&self, hwnd: HWND, target_path: &str) -> bool {
         let timeout = Duration::from_millis(200);
-        let deadline = std::time::Instant::now() + timeout;
-        let (reply_tx, reply_rx) = channel();
         let hwnd_raw = hwnd.0 as usize;
-        if self.tx.send(ComRequest::Navigate {
-            hwnd_raw,
-            target_path: target_path.to_string(),
-            reply: reply_tx,
-            deadline,
-        }).is_err() {
-            return false;
-        }
-        reply_rx.recv_timeout(timeout).unwrap_or(false)
+        self.dispatch(
+            |reply| ComRequest::Navigate {
+                hwnd_raw,
+                target_path: target_path.to_string(),
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        )
+        .unwrap_or(false)
     }
 
     /// 导航指定 Explorer 窗口中最新创建的 Tab 到新路径（带 200ms 超时，反向反查遍历）
     pub fn navigate_latest(&self, hwnd: HWND, target_path: &str) -> bool {
-        let timeout = Duration::from_millis(200);
-        let deadline = std::time::Instant::now() + timeout;
-        let (reply_tx, reply_rx) = channel();
+        self.navigate_latest_with_timeout(hwnd, target_path, Duration::from_millis(200))
+    }
+
+    fn navigate_latest_with_timeout(
+        &self,
+        hwnd: HWND,
+        target_path: &str,
+        timeout: Duration,
+    ) -> bool {
         let hwnd_raw = hwnd.0 as usize;
-        if self.tx.send(ComRequest::NavigateLatest {
-            hwnd_raw,
-            target_path: target_path.to_string(),
-            reply: reply_tx,
-            deadline,
-        }).is_err() {
-            return false;
-        }
-        reply_rx.recv_timeout(timeout).unwrap_or(false)
+        self.dispatch(
+            |reply| ComRequest::NavigateLatest {
+                hwnd_raw,
+                target_path: target_path.to_string(),
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        )
+        .unwrap_or(false)
     }
 
     /// 获取指定窗口的目标路径与选定文件名（穿透检测，不受可见性限制，带 200ms 超时）
     pub fn get_window_target_info(&self, target_hwnd: HWND) -> Option<(String, Option<String>)> {
         let timeout = Duration::from_millis(200);
-        let deadline = std::time::Instant::now() + timeout;
-        let (reply_tx, reply_rx) = channel();
         let target_hwnd_raw = target_hwnd.0 as usize;
-        if self.tx.send(ComRequest::GetWindowTargetInfo {
-            target_hwnd_raw,
-            reply: reply_tx,
-            deadline,
-        }).is_err() {
-            return None;
-        }
-        reply_rx.recv_timeout(timeout).ok().flatten()
+        self.dispatch(
+            |reply| ComRequest::GetWindowTargetInfo {
+                target_hwnd_raw,
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        )
+        .flatten()
     }
 
     /// 获取指定窗口下当前有效 Tab 的数量
@@ -271,42 +457,53 @@ impl ShellComManager {
         tabs.into_iter().filter(|t| t.hwnd_raw == raw).count()
     }
 
-    /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航（统一绝对截止时间，总预算严格控制在 800ms 内）
+    /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航。
+    ///
+    /// **单一绝对截止时间：总上界 1000ms**（不再有“文档说 800ms、实际约 1s”的不一致）：
+    /// - 前 800ms：轮询向 STA 请求原子单次检查（每轮 ≤ 80ms）；
+    /// - 剩余 ≤ 200ms：用一次 `navigate_latest` 兜底，且该兜底同样受同一个截止时间约束。
     pub fn wait_and_navigate_new_tab(&self, host_hwnd: HWND, count_before: usize, target_path: &str) -> bool {
+        /// 总预算（外部可见的硬上界）
+        const TOTAL_BUDGET: Duration = Duration::from_millis(1000);
+        /// 轮询阶段预算
+        const POLL_BUDGET: Duration = Duration::from_millis(800);
+
         let host_hwnd_raw = host_hwnd.0 as usize;
-        let start = std::time::Instant::now();
-        let total_budget = Duration::from_millis(800);
-        let deadline = start + total_budget;
+        let start = Instant::now();
+        let deadline = start + TOTAL_BUDGET;
+        let poll_end = start + POLL_BUDGET;
 
         // 在调用方工作线程轮询，每轮 30ms 向 STA 请求一次原子单次检查
-        while std::time::Instant::now() < deadline {
-            let now = std::time::Instant::now();
-            let remaining = deadline.saturating_duration_since(now);
+        while Instant::now() < poll_end {
+            let now = Instant::now();
+            let remaining = poll_end.saturating_duration_since(now);
             if remaining.is_zero() {
                 break;
             }
 
             let timeout = remaining.min(Duration::from_millis(80));
-            let req_deadline = now + timeout;
-
-            let (reply_tx, reply_rx) = channel();
-            if self.tx.send(ComRequest::TryNavigateNewTab {
-                host_hwnd_raw,
-                count_before,
-                target_path: target_path.to_string(),
-                reply: reply_tx,
-                deadline: req_deadline,
-            }).is_ok() {
-                if let Ok(true) = reply_rx.recv_timeout(timeout) {
-                    return true;
-                }
+            if let Some(true) = self.dispatch(
+                |reply| ComRequest::TryNavigateNewTab {
+                    host_hwnd_raw,
+                    count_before,
+                    target_path: target_path.to_string(),
+                    reply,
+                    deadline: Instant::now() + timeout,
+                },
+                timeout,
+            ) {
+                return true;
             }
 
             std::thread::sleep(Duration::from_millis(30));
         }
 
-        // 统一截止时间最终单次兜底
-        self.navigate_latest(host_hwnd, target_path)
+        // 兜底：仍受同一个绝对截止时间约束，能用多少时间就用多少
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        self.navigate_latest_with_timeout(host_hwnd, target_path, remaining)
     }
 
     /// 根据窗口 HWND、预期的 Tab 标题或索引，解析出最匹配的物理路径
@@ -351,6 +548,72 @@ impl ShellComManager {
 
         // 4. 最低优先级回退到第一个 Tab
         window_tabs.first().map(|t| t.path.clone())
+    }
+}
+
+/// 启动一个全新的 STA worker 线程
+fn spawn_sta_worker(generation: u64) -> StaWorker {
+    let (tx, rx) = channel::<ComRequest>();
+    thread::Builder::new()
+        .name(format!("QuickPath-ShellComSTA#{}", generation))
+        .spawn(move || sta_worker_loop(rx))
+        .expect("创建 ShellComManager STA 线程失败");
+    StaWorker { tx, generation }
+}
+
+/// STA worker 主循环：单线程串行处理请求
+fn sta_worker_loop(rx: std::sync::mpsc::Receiver<ComRequest>) {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    }
+
+    while let Ok(req) = rx.recv() {
+        // 若调用方已超时放弃该请求，直接丢弃，不执行耗时 COM 操作，彻底杜绝队列积压
+        if Instant::now() > req.deadline() {
+            continue;
+        }
+
+        match req {
+            ComRequest::GetAllTabs { reply, .. } => {
+                let tabs = enumerate_shell_tabs();
+                let _ = reply.send(tabs);
+            }
+            ComRequest::GetActiveTabPath { target_hwnd_raw, reply, .. } => {
+                let hwnd_opt = target_hwnd_raw.map(|raw| HWND(raw as *mut _));
+                let path = get_active_tab_path_internal(hwnd_opt);
+                let _ = reply.send(path);
+            }
+            ComRequest::Navigate { hwnd_raw, target_path, reply, .. } => {
+                let hwnd = HWND(hwnd_raw as *mut _);
+                let ok = navigate_internal(hwnd, &target_path);
+                let _ = reply.send(ok);
+            }
+            ComRequest::NavigateLatest { hwnd_raw, target_path, reply, .. } => {
+                let hwnd = HWND(hwnd_raw as *mut _);
+                let ok = navigate_latest_internal(hwnd, &target_path);
+                let _ = reply.send(ok);
+            }
+            ComRequest::GetWindowTargetInfo { target_hwnd_raw, reply, .. } => {
+                let hwnd = HWND(target_hwnd_raw as *mut _);
+                let info = get_window_target_info_internal(hwnd);
+                let _ = reply.send(info);
+            }
+            ComRequest::TryNavigateNewTab { host_hwnd_raw, count_before, target_path, reply, .. } => {
+                let hwnd = HWND(host_hwnd_raw as *mut _);
+                let ok = try_navigate_new_tab_internal(hwnd, count_before, &target_path);
+                let _ = reply.send(ok);
+            }
+            ComRequest::FindTabIndexByPath { host_hwnd_raw, target_path, reply, .. } => {
+                let hwnd = HWND(host_hwnd_raw as *mut _);
+                let idx = find_tab_index_by_path_internal(hwnd, &target_path);
+                let _ = reply.send(idx);
+            }
+        }
+    }
+
+    // 通道断开（含被 circuit breaker 放弃的情况）：正常退出则归还 COM 单子
+    unsafe {
+        CoUninitialize();
     }
 }
 
@@ -756,6 +1019,76 @@ fn url_decode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn silent_worker() -> (StaWorker, std::sync::mpsc::Receiver<ComRequest>) {
+        // 保留接收端但不消费也不回复，模拟“STA 线程卡死在 COM 调用里”
+        let (tx, rx) = channel::<ComRequest>();
+        (StaWorker { tx, generation: 1 }, rx)
+    }
+
+    #[test]
+    fn test_stats_percentiles_and_describe() {
+        let stats = ComStats::default();
+        for us in [1000u64, 2000, 3000, 4000, 5000] {
+            stats.record_success(Duration::from_micros(us));
+        }
+        let snapshot = stats.snapshot();
+        assert!((snapshot.p50_ms - 3.0).abs() < 0.001, "p50 应为 3ms，实际 {}", snapshot.p50_ms);
+        assert!((snapshot.p95_ms - 5.0).abs() < 0.001, "p95 应为 5ms，实际 {}", snapshot.p95_ms);
+        assert!((snapshot.p99_ms - 5.0).abs() < 0.001);
+        assert_eq!(snapshot.requests, 0, "requests 只在投递时累加");
+        assert!(snapshot.describe().contains("p50="));
+    }
+
+    #[test]
+    fn test_percentile_handles_empty_and_single_sample() {
+        assert_eq!(percentile_ms(&[], 50.0), 0.0);
+        assert!((percentile_ms(&[2500], 99.0) - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_consecutive_timeouts_trip_circuit_breaker() {
+        let (worker, _rx) = silent_worker();
+        let manager = ShellComManager::new_with_worker(worker);
+        let timeout = Duration::from_millis(20);
+        let request = |reply| ComRequest::GetAllTabs {
+            reply,
+            deadline: Instant::now() + timeout,
+        };
+
+        for _ in 0..MAX_CONSECUTIVE_TIMEOUTS {
+            assert!(manager.dispatch(request, timeout).is_none(), "环境应超时");
+        }
+
+        let snapshot = manager.stats();
+        assert_eq!(snapshot.timeouts, MAX_CONSECUTIVE_TIMEOUTS);
+        assert_eq!(snapshot.worker_rebuilds, 1, "连续超时必须触发 STA worker 重建");
+        assert_eq!(manager.generation(), 2, "重建后 generation 必须递增");
+        assert_eq!(snapshot.queue_depth, 0, "请求结束后队列深度必须归零");
+        // 重建后连续超时计数已清零
+        assert_eq!(manager.stats().timeouts, MAX_CONSECUTIVE_TIMEOUTS);
+    }
+
+    #[test]
+    fn test_dead_worker_channel_is_rebuilt_without_counting_timeout() {
+        let (tx, rx) = channel::<ComRequest>();
+        drop(rx); // 模拟 worker 线程已死亡：通道断开
+        let manager = ShellComManager::new_with_worker(StaWorker { tx, generation: 1 });
+        let timeout = Duration::from_millis(300);
+
+        let _ = manager.dispatch(
+            |reply| ComRequest::GetAllTabs {
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        );
+
+        let snapshot = manager.stats();
+        assert_eq!(snapshot.worker_rebuilds, 1, "通道断开必须重建 worker 并重试");
+        assert_eq!(snapshot.timeouts, 0, "通道断开不应被计为超时");
+        assert_eq!(manager.generation(), 2);
+    }
 
     #[test]
     fn test_parse_shell_url_standard_files() {

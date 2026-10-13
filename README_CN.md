@@ -7,8 +7,8 @@
 **简体中文** | [English](README.md)
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
-[![Rust](https://img.shields.io/badge/Language-Rust%202021-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-v1.2.0-success)](#)
+[![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust)](https://www.rust-lang.org)
+[![Version](https://img.shields.io/badge/Version-v1.2.2-success)](#)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
 

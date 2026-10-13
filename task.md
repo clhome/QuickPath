@@ -1215,6 +1215,106 @@
 3. 发布工程：Actions pin SHA、锁 toolchain、`cargo fmt --check`/`clippy -D warnings`/`cargo audit` 门禁（**当前 `cargo fmt --check` 与 `clippy -D warnings` 在基线就是红的，需先做一次全仓格式化与告警治理**）、Authenticode 签名、README/manifest 版本单一源（`build.rs` 目前仍回写源目录，每次构建都会弄脏 `app.manifest`/`quickpath.rc`）。
 4. 真机验收：报告 §11 的 Windows 11 回归矩阵（WPS 多版本、DOpus/TotalCMD/XYplorer、Win+E 连按 100 次、同名目录标签组、剪贴板混合格式）需在具备对应软件的机器上执行；本机仅完成编译、单测与代码级证明。
 
+## 阶段六十七：审计报告 v1.2.1 逐条核对与第一批缺口补齐
+
+> **背景**：阶段六十六已提交（`c7bca38 软件加固`）。本轮对报告 12 个条目逐条回到代码核对，并补齐第一批中**未达验收要求**的缺口。
+> **核对方式**：直接读代码 + grep 取证（不依赖上文记忆），逐条标注证据与未完成项。
+
+### 核对结论（对照报告 §3 风险总览）
+
+| 报告条目 | 级别 | 状态 | 证据 / 缺口 |
+|---|---|---|---|
+| P0-01 剪贴板恢复未校验 | 阻塞 | ✅ 代码+单测完成 | `clipboard.rs` 逐格式事务化 + 序列号/文本归属判定；8 个单测（含分配/加锁/设置三类故障注入、Busy、CF_HDROP+注册格式往返）；**缺**真机逐格式回归 |
+| P0-02 WPS 全局输入竞态 | 阻塞 | ✅ 保守口径达成 | `uia.rs` 身份复核+前台门禁+回读门禁+`InjectDone` 真实回执；**未按“彻底移除物理键鼠模拟”路线**（按用户选定保守加固） |
+| R-03 同名标签可误激活 | P1 | ✅ 完成 | `select.rs` 只选择不声称身份；`coordinator.rs` 回查 Shell COM 完整路径核验；同名索引越界拒绝 |
+| R-04 钩子 Arc 生命周期 | P1 | ⚠️ 部分 | 键盘钩子回调已改为 `increment_strong_count` 受控借用，安装失败归还引用；**未做** `mouse.rs`/`hook.rs` 同类改造与卸载 drain（第二批） |
+| P-01 钩子回调执行重任务 | P1 | ✅ 完成 | `keyboard.rs` 仅识别+廉价判定+投递；接管在 worker 线程，800ms 未确认则补偿原生窗口 |
+| P-02 COM/UIA 无硬超时 | P1 | ❌ 未做 | 仍无 circuit breaker / UIA 专用 worker；`com.rs` 仅澄清真实上界为 800+200ms |
+| P-03 第三方 IPC 可挂死 | P1 | ❌ 未做 | `totalcmd/xyplorer` 仍同步 `SendMessageW`；`dopus` 仍无子进程超时；扫描仍在调用线程 |
+| S-01 DOpus 搜索路径劫持 | P1 | ✅ 完成 | 新增 `win32/trusted.rs`；`schtasks` 全绝对路径；`dopusrt` 仅注册表/受信 Program Files；**未做**“删除最高权限免 UAC 常规选项”（产品决策） |
+| S-02 发布链未达可验证 | P2 | ❌ 未做 | Actions 未 pin SHA、无 fmt/clippy/audit 门禁、exe 未签名、`prerelease:false` 无人工门 |
+| S-03 调试日志泄露路径 | P2 | ❌ 未做 | 仍无轮换/保留期/脱敏；日志仍写 exe 目录与 `%TEMP%` |
+| R-05 AppState 裸指针 | P2 | ❌ 未做 | `MAIN_APP_STATE: AtomicPtr<AppState>` 与 `update_global_config()` 仍为全局可变入口 |
+| D-01 README 版本漂移 | P2 | ✅ 本轮完成 | 两份 README 徽章改为 v1.2.2 / Rust 2024，并新增 `rules/version.rs` 守卫测试锁定徽章与 `Cargo.toml` 一致 |
+
+### 本轮补齐的三处缺口（未提交）
+
+- [x] **67.1 P0-01 故障注入达验收要求**（`src/win32/clipboard.rs`）
+  - [x] 引入 `HandleOps` 句柄操作接缝（生产为真实 Win32 调用），使「分配失败 / 加锁失败 / 设置失败」三条分支的**句柄回收路径**可被真实断言
+  - [x] 新增 `test_single_format_failure_paths_release_handle`：加锁失败与设置失败必须各回收句柄 1 次（用计数 free 断言），分配失败不得回收，空数据视为成功
+  - [x] 新增 `test_hdrop_and_registered_format_survive_temporary_text_injection`：CF_HDROP + 自注册格式 + Unicode 文本混合剪贴板在临时注入后逐格式字节一致
+  - [x] 新增 `test_clipboard_busy_is_reported_and_never_claims_success`：被占用时捕获/恢复必须报 Busy 且不得置 restored；解除后必须能完成恢复
+  - [x] 测试锁中毒不再连坐掩盖其他用例（`clip_test_lock()` 恢复 poison）
+  - [x] **变异自证**：删除两个 `(ops.free)(handle)` → `test_single_format_failure_paths_release_handle` 报红（`left: 0, right: 1`）；还原后绿
+- [x] **67.2 P-02 预算文档据实修正**（`src/tab/com.rs`）：`wait_and_navigate_new_tab` 文档改为“真实上界 ≈ 1000ms（800ms 轮询 + 末尾 200ms 兜底）”，并标注“纳入同一 absolute deadline 属第二批改动”
+- [x] **67.3 D-01 版本单一源**（`README.md`、`README_CN.md`、`src/rules/version.rs`）：徽章 v1.2.0/Rust2021 → v1.2.2/Rust2024；新增守卫测试，版本或 edition 变更而 README 未同步即报红
+
+### 门禁结果（本轮）
+
+- `cargo test --all-targets`：**70 项全绿**（阶段六十六 66 → 70，新增 4 项）
+- `cargo check --release`：通过
+- `cargo build --release`：**被环境阻塞**——`target/release/quickpath.exe` 正被运行中的实例（PID 18008）占用，cargo 无法覆写（拒绝访问）；需先退出托盘程序再构建
+- `cargo clippy --all-targets`：本文件改动（`clipboard.rs` 5→4）未新增告警；全仓历史告警 121+ 条仍为基线水位
+
+### 下一批待办（如果继续做第二批）
+
+1. P-02：Explorer 枚举拆分为可取消小步骤 + circuit breaker + UIA 专用 worker + 全链 absolute deadline + P50/P95/P99 埋点
+2. P-03：`SendMessageTimeoutW(SMTO_ABORTIFHUNG)` + 子进程 `spawn/try_wait/kill` 有界等待 + 扫描移出调用线程 + 结果缓存 + 进程镜像核对
+3. R-04：`mouse.rs`/`hook.rs` 改为受控借用 + 卸载在途计数 drain（超时宁可泄漏也不 UAF）
+4. R-05：`AppState` 收窄为“仅宿主线程所有”，其他线程只投递不可变 command
+5. S-03：单一日志目录 + 大小/保留期 + 路径与文件名脱敏 + 导出前预览
+
+### 第三批待办（发布工程）
+
+1. Actions 全部 pin SHA、锁定 Rust toolchain 版本
+2. 先做全仓 `cargo fmt` + 告警治理，才能上 `fmt --check` / `clippy -D warnings` / `cargo audit` 门禁
+3. Authenticode 签名；稳定发布改为 environment approval 或 draft/prerelease
+4. `build.rs` 生成到 `OUT_DIR`，消除构建弄脏源码目录（当前每次构建都会改 `app.manifest`/`quickpath.rc`/`Cargo.lock`）
+
+## 阶段六十八：第二批 P1 剩余三项（COM/UIA 硬超时、第三方 IPC 有界化、钩子生命周期）
+
+> **范围（用户确认）**：第二批 P1 剩余三项（P-02 / P-03 / R-04）；R-05、S-03 与第三批发布工程本轮不做。
+> **口径**：不改变现有交互体验；所有改造都只把“无限等待/悬空指针”换成“有界 + fail-safe”。
+
+- [x] **68.1 R-04 钩子生命周期受控化（新增 `src/tab/owner.rs`）**
+  - [x] 新增 `CoordinatorSlot`：`borrow()` 只借用一份强引用（`increment_strong_count` + `from_raw`），借用前登记在途计数；`release()` 先摘指针→等在途归零→最后释放唯一所有权
+  - [x] 卸载超时（500ms）时**故意泄漏**该 `Arc` 而非释放（宁可泄漏也不 UAF），返回 false 并写入 debug 日志
+  - [x] `to_owned()`：回调派生的工作线程拿独立强引用，存活不再依赖静态指针
+  - [x] `keyboard.rs` / `mouse.rs` / `hook.rs` 全部接入；`tab/` 内裸 `Arc::into_raw/from_raw` 仅存在于 `owner.rs`
+  - [x] 4 个单测：卸载后借用必失败、提升出的强引用比 release 活得久、release 必等在途借用（超时选择泄漏）、重复 install 被拒且不泄漏
+- [x] **68.2 P-03 第三方 IPC 有界化（新增 `src/managers/ipc.rs`、`scanner.rs`）**
+  - [x] `ipc::send_message_timeout`：一律 `SendMessageTimeoutW(SMTO_ABORTIFHUNG|SMTO_BLOCK, 500ms)`，超时返回 None（不再有无限 `SendMessageW`）
+  - [x] `ipc::run_bounded`：`spawn + try_wait + kill` 上限 800ms（`dopusrt.exe` 不再 `status()` 无限阻塞）
+  - [x] `ipc` 失败冷却（10s）：挂起的管理器不会被每次前台切换/弹窗反复白等
+  - [x] `ipc::window_process_matches`：发送协议消息前核对进程镜像（拒绝 `TTOTAL_CMD`/`ThunderRT6FormDC`/`dopus.lister` 同类名伪装窗口）
+  - [x] `scanner` 后台 worker + 结果缓存：宿主消息线程不再直接跑第三方跨进程扫描；等待预算 120ms（首次无缓存时 400ms），超预算退回上次结果
+  - [x] TotalCmd / XYplorer 探测前先清空剪贴板文本，杜绝“对端超时却读到上一次陈旧路径”；首次超时立即中止整轮扫描
+  - [x] `tracker::get_all_candidates` 改用缓存结果，并按当前开关过滤已关闭的管理器
+  - [x] `get_current_active_folder`（实时性要求高，保持同步）加 900ms 跨管理器共享预算，避免多管理器同时挂起时串行叠加
+  - [x] 6 个单测：进程名匹配、冷却开关、`run_bounded` 超时 kill / 快速返回、全禁用不走 worker、零预算不阻塞
+- [x] **68.3 P-02 COM/UIA 硬超时与 circuit breaker（`src/tab/com.rs`, `src/tab/select.rs`）**
+  - [x] STA worker 抽象成 `StaWorker`（队列 + generation），新增 `dispatch()` 统一负责埋点、超时计数、断连重试
+  - [x] **circuit breaker**：连续 2 次超时即判定 worker 卡死，放弃其结果并重建新 STA worker（旧线程在当前调用返回后因通道断开自行退出；永不返回则泄露线程，也不永久饿死）
+  - [x] worker 通道断连（panic/退出）时自动重建并重试一次，且不计为超时
+  - [x] 埋点：请求数、超时数与超时率、队列深度、worker 重建次数、耗时 P50/P95/P99（256 样本环），异常时与每 500 次请求写入 debug 日志
+  - [x] `wait_and_navigate_new_tab` 改为**单一绝对截止时间 1000ms**（800ms 轮询 + 剩余≤200ms 兜底共享同一 deadline），消除“文档 800ms、实际约 1s”的不一致
+  - [x] 架构不变式守卫（新增单测）：扫描 `tab/com.rs` 与 `managers/explorer.rs` 源码，禁止出现任何 UIA 符号——UIA 一旦在 STA 队列上挂起会堵死全部 COM 请求
+  - [x] 4 个单测：P50/P95/P99 计算与空样本、连续超时触发 `generation` 递增重建、通道断连重建且不误计超时、队列深度归零
+
+### 门禁与自证（本轮）
+
+- `cargo test --all-targets`：**85 项全绿**（阶段六十七 70 → 85，新增 15 项）
+- `cargo check --release`：通过；`cargo clippy --all-targets`：新增文件（`owner.rs`/`ipc.rs`/`scanner.rs`）**零告警**，`com.rs` 28（比基线少 1），未新增任何告警
+- `cargo build --release`：仍被运行中的实例占用 `target/release/quickpath.exe` 阻塞（拒绝访问），需退出托盘程序后再构建
+- 变异自证：①删除句柄回收 `(ops.free)(handle)` → 剪贴板故障注入测试报红；②往 `managers/explorer.rs` 注入 `UIA_` 字面量 → STA/UIA 隔离守卫报红（两条均已还原）
+
+### 剩余待办
+
+1. **R-05**：`AppState` 收窄为宿主线程所有、其余线程只投递不可变 command
+2. **S-03**：日志轮换/保留期/路径脱敏/导出前预览
+3. **第三批**：Actions pin SHA、锁 toolchain、全仓格式化后才能上的 fmt/clippy/audit 门禁、Authenticode 签名、`build.rs` 改生成到 `OUT_DIR`
+4. **真机验收**：报告 §11 Windows 11 回归矩阵（含“挂起 DOpus/TotalCMD/XYplorer 时主界面仍可响应”与“COM 请求人为挂起后不得永久饥饿”）——这两条现在有了代码级实现与单测，但仍需真机复现
+
 
 
 
