@@ -353,13 +353,13 @@ impl TabCoordinator {
                 }
             }
 
-            // 2. COM 穿透定向探测：最长等待 2500ms（与 ExplorerTabUtility 架构对齐），确保新窗口在冷启动下挂载完成
+            // 2. COM 穿透定向探测：有界等待预算 800ms，识别到有效物理路径立即短路跳出
             if target_info.is_none() {
-                for round in 0..50 {
-                    if start_time.elapsed() > Duration::from_millis(2500) {
+                for round in 0..25 {
+                    if start_time.elapsed() > Duration::from_millis(800) {
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(50));
+                    std::thread::sleep(Duration::from_millis(30));
                     if !unsafe { IsWindow(Some(new_h)) }.as_bool() {
                         let _ = processing.lock().map(|mut set| set.remove(&raw_new));
                         return; // 窗口已被外部自行关闭
@@ -515,6 +515,9 @@ unsafe fn query_process_cmdline(pid: u32) -> Option<String> {
         return_length: *mut u32,
     ) -> i32;
 
+    const STATUS_INFO_LENGTH_MISMATCH: i32 = -1073741820; // 0xC0000004
+    const MAX_ALLOWED_CMDLINE_BYTES: u32 = 64 * 1024;
+
     unsafe {
         let h_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let ntdll = windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
@@ -524,7 +527,7 @@ unsafe fn query_process_cmdline(pid: u32) -> Option<String> {
         let mut buf = vec![0u8; 2048];
         let mut ret_len = 0u32;
         // ProcessCommandLineInformation = 60
-        let status = nt_query(
+        let mut status = nt_query(
             h_process,
             60,
             buf.as_mut_ptr() as *mut _,
@@ -532,13 +535,37 @@ unsafe fn query_process_cmdline(pid: u32) -> Option<String> {
             &mut ret_len,
         );
 
+        // 若缓冲区不足且返回了所需长度，动态重试一次（受控最大 64KB）
+        if (status == STATUS_INFO_LENGTH_MISMATCH || status != 0)
+            && ret_len > buf.len() as u32
+            && ret_len <= MAX_ALLOWED_CMDLINE_BYTES
+        {
+            buf.resize(ret_len as usize, 0);
+            status = nt_query(
+                h_process,
+                60,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+                &mut ret_len,
+            );
+        }
+
         let _ = CloseHandle(h_process);
 
         if status == 0 && ret_len >= size_of::<UNICODE_STRING>() as u32 {
             let us = &*(buf.as_ptr() as *const UNICODE_STRING);
             if us.length > 0 && !us.buffer.is_null() {
-                let slice = core::slice::from_raw_parts(us.buffer, (us.length / 2) as usize);
-                return Some(String::from_utf16_lossy(slice));
+                let buf_start = buf.as_ptr() as usize;
+                let buf_end = buf_start + buf.len();
+                let str_start = us.buffer as usize;
+                let str_bytes = us.length as usize;
+
+                if let Some(str_end) = str_start.checked_add(str_bytes) {
+                    if str_start >= buf_start && str_end <= buf_end && str_bytes % 2 == 0 {
+                        let slice = core::slice::from_raw_parts(us.buffer, str_bytes / 2);
+                        return Some(String::from_utf16_lossy(slice));
+                    }
+                }
             }
         }
 

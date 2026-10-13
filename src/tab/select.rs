@@ -10,7 +10,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationSelectionItemPattern,
-    TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_ListItemControlTypeId,
+    TreeScope_Children, TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_ListItemControlTypeId,
     UIA_NamePropertyId, UIA_SelectionItemPatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
@@ -33,9 +33,32 @@ pub fn try_select_file_item(host_hwnd: HWND, file_name: &str) -> bool {
             Err(_) => return false,
         };
 
-        let root: IUIAutomationElement = match uia.ElementFromHandle(host_hwnd) {
+        // 优先在当前活跃的文件列表子视图窗口中搜索，彻底隔绝侧边栏导航树、Toolbar 和状态栏深搜卡顿
+        let view_hwnd = {
+            use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
+            let h_tab_view = FindWindowExW(
+                Some(host_hwnd),
+                None,
+                windows::core::w!("ShellTabWindowClass"),
+                None,
+            );
+            if let Ok(h) = h_tab_view {
+                if !h.0.is_null() {
+                    h
+                } else {
+                    host_hwnd
+                }
+            } else {
+                host_hwnd
+            }
+        };
+
+        let root: IUIAutomationElement = match uia.ElementFromHandle(view_hwnd) {
             Ok(r) => r,
-            Err(_) => return false,
+            Err(_) => match uia.ElementFromHandle(host_hwnd) {
+                Ok(r) => r,
+                Err(_) => return false,
+            },
         };
 
         // 构建匹配条件：ControlType == ListItem 且 Name == file_name
@@ -103,25 +126,19 @@ pub fn try_select_tab_item_by_title(host_hwnd: HWND, folder_name: &str) -> bool 
             Err(_) => return false,
         };
 
-        // 核心性能优化：优先定位 ShellTabWindowClass 控件句柄作为 UIA 搜索根，避免全树深搜成千上万个文件项
-        let search_hwnd = if let Ok(tab_wnd) = windows::Win32::UI::WindowsAndMessaging::FindWindowExW(
-            Some(host_hwnd),
-            None,
-            windows::core::w!("ShellTabWindowClass"),
-            None,
-        ) {
-            if !tab_wnd.0.is_null() {
-                tab_wnd
-            } else {
-                host_hwnd
-            }
-        } else {
-            host_hwnd
-        };
-
-        let root: IUIAutomationElement = match uia.ElementFromHandle(search_hwnd) {
+        let root: IUIAutomationElement = match uia.ElementFromHandle(host_hwnd) {
             Ok(r) => r,
             Err(_) => return false,
+        };
+
+        // 核心性能与可靠性加固：优先定位 TabControl 标签栏容器，避免在全窗口万级节点深度扫描
+        let var_tab_ctrl = VARIANT::from(windows::Win32::UI::Accessibility::UIA_TabControlTypeId.0 as i32);
+        let cond_tab_ctrl = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_tab_ctrl).ok();
+
+        let search_root = if let Some(ref cond) = cond_tab_ctrl {
+            root.FindFirst(TreeScope_Descendants, cond).unwrap_or_else(|_| root.clone())
+        } else {
+            root.clone()
         };
 
         let var_type = VARIANT::from(windows::Win32::UI::Accessibility::UIA_TabItemControlTypeId.0 as i32);
@@ -130,7 +147,13 @@ pub fn try_select_tab_item_by_title(host_hwnd: HWND, folder_name: &str) -> bool 
             Err(_) => return false,
         };
 
-        if let Ok(tabs) = root.FindAll(TreeScope_Descendants, &cond_tab) {
+        let scope = if search_root == root {
+            TreeScope_Descendants
+        } else {
+            TreeScope_Children
+        };
+
+        if let Ok(tabs) = search_root.FindAll(scope, &cond_tab) {
             if let Ok(count) = tabs.Length() {
                 let target_lower = folder_name.to_lowercase();
                 for i in 0..count {

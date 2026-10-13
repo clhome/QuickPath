@@ -11,8 +11,9 @@ use windows::Win32::System::Com::{
 use windows::core::Interface;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
-    CUIAutomation, IUIAutomation, IUIAutomationSelectionItemPattern, TreeScope_Descendants,
-    UIA_ControlTypePropertyId, UIA_SelectionItemPatternId, UIA_TabItemControlTypeId,
+    CUIAutomation, IUIAutomation, IUIAutomationSelectionItemPattern, TreeScope_Children,
+    TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_SelectionItemPatternId,
+    UIA_TabControlTypeId, UIA_TabItemControlTypeId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -183,10 +184,20 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
             }
         }
 
-        // 2. 兜底路径：浅层/全树匹配
+        // 2. 兜底路径：优先限制在 TabControl 容器子树，避免从根窗口无节制遍历上万节点
         let root_elem = match uia.ElementFromHandle(root_hwnd) {
             Ok(e) => e,
             Err(_) => return None,
+        };
+
+        // 尝试快速定位标签栏容器控件 (TabControl)
+        let var_tab_ctrl = VARIANT::from(UIA_TabControlTypeId.0 as i32);
+        let cond_tab_ctrl = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_tab_ctrl).ok();
+
+        let search_root = if let Some(ref cond) = cond_tab_ctrl {
+            root_elem.FindFirst(TreeScope_Descendants, cond).unwrap_or_else(|_| root_elem.clone())
+        } else {
+            root_elem.clone()
         };
 
         let var_type = VARIANT::from(UIA_TabItemControlTypeId.0 as i32);
@@ -195,7 +206,14 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
             Err(_) => return None,
         };
 
-        if let Ok(tabs) = root_elem.FindAll(TreeScope_Descendants, &cond_tab) {
+        // 若成功锁定 TabControl，仅需直接枚举其子节点 (TreeScope_Children)；否则降级局部后代搜索
+        let scope = if search_root == root_elem {
+            TreeScope_Descendants
+        } else {
+            TreeScope_Children
+        };
+
+        if let Ok(tabs) = search_root.FindAll(scope, &cond_tab) {
             if let Ok(count) = tabs.Length() {
                 for i in 0..count {
                     if let Ok(tab) = tabs.GetElement(i) {

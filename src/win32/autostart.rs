@@ -37,8 +37,16 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
             if !status.success() {
                 // 如果任务计划程序失败（可能权限不足），回退到注册表模式
                 set_registry_run(&quoted_exe, true)?;
+            } else {
+                // 任务计划程序成功，清理注册表中残留项避免重复拉起
+                let _ = set_registry_run(&quoted_exe, false);
             }
         } else {
+            // 普通模式：清理旧的任务计划程序（若有），并写入注册表
+            let _ = Command::new("schtasks")
+                .args(["/delete", "/tn", TASK_NAME, "/f"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
             set_registry_run(&quoted_exe, true)?;
         }
     } else {

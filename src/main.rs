@@ -32,12 +32,13 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
     RegisterClassW, TranslateMessage, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP,
     WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const HOTKEY_ID: i32 = 101;
+const WM_QUICKPATH_RETRY_CHECK: u32 = 0x0400 + 102;
 static MAIN_APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(std::ptr::null_mut());
 static HOST_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -165,7 +166,8 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
-        // 退出前清理
+        // 退出前清理：先置空宿主窗口句柄，拦截所有未决投递消息
+        let _ = HOST_HWND.swap(std::ptr::null_mut(), Ordering::SeqCst);
         let _ = UnregisterHotKey(Some(host_hwnd), HOTKEY_ID);
         drop(tray_res);
 
@@ -188,6 +190,16 @@ unsafe extern "system" fn host_wnd_proc(
         WM_QUICKPATH_FOREGROUND => {
             let fg_hwnd = HWND(wparam.0 as *mut _);
             on_foreground_window_changed(fg_hwnd);
+            LRESULT(0)
+        }
+        WM_QUICKPATH_RETRY_CHECK => {
+            let h = HWND(wparam.0 as *mut _);
+            let next_retry = lparam.0 as u32;
+            let current_fg = win32::events::get_active_foreground_window();
+            let current_root = dialog::detector::find_dialog_root(current_fg);
+            if current_fg == h || current_root == dialog::detector::find_dialog_root(h) {
+                on_foreground_window_changed_impl(h, next_retry);
+            }
             LRESULT(0)
         }
         WM_HOTKEY => {
@@ -220,7 +232,7 @@ unsafe extern "system" fn host_wnd_proc(
             LRESULT(0)
         }
         WM_COMMAND => {
-            let cmd_id = (wparam.0 & 0xffff) as usize;
+            let cmd_id = wparam.0 & 0xffff;
             match cmd_id {
                 IDM_TOGGLE_AUTOSWITCH => {
                     let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
@@ -400,19 +412,24 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
             if is_potential_dialog {
                 let hwnd_raw = fg_hwnd.0 as usize;
                 let next_retry = retry_count + 1;
-                thread::spawn(move || {
-                    thread::sleep(Duration::from_millis(RETRY_INTERVAL_MS));
-                    let target_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
-                    if !target_ptr.is_null() {
-                        let h = HWND(hwnd_raw as *mut _);
-                        // 确认当前前台窗口依然是该窗口或其派生窗口，若用户已切走则提前终止轮询
-                        let current_fg = win32::events::get_active_foreground_window();
-                        let current_root = dialog::detector::find_dialog_root(current_fg);
-                        if current_fg == h || current_root == dialog::detector::find_dialog_root(h) {
-                            on_foreground_window_changed_impl(h, next_retry);
+                let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                if !host_ptr.is_null() {
+                    let host_raw = host_ptr as usize;
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(RETRY_INTERVAL_MS));
+                        if !HOST_HWND.load(Ordering::SeqCst).is_null() {
+                            unsafe {
+                                let host_h = HWND(host_raw as *mut _);
+                                let _ = PostMessageW(
+                                    Some(host_h),
+                                    WM_QUICKPATH_RETRY_CHECK,
+                                    WPARAM(hwnd_raw),
+                                    LPARAM(next_retry as isize),
+                                );
+                            }
                         }
-                    }
-                });
+                    });
+                }
                 return;
             }
         }

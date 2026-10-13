@@ -238,6 +238,8 @@ pub struct DetailsCollector {
     last_process_io: HashMap<u32, u64>,
     last_total_sys_time: u64,
     vram_collector: VramCollector,
+    last_heavy_sample_time: Option<std::time::Instant>,
+    cached_heavy_metrics: (Option<String>, String, String, String),
 }
 
 impl DetailsCollector {
@@ -247,25 +249,42 @@ impl DetailsCollector {
             last_process_io: HashMap::new(),
             last_total_sys_time: 0,
             vram_collector: VramCollector::new(),
+            last_heavy_sample_time: None,
+            cached_heavy_metrics: (None, "--".to_string(), "--".to_string(), "--".to_string()),
         }
     }
 
     pub fn sample(&mut self) -> DetailMetrics {
-        let vram_display = self.vram_collector.sample();
+        // 轻量快速指标：电量与运行时间（微秒级）
         let (battery_percent, is_ac_online, power_display) = query_power_status();
         let (uptime_seconds, uptime_display) = query_system_uptime();
-        let (top_process_display, top_net_process_display, top_disk_process_display) = self.query_top_processes();
+
+        // 重型指标分层节流：全进程快照、I/O 统计、网络连接表与显存采样间隔至少 3000ms
+        let need_heavy = match self.last_heavy_sample_time {
+            Some(t) => t.elapsed() >= std::time::Duration::from_millis(3000),
+            None => true,
+        };
+
+        if need_heavy {
+            let vram_display = self.vram_collector.sample();
+            let (top_cpu, top_net, top_disk) = self.query_top_processes();
+            self.cached_heavy_metrics = (vram_display, top_cpu, top_net, top_disk);
+            self.last_heavy_sample_time = Some(std::time::Instant::now());
+        }
+
+        let (ref vram_display, ref top_process_display, ref top_net_process_display, ref top_disk_process_display) =
+            self.cached_heavy_metrics;
 
         DetailMetrics {
-            vram_display,
+            vram_display: vram_display.clone(),
             power_display,
             battery_percent,
             is_ac_online,
             uptime_seconds,
             uptime_display,
-            top_process_display,
-            top_net_process_display,
-            top_disk_process_display,
+            top_process_display: top_process_display.clone(),
+            top_net_process_display: top_net_process_display.clone(),
+            top_disk_process_display: top_disk_process_display.clone(),
         }
     }
 

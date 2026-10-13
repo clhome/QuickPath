@@ -1098,6 +1098,56 @@
   - [x] 执行 `cargo build --release` 编译生产包成功
   - [x] 更新 `task.md` 完成状态
 
+## 阶段六十五：全维度审计报告专项治理与系统稳固性加固 (v1.2.1)
+
+> **核心目标**：
+> 针对审计报告（`test/优化26101311.md`）提出的各项风险与性能阻断点，在保证功能不受影响的前提下进行彻底根治：
+> 1. **R-01 剪贴板全格式保真与 Fail-Closed**：支持位图/DIB等格式克隆，对无法识别格式坚决 Fail-Closed，拒绝破坏剪贴板，降级走 UIA；
+> 2. **R-02 AppState 裸指针跨线程访问彻底消除**：将对话框异步重试全部收拢至主窗口 Win32 消息循环，移除后台线程对 `MAIN_APP_STATE` 的解引用；
+> 3. **P-01 标签页重定向全局截止时间与 STA 队列防积压**：引入绝对截止时间、请求超时主动丢弃、消除冗余导航与长时间窗口透明；
+> 4. **P-02 详情监控采样分层节流与时钟补偿**：重型进程快照与网络表采样节流至 3s+，轻量指标实时采样，消除周期漂移；
+> 5. **P-03 UIA 兜底搜索子树限定与防假死**：标签查找限定在 TabControl/TabGroup，防止万级节点全树卡死；
+> 6. **R-03 配置保存原子性安全加固**：移除“先删旧文件”的破坏性降级分支，确保配置永不丢失；
+> 7. **R-04 进程命令行动态缓冲区与边界内存校验**：处理缓冲区不足与动态扩容，严密校验指针与内存范围；
+> 8. **R-06 & S-01/S-02 GitHub Actions 质量门与产物哈希**：引入 format、clippy、test 质量门，固定 Action 版本并生成 SHA-256 校验和。
+
+- [x] **65.1 R-01 剪贴板全格式保真与 Fail-Closed 安全守卫 (`src/win32/clipboard.rs`, `src/win32/uia.rs`)**
+  - [x] 扩展剪贴板格式备份，支持 `CF_DIB` / `CF_DIBV5` / `CF_BITMAP` 等位图保真
+  - [x] 引入 Fail-Closed 策略：遇到任何无法保真克隆的格式坚决拒绝改写剪贴板
+  - [x] 确保 WPS 注入在剪贴板守卫拒绝时平滑降级使用 UIA SetValue，杜绝数据丢失
+  - [x] 完善单元测试覆盖位图保护与 Fail-Closed 机制
+- [x] **65.2 R-02 全局 AppState 跨线程访问消除与主线程消息收拢 (`src/main.rs`)**
+  - [x] 移除后台 `thread::spawn` 中对 `MAIN_APP_STATE` 的跨线程裸指针解引用与可变借用
+  - [x] 将对话框延迟重试机制改为向 `HOST_HWND` 发送自定义延迟重试消息或 Win32 定时器
+  - [x] 确保所有 `AppState` 的读写严格由 Win32 主消息循环串行处理，彻底消除数据竞争与 UB
+  - [x] 退出阶段清理未决重试任务，消除悬空指针风险
+- [x] **65.3 P-01 标签页重定向全局截止时间与 STA 队列防积压 (`src/tab/com.rs`, `src/tab/coordinator.rs`)**
+  - [x] 为 COM 请求引入 `deadline: Instant`，STA 线程取出过期请求即刻丢弃，消除队列雪崩
+  - [x] 为标签页探测与合并设置统一的绝对截止时间（总预算不超过 800ms~1000ms）
+  - [x] `wait_and_navigate_new_tab` 轮询中移除每轮冗余的 `navigate_latest`，仅在统一截止前做一次兜底
+  - [x] 限制窗口透明与探测时长，失败或超时 300ms 内极速恢复源窗口可见性与位置
+- [x] **65.4 P-02 系统详情监控采样分层节流与时钟补偿 (`src/monitor/worker.rs`, `src/monitor/collector/details.rs`)**
+  - [x] 实施快慢指标分层：重型进程快照与网络表采样节流至 3s 以上，未到期复用缓存快照
+  - [x] 在 `worker.rs` 采样循环中计算实际耗时并补偿休眠时间，消除周期漂移
+- [x] **65.5 P-03 UIA 标签与文件搜索子树限定与防假死 (`src/tab/mouse.rs`, `src/tab/select.rs`)**
+  - [x] 双击标签兜底搜索限定在 TabControl/TabGroup 子树范围内，避免全窗口全树扫描
+  - [x] 文件项选中优先限制在视图列表子树，避免深度遍历无用节点
+- [x] **65.6 R-03 配置保存原子性安全加固 (`src/rules/config.rs`)**
+  - [x] 彻底移除原子替换失败时“先删除旧文件”的危险代码路径
+  - [x] 替换失败时保留旧文件与临时文件并安全返回错误，确保旧配置绝对不丢失
+- [x] **65.7 R-04 进程命令行动态缓冲区与边界内存校验 (`src/tab/coordinator.rs`)**
+  - [x] `query_process_cmdline` 处理长度不足并根据实际 `ret_len` 动态扩容重试
+  - [x] 严密校验 `UNICODE_STRING` 指针与长度完全落在缓冲区安全内存区间之内
+- [x] **65.8 R-06 & S-01/S-02 GitHub Actions CI 质量门禁与 SHA-256 校验和 (`.github/workflows/release.yml`)**
+  - [x] 在发布构建前增加 `cargo fmt --check`、`cargo clippy`、`cargo test` 质量门
+  - [x] 生成 Release 制品的 SHA-256 哈希校验和清单文件
+  - [x] 规范 GitHub Action 标签
+- [x] **65.9 全量编译、全量回归测试、task.md 进度打勾与收尾交付**
+  - [x] 执行 `cargo check`、`cargo test`、`cargo clippy` 确保 0 警告 0 错误（38 项测试全绿）
+  - [x] 更新 `task.md` 所有子任务打勾状态
+  - [x] 成功构建 Release 生产版本并在系统常驻平稳运行
+
+
 
 
 

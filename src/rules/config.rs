@@ -152,7 +152,7 @@ impl Default for AppConfig {
             floating_bar_opacity: 88,
             language: Language::Auto,
             autostart_enabled: false,
-            autostart_task_scheduler: true,
+            autostart_task_scheduler: false,
             blacklist_processes: Vec::new(),
             whitelist_processes: Vec::new(),
             pinned_folders: Vec::new(),
@@ -346,11 +346,10 @@ impl AppConfig {
             let _ = fs::copy(&path, &bak_path);
         }
 
-        // 3. 原子替换主文件
-        if let Err(_) = atomic_replace_file(&tmp_path, &path) {
-            // 降级保护：若原子替换出现跨分区/权限偶发失败，走删旧换新兜底
-            let _ = fs::remove_file(&path);
-            fs::rename(&tmp_path, &path)?;
+        // 3. 原子替换主文件（若原子替换失败，坚决不删除原有主配置文件，保留原配置并向调用方返回错误）
+        if let Err(e) = atomic_replace_file(&tmp_path, &path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e);
         }
 
         Ok(())

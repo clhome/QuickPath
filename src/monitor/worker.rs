@@ -60,6 +60,8 @@ impl MetricsWorker {
                 let mut loop_count: u64 = 0;
 
                 while running_flag.load(Ordering::SeqCst) {
+                    let loop_start = std::time::Instant::now();
+
                     let net = net_collector.sample();
                     let cpu = cpu_collector.sample();
                     let mem = mem_collector.sample();
@@ -68,7 +70,7 @@ impl MetricsWorker {
 
                     waveform.push(cpu.usage_percent);
 
-                    // 详情数据每 2 秒或每轮更新
+                    // 详情数据（重型进程与网络枚举内部已做 3s 节流分层）
                     let details = details_collector.sample();
 
                     let new_snapshot = MetricsSnapshot {
@@ -90,7 +92,11 @@ impl MetricsWorker {
                         // 触发网卡检测
                     }
 
-                    let sleep_ms = interval_atomic.load(Ordering::SeqCst);
+                    // 扣除本轮采集实际执行开销，精准计算休眠时长，杜绝时钟漂移
+                    let base_sleep_ms = interval_atomic.load(Ordering::SeqCst);
+                    let elapsed_ms = loop_start.elapsed().as_millis() as u64;
+                    let sleep_ms = base_sleep_ms.saturating_sub(elapsed_ms);
+
                     // 细分 sleep 使得线程停用时能迅速响应退出
                     let steps = (sleep_ms / 100).max(1);
                     for _ in 0..steps {

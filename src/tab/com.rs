@@ -32,28 +32,33 @@ pub enum ComRequest {
     /// 获取当前前台或所有活跃资源管理器的 Tab 列表
     GetAllTabs {
         reply: Sender<Vec<ShellTabInfo>>,
+        deadline: std::time::Instant,
     },
     /// 获取指定或前台 Explorer 窗口中处于活跃/选中的 Tab 路径
     GetActiveTabPath {
         target_hwnd_raw: Option<usize>,
         reply: Sender<Option<String>>,
+        deadline: std::time::Instant,
     },
     /// 导航指定的 WebBrowser/Tab 到新路径
     Navigate {
         hwnd_raw: usize,
         target_path: String,
         reply: Sender<bool>,
+        deadline: std::time::Instant,
     },
     /// 导航指定 Explorer 窗口中最新创建的 Tab 到新路径（反向反查）
     NavigateLatest {
         hwnd_raw: usize,
         target_path: String,
         reply: Sender<bool>,
+        deadline: std::time::Instant,
     },
     /// 获取指定窗口的目标路径与选定文件（穿透检测，不受可见性限制）
     GetWindowTargetInfo {
         target_hwnd_raw: usize,
         reply: Sender<Option<(String, Option<String>)>>,
+        deadline: std::time::Instant,
     },
     /// 尝试单次检查新 Tab 在 COM 中注册并将其导航至指定路径（无 sleep，原子操作）
     TryNavigateNewTab {
@@ -61,13 +66,30 @@ pub enum ComRequest {
         count_before: usize,
         target_path: String,
         reply: Sender<bool>,
+        deadline: std::time::Instant,
     },
     /// 在指定宿主窗口内按规范化路径查找 Tab 索引（0-based）
     FindTabIndexByPath {
         host_hwnd_raw: usize,
         target_path: String,
         reply: Sender<Option<usize>>,
+        deadline: std::time::Instant,
     },
+}
+
+impl ComRequest {
+    #[inline]
+    pub fn deadline(&self) -> std::time::Instant {
+        match self {
+            Self::GetAllTabs { deadline, .. } => *deadline,
+            Self::GetActiveTabPath { deadline, .. } => *deadline,
+            Self::Navigate { deadline, .. } => *deadline,
+            Self::NavigateLatest { deadline, .. } => *deadline,
+            Self::GetWindowTargetInfo { deadline, .. } => *deadline,
+            Self::TryNavigateNewTab { deadline, .. } => *deadline,
+            Self::FindTabIndexByPath { deadline, .. } => *deadline,
+        }
+    }
 }
 
 /// STA 线程上的 Shell COM 管理器
@@ -77,7 +99,7 @@ pub struct ShellComManager {
 
 impl ShellComManager {
     pub fn new() -> Self {
-        let (tx, rx) = channel();
+        let (tx, rx) = channel::<ComRequest>();
 
         thread::Builder::new()
             .name("QuickPath-ShellComSTA".to_string())
@@ -90,37 +112,42 @@ impl ShellComManager {
                 }
 
                 while let Ok(req) = rx.recv() {
+                    // 若调用方已超时放弃该请求，直接丢弃，不执行耗时 COM 操作，彻底杜绝队列积压
+                    if std::time::Instant::now() > req.deadline() {
+                        continue;
+                    }
+
                     match req {
-                        ComRequest::GetAllTabs { reply } => {
+                        ComRequest::GetAllTabs { reply, .. } => {
                             let tabs = enumerate_shell_tabs();
                             let _ = reply.send(tabs);
                         }
-                        ComRequest::GetActiveTabPath { target_hwnd_raw, reply } => {
+                        ComRequest::GetActiveTabPath { target_hwnd_raw, reply, .. } => {
                             let hwnd_opt = target_hwnd_raw.map(|raw| HWND(raw as *mut _));
                             let path = get_active_tab_path_internal(hwnd_opt);
                             let _ = reply.send(path);
                         }
-                        ComRequest::Navigate { hwnd_raw, target_path, reply } => {
+                        ComRequest::Navigate { hwnd_raw, target_path, reply, .. } => {
                             let hwnd = HWND(hwnd_raw as *mut _);
                             let ok = navigate_internal(hwnd, &target_path);
                             let _ = reply.send(ok);
                         }
-                        ComRequest::NavigateLatest { hwnd_raw, target_path, reply } => {
+                        ComRequest::NavigateLatest { hwnd_raw, target_path, reply, .. } => {
                             let hwnd = HWND(hwnd_raw as *mut _);
                             let ok = navigate_latest_internal(hwnd, &target_path);
                             let _ = reply.send(ok);
                         }
-                        ComRequest::GetWindowTargetInfo { target_hwnd_raw, reply } => {
+                        ComRequest::GetWindowTargetInfo { target_hwnd_raw, reply, .. } => {
                             let hwnd = HWND(target_hwnd_raw as *mut _);
                             let info = get_window_target_info_internal(hwnd);
                             let _ = reply.send(info);
                         }
-                        ComRequest::TryNavigateNewTab { host_hwnd_raw, count_before, target_path, reply } => {
+                        ComRequest::TryNavigateNewTab { host_hwnd_raw, count_before, target_path, reply, .. } => {
                             let hwnd = HWND(host_hwnd_raw as *mut _);
                             let ok = try_navigate_new_tab_internal(hwnd, count_before, &target_path);
                             let _ = reply.send(ok);
                         }
-                        ComRequest::FindTabIndexByPath { host_hwnd_raw, target_path, reply } => {
+                        ComRequest::FindTabIndexByPath { host_hwnd_raw, target_path, reply, .. } => {
                             let hwnd = HWND(host_hwnd_raw as *mut _);
                             let idx = find_tab_index_by_path_internal(hwnd, &target_path);
                             let _ = reply.send(idx);
@@ -135,76 +162,92 @@ impl ShellComManager {
 
     /// 获取所有打开且可见有效的资源管理器 Tab（带 150ms 超时）
     pub fn get_all_tabs(&self) -> Vec<ShellTabInfo> {
+        let timeout = Duration::from_millis(150);
+        let deadline = std::time::Instant::now() + timeout;
         let (reply_tx, reply_rx) = channel();
-        if self.tx.send(ComRequest::GetAllTabs { reply: reply_tx }).is_err() {
+        if self.tx.send(ComRequest::GetAllTabs { reply: reply_tx, deadline }).is_err() {
             return Vec::new();
         }
-        reply_rx.recv_timeout(Duration::from_millis(150)).unwrap_or_default()
+        reply_rx.recv_timeout(timeout).unwrap_or_default()
     }
 
     /// 获取活动 Tab 路径（带 150ms 超时）
     pub fn get_active_tab_path(&self, target_hwnd: Option<HWND>) -> Option<String> {
+        let timeout = Duration::from_millis(150);
+        let deadline = std::time::Instant::now() + timeout;
         let (reply_tx, reply_rx) = channel();
         let target_hwnd_raw = target_hwnd.map(|h| h.0 as usize);
-        if self.tx.send(ComRequest::GetActiveTabPath { target_hwnd_raw, reply: reply_tx }).is_err() {
+        if self.tx.send(ComRequest::GetActiveTabPath { target_hwnd_raw, reply: reply_tx, deadline }).is_err() {
             return None;
         }
-        reply_rx.recv_timeout(Duration::from_millis(150)).ok().flatten()
+        reply_rx.recv_timeout(timeout).ok().flatten()
     }
 
     /// 在指定宿主窗口内查找目标路径对应的已有 Tab 索引（0-based，带 250ms 超时）
     pub fn find_tab_index_by_path(&self, host_hwnd: HWND, target_path: &str) -> Option<usize> {
+        let timeout = Duration::from_millis(250);
+        let deadline = std::time::Instant::now() + timeout;
         let (reply_tx, reply_rx) = channel();
         let host_hwnd_raw = host_hwnd.0 as usize;
         if self.tx.send(ComRequest::FindTabIndexByPath {
             host_hwnd_raw,
             target_path: target_path.to_string(),
             reply: reply_tx,
+            deadline,
         }).is_err() {
             return None;
         }
-        reply_rx.recv_timeout(Duration::from_millis(250)).ok().flatten()
+        reply_rx.recv_timeout(timeout).ok().flatten()
     }
 
     /// 请求重定向某个 Explorer 窗口或标签页（带 200ms 超时）
     pub fn navigate(&self, hwnd: HWND, target_path: &str) -> bool {
+        let timeout = Duration::from_millis(200);
+        let deadline = std::time::Instant::now() + timeout;
         let (reply_tx, reply_rx) = channel();
         let hwnd_raw = hwnd.0 as usize;
         if self.tx.send(ComRequest::Navigate {
             hwnd_raw,
             target_path: target_path.to_string(),
             reply: reply_tx,
+            deadline,
         }).is_err() {
             return false;
         }
-        reply_rx.recv_timeout(Duration::from_millis(200)).unwrap_or(false)
+        reply_rx.recv_timeout(timeout).unwrap_or(false)
     }
 
     /// 导航指定 Explorer 窗口中最新创建的 Tab 到新路径（带 200ms 超时，反向反查遍历）
     pub fn navigate_latest(&self, hwnd: HWND, target_path: &str) -> bool {
+        let timeout = Duration::from_millis(200);
+        let deadline = std::time::Instant::now() + timeout;
         let (reply_tx, reply_rx) = channel();
         let hwnd_raw = hwnd.0 as usize;
         if self.tx.send(ComRequest::NavigateLatest {
             hwnd_raw,
             target_path: target_path.to_string(),
             reply: reply_tx,
+            deadline,
         }).is_err() {
             return false;
         }
-        reply_rx.recv_timeout(Duration::from_millis(200)).unwrap_or(false)
+        reply_rx.recv_timeout(timeout).unwrap_or(false)
     }
 
     /// 获取指定窗口的目标路径与选定文件名（穿透检测，不受可见性限制，带 200ms 超时）
     pub fn get_window_target_info(&self, target_hwnd: HWND) -> Option<(String, Option<String>)> {
+        let timeout = Duration::from_millis(200);
+        let deadline = std::time::Instant::now() + timeout;
         let (reply_tx, reply_rx) = channel();
         let target_hwnd_raw = target_hwnd.0 as usize;
         if self.tx.send(ComRequest::GetWindowTargetInfo {
             target_hwnd_raw,
             reply: reply_tx,
+            deadline,
         }).is_err() {
             return None;
         }
-        reply_rx.recv_timeout(Duration::from_millis(200)).ok().flatten()
+        reply_rx.recv_timeout(timeout).ok().flatten()
     }
 
     /// 获取指定窗口下当前有效 Tab 的数量
@@ -214,33 +257,41 @@ impl ShellComManager {
         tabs.into_iter().filter(|t| t.hwnd_raw == raw).count()
     }
 
-    /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航（最长等待 1500ms，检测到就绪立即短路返回）
+    /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航（统一绝对截止时间，总预算严格控制在 800ms 内）
     pub fn wait_and_navigate_new_tab(&self, host_hwnd: HWND, count_before: usize, target_path: &str) -> bool {
         let host_hwnd_raw = host_hwnd.0 as usize;
-        // 在调用方工作线程轮询，每轮 50ms 向 STA 请求一次原子单次检查（最长 30 轮即 1500ms）
-        for round in 0..30 {
-            std::thread::sleep(Duration::from_millis(50));
+        let start = std::time::Instant::now();
+        let total_budget = Duration::from_millis(800);
+        let deadline = start + total_budget;
+
+        // 在调用方工作线程轮询，每轮 30ms 向 STA 请求一次原子单次检查
+        while std::time::Instant::now() < deadline {
+            let now = std::time::Instant::now();
+            let remaining = deadline.saturating_duration_since(now);
+            if remaining.is_zero() {
+                break;
+            }
+
+            let timeout = remaining.min(Duration::from_millis(80));
+            let req_deadline = now + timeout;
+
             let (reply_tx, reply_rx) = channel();
             if self.tx.send(ComRequest::TryNavigateNewTab {
                 host_hwnd_raw,
                 count_before,
                 target_path: target_path.to_string(),
                 reply: reply_tx,
+                deadline: req_deadline,
             }).is_ok() {
-                if let Ok(true) = reply_rx.recv_timeout(Duration::from_millis(150)) {
+                if let Ok(true) = reply_rx.recv_timeout(timeout) {
                     return true;
                 }
             }
 
-            // 若轮询至第 15 轮（约 750ms）仍未严格递增，尝试回退导航至最新可见 Tab
-            if round >= 15 {
-                if self.navigate_latest(host_hwnd, target_path) {
-                    return true;
-                }
-            }
+            std::thread::sleep(Duration::from_millis(30));
         }
 
-        // 最终兜底
+        // 统一截止时间最终单次兜底
         self.navigate_latest(host_hwnd, target_path)
     }
 
