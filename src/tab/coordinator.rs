@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::com::{is_physical_dir_path, ShellComManager};
-use super::select::try_select_file_item;
+use super::select::{async_select_file_item, is_tab_active_by_name, try_select_tab_item_by_title};
 use super::uia::trigger_new_tab;
 use windows::core::BOOL;
 
@@ -301,6 +301,11 @@ impl TabCoordinator {
             }
         };
 
+        crate::dialog::detector::log_debug(&format!(
+            "TAB_CAPTURE: new=0x{:X} host=0x{:X}",
+            raw_new, host_hwnd.0 as usize
+        ));
+
         // 2. 确认存在真实有效宿主，采用分层窗口 Alpha=0 透明度 + 离屏移位，杜绝弹窗闪烁同时保持 COM 活跃
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{
@@ -381,6 +386,17 @@ impl TabCoordinator {
 
             let mut merged_success = false;
 
+            match target_info {
+                Some((ref path, ref file)) => crate::dialog::detector::log_debug(&format!(
+                    "TAB_TARGET: new=0x{:X} path='{}' file={:?}",
+                    raw_new, path, file
+                )),
+                None => crate::dialog::detector::log_debug(&format!(
+                    "TAB_TARGET: new=0x{:X} -> none (fail-safe 恢复原生窗口)",
+                    raw_new
+                )),
+            }
+
             if let Some((ref folder_path, _)) = target_info {
                 // 校验宿主窗口依然存活
                 if unsafe { IsWindow(Some(host_h)).as_bool() && IsWindowVisible(host_h).as_bool() } {
@@ -396,18 +412,22 @@ impl TabCoordinator {
                         matched_tab_index = com.find_tab_index_by_path(host_h, folder_path);
                     }
 
+                    crate::dialog::detector::log_debug(&format!(
+                        "TAB_DEDUP: host=0x{:X} path='{}' matched_idx={:?} dedup={} bypass={}",
+                        host_h.0 as usize,
+                        folder_path,
+                        matched_tab_index,
+                        cfg_clone.deduplication,
+                        bypass.load(Ordering::SeqCst)
+                    ));
+
                     if let Some(tab_idx) = matched_tab_index {
-                        // 宿主已有该 Tab：通过 0xA221 (Ctrl+1..N) 魔法指令瞬时激活目标 Tab！
-                        unsafe {
-                            use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COMMAND};
-                            let _ = SendMessageW(
-                                host_h,
-                                WM_COMMAND,
-                                Some(WPARAM(0xA221)),
-                                Some(LPARAM((tab_idx + 1) as isize)),
-                            );
-                        }
-                        merged_success = true;
+                        // 宿主已有该 Tab：必须真正激活它，而不仅是"认为"激活了。
+                        // 0xA221 是未公开魔法指令，在部分构建上无响应且从不报错；
+                        // 改为 UIA 直选优先、0xA221 兜底，每次都核验活动标签，
+                        // 全部失败则回退 fail-safe（保留源窗口），绝不出现"点了像没反应"。
+                        merged_success =
+                            Self::activate_tab_in_host(host_h, folder_path, tab_idx);
                     } else if is_physical_dir_path(folder_path) {
                         // 宿主没有该 Tab 或未开启去重，在宿主中新建 Tab 并精准导航
                         let count_before = com.get_tabs_count_for_hwnd(host_h);
@@ -421,55 +441,56 @@ impl TabCoordinator {
                 }
             }
 
-            // 外部 /select 携带文件名：在关闭源窗口前，必须同步确认宿主已选中该文件；
-            // 确认失败则视为合并未完成，回退 fail-safe（原生窗口天然保证选中文件），绝不静默吞掉这次唤起
+            crate::dialog::detector::log_debug(&format!(
+                "TAB_MERGE: new=0x{:X} host=0x{:X} success={}",
+                raw_new, raw_host, merged_success
+            ));
+
+            // 外部 /select 携带文件名：文件夹落地已由 wait_and_navigate 确认，
+            // 文件高亮改为后台异步重试——视图加载需要时间，同步等待是合并链路里最贵的一段
+            // （实测可达数百毫秒），而高亮失败只是少一个选中态，不影响"窗口弹出来了"这个核心诉求
             if merged_success {
                 if let Some((_, Some(ref file_name))) = target_info {
-                    let mut file_selected = false;
-                    for _ in 0..10 {
-                        if try_select_file_item(host_h, file_name) {
-                            file_selected = true;
-                            break;
-                        }
-                        std::thread::sleep(Duration::from_millis(80));
-                    }
-                    if !file_selected {
-                        merged_success = false;
-                    }
+                    async_select_file_item(host_h, file_name.clone());
                 }
             }
 
             if merged_success {
-                // 只有在彻底确认合并成功的情况下，才安全销毁源窗口
+                // 稳健关闭源窗口：WM_CLOSE 投递后轮询确认窗口真正销毁（每 200ms 补发一次，
+                // 最长 3 秒）。年轻窗口（刚创建几百毫秒）响应销毁较慢，固定短宽限期会把
+                // "正在关闭"误判为"关闭失败"并将其复活——只有宽限期耗尽仍存活，才认定
+                // 为关闭被拒并恢复可见（绝不留隐身窗口）。补发前校验 PID，防止 HWND 被
+                // 复用后误关用户的新窗口。
+                let mut wnd_pid = 0u32;
                 unsafe {
-                    let _ = PostMessageW(
-                        Some(new_h),
-                        WM_CLOSE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
+                    let _ = GetWindowThreadProcessId(new_h, Some(&mut wnd_pid));
+                    let _ = PostMessageW(Some(new_h), WM_CLOSE, WPARAM(0), LPARAM(0));
                 }
-                // 二次核查源窗口是否彻底销毁，若仍存活则补发 WM_CLOSE，彻底杜绝孤立外部窗口残留
-                std::thread::sleep(Duration::from_millis(100));
-                unsafe {
-                    if IsWindow(Some(new_h)).as_bool() {
-                        let _ = PostMessageW(
-                            Some(new_h),
-                            WM_CLOSE,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
+                let mut destroyed = false;
+                for _ in 0..15 {
+                    std::thread::sleep(Duration::from_millis(200));
+                    unsafe {
+                        if !IsWindow(Some(new_h)).as_bool() {
+                            destroyed = true;
+                            break;
+                        }
+                        // HWND 复用守卫：句柄已指向另一个进程的窗口时，视为原窗口已消失
+                        let mut cur_pid = 0u32;
+                        let _ = GetWindowThreadProcessId(new_h, Some(&mut cur_pid));
+                        if wnd_pid != 0 && cur_pid != wnd_pid {
+                            destroyed = true;
+                            break;
+                        }
+                        let _ = PostMessageW(Some(new_h), WM_CLOSE, WPARAM(0), LPARAM(0));
                     }
                 }
-                // 最终核查：若源窗口依然存活（WM_CLOSE 被忽略），绝不能让它保持隐身状态，
-                // 立即恢复不透明度并移回可见区域，避免窗口永久隐身只能重启 Explorer 找回
-                std::thread::sleep(Duration::from_millis(400));
-                unsafe {
-                    use windows::Win32::Foundation::COLORREF;
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetLayeredWindowAttributes, LWA_ALPHA,
-                    };
-                    if IsWindow(Some(new_h)).as_bool() {
+                if !destroyed {
+                    // 3 秒后依然存活：关闭被拒，恢复不透明度并移回可见区域
+                    unsafe {
+                        use windows::Win32::Foundation::COLORREF;
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            SetLayeredWindowAttributes, LWA_ALPHA,
+                        };
                         let _ = SetLayeredWindowAttributes(new_h, COLORREF(0), 255, LWA_ALPHA);
                         let _ = SetWindowPos(
                             new_h,
@@ -512,6 +533,69 @@ impl TabCoordinator {
             // 处理结束，从防重集合中移除记录
             let _ = processing.lock().map(|mut set| set.remove(&raw_new));
         });
+    }
+
+    /// 激活宿主窗口中指定路径的标签页（带核验）。
+    ///
+    /// 策略：UIA SelectionItemPattern 直选 TabItem 优先（公开无障碍接口，最可靠）→
+    /// 0xA221 (Ctrl+1..N) 魔法指令兜底（同步 SendMessageW，部分构建有效）→
+    /// 每次尝试后都用 IsSelected() 核验活动标签是否确为目标。
+    /// 返回 true 当且仅当目标标签已是活动标签；否则返回 false，调用方回退 fail-safe。
+    fn activate_tab_in_host(host_h: HWND, folder_path: &str, tab_idx: usize) -> bool {
+        let folder_name = std::path::Path::new(folder_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| folder_path.to_string());
+        if folder_name.is_empty() {
+            return false;
+        }
+
+        // 尝试 1：UIA 直选 TabItem（公开无障碍接口，最可靠）
+        let uia_selected = try_select_tab_item_by_title(host_h, &folder_name);
+        if uia_selected {
+            // 选择生效需要时间，分两次核验，避免“已选中但尚未切换完成”的假失败
+            for _ in 0..2 {
+                std::thread::sleep(Duration::from_millis(150));
+                if is_tab_active_by_name(host_h, &folder_name) {
+                    crate::dialog::detector::log_debug(&format!(
+                        "TAB_ACTIVATE: host=0x{:X} target='{}' via=UIA idx={} -> ok",
+                        host_h.0 as usize, folder_name, tab_idx
+                    ));
+                    return true;
+                }
+            }
+        }
+
+        // 尝试 2：0xA221 魔法指令兜底（未公开指令，部分构建有效；
+        // COM 枚举序号未必等于视觉标签顺序，因此仅作兜底且必须核验）
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COMMAND};
+            let _ = SendMessageW(
+                host_h,
+                WM_COMMAND,
+                Some(WPARAM(0xA221)),
+                Some(LPARAM((tab_idx + 1) as isize)),
+            );
+        }
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(150));
+            if is_tab_active_by_name(host_h, &folder_name) {
+                crate::dialog::detector::log_debug(&format!(
+                    "TAB_ACTIVATE: host=0x{:X} target='{}' via=0xA221 idx={} -> ok",
+                    host_h.0 as usize, folder_name, tab_idx
+                ));
+                return true;
+            }
+        }
+
+        // 全部尝试后目标标签仍未激活：返回 false，交由调用方 fail-safe 保留原生窗口，
+        // 绝不静默关闭源窗口（那会让用户以为“完全没反应”）
+        crate::dialog::detector::log_debug(&format!(
+            "TAB_ACTIVATE: host=0x{:X} target='{}' idx={} uia_select={} -> FAILED (fail-safe)",
+            host_h.0 as usize, folder_name, tab_idx, uia_selected
+        ));
+        false
     }
 
     fn clone_ref(&self) -> Arc<Self> {

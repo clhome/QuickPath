@@ -32,13 +32,21 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage,
-    RegisterClassW, TranslateMessage, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP,
-    WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, PostMessageW,
+    PostQuitMessage, RegisterClassW, TranslateMessage, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+    WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
 const HOTKEY_ID: i32 = 101;
 const WM_QUICKPATH_RETRY_CHECK: u32 = 0x0400 + 102;
+const WM_QUICKPATH_INJECT_FAILED: u32 = 0x0400 + 103;
+/// 对话框控件异步初始化期间的最大探测次数与间隔
+/// （合计约 1.2s：慢速机器/首次加载的 shell 扩展常需数百毫秒才出现
+///  DirectUIHWND / ComboBoxEx32 / Edit，过短会导致完全不弹窗）
+const MAX_RETRIES: u32 = 20;
+const RETRY_INTERVAL_MS: u64 = 60;
+/// 自动秒切注入失败后的延迟重试等待
+const INJECT_RETRY_DELAY_MS: u64 = 250;
 static MAIN_APP_STATE: AtomicPtr<AppState> = AtomicPtr::new(std::ptr::null_mut());
 static HOST_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -51,6 +59,8 @@ pub struct AppState {
     pub tab_module: Option<tab::TabModule>,
     pub last_switched_dialog: Option<HWND>,
     pub last_switched_path: Option<String>,
+    /// 已为哪个对话框实例补过一次失败重试（防止无限重试）
+    pub retried_dialog: Option<HWND>,
 }
 
 fn main() {
@@ -143,6 +153,7 @@ fn main() {
             tab_module: Some(tab_module),
             last_switched_dialog: None,
             last_switched_path: None,
+            retried_dialog: None,
         });
 
         MAIN_APP_STATE.store(Box::into_raw(state), Ordering::SeqCst);
@@ -199,6 +210,41 @@ unsafe extern "system" fn host_wnd_proc(
             let current_root = dialog::detector::find_dialog_root(current_fg);
             if current_fg == h || current_root == dialog::detector::find_dialog_root(h) {
                 on_foreground_window_changed_impl(h, next_retry);
+            }
+            LRESULT(0)
+        }
+        WM_QUICKPATH_INJECT_FAILED => {
+            // 秒切注入失败：清除去重标记，使该对话框可被重新触发；至多补一次延迟重试，
+            // 杜绝“点了没反应、且此后再也不重试”的静默失效。
+            let dlg = HWND(wparam.0 as *mut _);
+            let already_retried = lparam.0 != 0;
+            let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+            if !state_ptr.is_null() {
+                let state = unsafe { &mut *state_ptr };
+                if state.last_switched_dialog == Some(dlg) {
+                    state.last_switched_dialog = None;
+                }
+                if !already_retried {
+                    state.retried_dialog = Some(dlg);
+                    let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                    if !host_ptr.is_null() {
+                        let host_raw = host_ptr as usize;
+                        let dlg_raw = dlg.0 as usize;
+                        thread::spawn(move || {
+                            thread::sleep(Duration::from_millis(INJECT_RETRY_DELAY_MS));
+                            if !HOST_HWND.load(Ordering::SeqCst).is_null() {
+                                unsafe {
+                                    let _ = PostMessageW(
+                                        Some(HWND(host_raw as *mut _)),
+                                        WM_QUICKPATH_RETRY_CHECK,
+                                        WPARAM(dlg_raw),
+                                        LPARAM(MAX_RETRIES as isize),
+                                    );
+                                }
+                            }
+                        });
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -341,6 +387,10 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                 state.config.language.clone(),
                 dlg_info.kind,
             );
+        } else {
+            crate::dialog::detector::log_debug(
+                "MAIN: 检测到对话框，但悬浮吸附条未创建（floating_bar=None），无法展示",
+            );
         }
 
         // 避免对同一个对话框实例重复触发秒切
@@ -362,6 +412,8 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                     let edit_raw = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd).0 as usize;
                     let target = target_folder.clone();
                     let kind = dlg_info.kind;
+                    let already_retried = state.retried_dialog == Some(dlg_info.hwnd);
+                    let host_raw = HOST_HWND.load(Ordering::SeqCst) as usize;
 
                     state.last_switched_dialog = Some(dlg_info.hwnd);
                     state.last_switched_path = Some(target_folder.clone());
@@ -370,21 +422,29 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                     // 延时秒切，确保宿主应用对话框完成初始化绘制与控件就绪
                     thread::spawn(move || {
                         thread::sleep(Duration::from_millis(delay_ms));
-                        inject_path_to_dialog(
+                        let injected = inject_path_to_dialog(
                             HWND(dlg_raw as *mut _),
                             HWND(edit_raw as *mut _),
                             &target,
                             kind,
                         );
+                        // 注入失败必须回报主线程，否则去重标记会让该对话框永远不再尝试秒切
+                        if !injected && host_raw != 0 {
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(HWND(host_raw as *mut _)),
+                                    WM_QUICKPATH_INJECT_FAILED,
+                                    WPARAM(dlg_raw),
+                                    LPARAM(if already_retried { 1 } else { 0 }),
+                                );
+                            }
+                        }
                     });
                 }
             }
         }
     } else {
         // 如果检测未立即命中，分析当前窗口或其顶层根窗口是否属于潜在对话框（可能子控件尚未完成异步绘制）
-        const MAX_RETRIES: u32 = 8;
-        const RETRY_INTERVAL_MS: u64 = 40;
-
         if retry_count < MAX_RETRIES {
             let root_hwnd = dialog::detector::find_dialog_root(fg_hwnd);
             let root_class = dialog::detector::get_window_class_name(root_hwnd);
@@ -434,7 +494,15 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
             }
         }
 
-        // 明确离开对话框或多次重试超时后仍非对话框时，隐藏悬浮吸附条
+        // 明确离开对话框或多次重试超时后仍非对话框时，隐藏悬浮吸附条；
+        // 同时清理已销毁对话框残留的秒切标记，避免窗口句柄被复用后 AutoSwitch 被永久拦截
+        if let Some(prev) = state.last_switched_dialog {
+            if !unsafe { IsWindow(Some(prev)).as_bool() } {
+                state.last_switched_dialog = None;
+                state.last_switched_path = None;
+                state.retried_dialog = None;
+            }
+        }
         if let Some(bar) = &state.floating_bar {
             bar.hide();
         }

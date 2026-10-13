@@ -7,6 +7,18 @@ fn default_schema_version() -> u32 {
     1
 }
 
+// 测试专用：将配置读写重定向到临时路径，避免单元测试污染用户真实配置。
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG_PATH: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub fn set_test_config_path(path: Option<PathBuf>) {
+    TEST_CONFIG_PATH.with(|p| *p.borrow_mut() = path);
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -219,6 +231,11 @@ fn isolate_corrupted_config(path: &Path) {
 impl AppConfig {
     /// 确定配置文件路径（优先当前目录便携版，否则存入 %APPDATA%\QuickPath\config.json）
     pub fn get_config_path() -> PathBuf {
+        #[cfg(test)]
+        if let Some(p) = TEST_CONFIG_PATH.with(|p| p.borrow().clone()) {
+            return p;
+        }
+
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -410,6 +427,11 @@ mod tests {
 
     #[test]
     fn test_user_settings_respect() {
+        // 关键：测试必须写入隔离的临时路径，绝不允许触碰用户真实配置
+        let temp_dir = std::env::temp_dir().join(format!("qp_cfg_respect_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        set_test_config_path(Some(temp_dir.join("config.json")));
+
         // 确保用户的设置（关闭悬浮吸附栏、自定义浏览器黑名单）不会被自愈逻辑无理改写
         let mut config = AppConfig::default();
         config.floating_bar_auto_show = false;
@@ -422,6 +444,30 @@ mod tests {
             config.blacklist_processes.contains(&"chrome.exe".to_string()),
             "用户手动添加的黑名单进程绝不能被删除"
         );
+
+        set_test_config_path(None);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_config_roundtrip_stays_in_isolated_path() {
+        let temp_dir = std::env::temp_dir().join(format!("qp_cfg_roundtrip_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let isolated = temp_dir.join("config.json");
+        set_test_config_path(Some(isolated.clone()));
+
+        let mut config = AppConfig::default();
+        config.hotkey = "Alt+Shift+Q".to_string();
+        config.history_folders.push("C:\\Windows".to_string());
+        config.save().expect("隔离路径下保存必须成功");
+
+        assert!(isolated.exists(), "配置必须写入隔离路径");
+        let loaded = AppConfig::load();
+        assert_eq!(loaded.hotkey, "Alt+Shift+Q");
+        assert_eq!(loaded.history_folders, vec!["C:\\Windows".to_string()]);
+
+        set_test_config_path(None);
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

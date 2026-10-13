@@ -184,20 +184,34 @@ impl ShellComManager {
     }
 
     /// 在指定宿主窗口内查找目标路径对应的已有 Tab 索引（0-based，带 250ms 超时）
+    ///
+    /// 注意：STA 线程繁忙时首次请求可能超时被丢弃。超时与“确实不存在”必须区分开，
+    /// 否则会把已存在的标签误判为不存在，进而新建重复标签（表现为“点了像没反应”）。
+    /// 因此这里做有限次重试。
     pub fn find_tab_index_by_path(&self, host_hwnd: HWND, target_path: &str) -> Option<usize> {
-        let timeout = Duration::from_millis(250);
-        let deadline = std::time::Instant::now() + timeout;
-        let (reply_tx, reply_rx) = channel();
-        let host_hwnd_raw = host_hwnd.0 as usize;
-        if self.tx.send(ComRequest::FindTabIndexByPath {
-            host_hwnd_raw,
-            target_path: target_path.to_string(),
-            reply: reply_tx,
-            deadline,
-        }).is_err() {
-            return None;
+        const ATTEMPTS: usize = 3;
+        for attempt in 0..ATTEMPTS {
+            let timeout = Duration::from_millis(250);
+            let deadline = std::time::Instant::now() + timeout;
+            let (reply_tx, reply_rx) = channel();
+            let host_hwnd_raw = host_hwnd.0 as usize;
+            if self.tx.send(ComRequest::FindTabIndexByPath {
+                host_hwnd_raw,
+                target_path: target_path.to_string(),
+                reply: reply_tx,
+                deadline,
+            }).is_err() {
+                return None;
+            }
+            if let Ok(result) = reply_rx.recv_timeout(timeout) {
+                return result;
+            }
+            // 超时：短暂让出后重试，最后一次仍失败才认定“未找到”
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(Duration::from_millis(40));
+            }
         }
-        reply_rx.recv_timeout(timeout).ok().flatten()
+        None
     }
 
     /// 请求重定向某个 Explorer 窗口或标签页（带 200ms 超时）
