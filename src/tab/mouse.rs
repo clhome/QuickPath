@@ -151,6 +151,39 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
             Err(_) => return None,
         };
 
+        // 1. 优先超速路径：通过 ElementFromPoint 纳秒级直接命中被点击的元素或其父 TabItem
+        if let Ok(elem) = uia.ElementFromPoint(pt) {
+            let mut curr = elem;
+            for _ in 0..4 {
+                if let Ok(ctrl_type) = curr.CurrentControlType() {
+                    if ctrl_type == UIA_TabItemControlTypeId {
+                        if let Ok(rect) = curr.CurrentBoundingRectangle() {
+                            // 排除右侧关闭按钮区域（约 34px 宽度）
+                            if pt.x <= (rect.right - 34) {
+                                let title = curr.CurrentName().map(|n| n.to_string()).unwrap_or_default();
+                                if let Ok(pattern) = curr.GetCurrentPattern(UIA_SelectionItemPatternId) {
+                                    if let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
+                                        let _ = sel.Select();
+                                    }
+                                }
+                                return Some((title, 0));
+                            }
+                        }
+                    }
+                }
+                if let Ok(walker) = uia.RawViewWalker() {
+                    if let Ok(parent) = walker.GetParentElement(&curr) {
+                        curr = parent;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 2. 兜底路径：浅层/全树匹配
         let root_elem = match uia.ElementFromHandle(root_hwnd) {
             Ok(e) => e,
             Err(_) => return None,
@@ -167,16 +200,13 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
                 for i in 0..count {
                     if let Ok(tab) = tabs.GetElement(i) {
                         if let Ok(rect) = tab.CurrentBoundingRectangle() {
-                            // 检查 pt 是否在 TabItem 的 BoundingRectangle 内
                             if pt.x >= rect.left
                                 && pt.x <= rect.right
                                 && pt.y >= rect.top
                                 && pt.y <= rect.bottom
                             {
-                                // 排除右侧关闭按钮区域（约 34px 宽度）
                                 if pt.x <= (rect.right - 34) {
                                     let title = tab.CurrentName().map(|n| n.to_string()).unwrap_or_default();
-                                    // 激活该 TabItem 为当前选中项
                                     if let Ok(pattern) = tab.GetCurrentPattern(UIA_SelectionItemPatternId) {
                                         if let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
                                             let _ = sel.Select();

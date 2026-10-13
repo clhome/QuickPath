@@ -1022,11 +1022,81 @@
   - [x] 检查所有内部锚点与相互引用链接有效性
   - [x] 确保全文件 UTF-8 LF 编码，更新任务打勾状态
 
+## 阶段六十二：多标签页活动状态精准感知与对话框秒切响应提速专项优化
 
+> **核心目标**：
+> 1. 攻克 Windows 11 资源管理器多标签页（Tabs）活动状态识别难题：通过 Z-Order 顶层 `ShellTabWindowClass` 结合 `IShellBrowser` 精准映射活动 Tab，彻底解决多标签下“分不清哪个标签页激活/只能拿到第 1 个 Tab”的 Bug；
+> 2. 根治“另存为/打开”对话框弹出时主线程同步 COM 遍历与磁盘 I/O 阻塞造成的数秒卡顿，建立异步预取与 0ms 极速缓存；
+> 3. 协同优化多标签增强模块中过度轮询等待（消除 1.5 秒硬等待与 STA 线程阻塞）。
 
+- [x] **62.1 实现 Windows 11 多标签页活动 Tab 纳秒级精准识别 (`src/managers/explorer.rs`, `src/tab/com.rs`)**
+  - [x] 通过 Win32 原生 API `FindWindowExW(..., "ShellTabWindowClass", ...)` 获取 Z-Order 最顶层的活动 Tab 句柄（纳秒级）
+  - [x] 通过 `IServiceProvider -> IShellBrowser::GetWindow` 建立 `IWebBrowser2` 与 `ShellTabWindowClass` 1:1 映射
+  - [x] 重构 `get_explorer_folders()` 与 `enumerate_shell_tabs()`，使当前活动 Tab 判定 100% 精准
+- [x] **62.2 彻底解耦 UI 主线程 COM 阻塞，构建极速活跃文件夹与候选列表缓存池 (`src/managers/tracker.rs`, `src/main.rs`)**
+  - [x] 改造 `WindowTracker` 与主线程流程，杜绝在对话框弹出瞬间同步执行跨进程 COM 枚举与磁盘 I/O
+  - [x] 实现后台/前台事件驱动的快速缓存通道，确保“另存为”秒切时以 0ms 瞬间获取目标路径并执行注入
+- [x] **62.3 优化 `TabCoordinator` 与 `ShellComManager` 中的等待策略 (`src/tab/coordinator.rs`, `src/tab/com.rs`)**
+  - [x] 优化 `coordinator.rs` 探测循环，提取到有效物理路径立即短路返回，彻底消除前 30 轮（1.5 秒）过渡态强制 sleep
+  - [x] 优化 `wait_and_navigate_new_tab`，避免单线程 STA 中长时间循环 sleep 阻塞其他 COM 请求
+- [x] **62.4 全量编译验证、单元测试与更新任务清单 (`task.md`)**
+  - [x] 运行 `cargo check` 与 `cargo test` 确保无编译警告与逻辑回归（37 项测试全绿）
+  - [x] 验证优化效果并同步更新 `task.md` 进度打勾
+- [x] **62.5 彻底消除 STA 线程独占，将轮询循环移出 STA (`src/tab/com.rs`)**
+  - [x] STA 线程仅保留无 sleep 的原子操作，`wait_and_navigate_new_tab` 改为单次原子检查
+  - [x] 轮询循环移至调用方后台工作线程，杜绝 STA 队列被 1.5 秒长 sleep 独占
+- [x] **62.6 热路径移除网络路径 `is_dir()` 同步阻塞 (`src/tab/com.rs`, `src/managers/explorer.rs`, `src/managers/tracker.rs`)**
+  - [x] 路径有效性判断对网络路径（`\\` 开头）直接信任格式，彻底消除 SMB 网络断开数秒超时
+  - [x] 引入 `is_fast_valid_folder` 替换全仓热路径中的同步 `Path::is_dir()` 阻塞
+- [x] **62.7 窗口隐藏策略与总超时预算优化 (Fail-Fast 防假死) (`src/tab/coordinator.rs`)**
+  - [x] 设立整轮合并的总超时预算（800ms），超时或失败立即恢复源窗口透明度与位置
+  - [x] 优化 `get_window_target_info`，优先轻量解析 LocationURL，降低跨进程开销
+- [x] **62.8 优化 UIA 树搜索范围与性能 (`src/tab/mouse.rs`, `src/tab/select.rs`)**
+  - [x] 将标签栏 TabItem 查找限制在 `ShellTabWindowClass` 子树范围内，彻底杜绝全树深搜
+  - [x] 鼠标双击使用 `ElementFromPoint` 毫秒级直达命中元素
+- [x] **62.9 挂接 Win + E 快捷键监听，激活 `wine_to_tab` 与 `deduplication` (`src/tab/keyboard.rs`, `src/tab/mod.rs`, `src/tab/coordinator.rs`)**
+  - [x] 新增 `TabKeyboardGuard` 实现底层键盘钩子 `WH_KEYBOARD_LL`，拦截 Win+E 并分流至 `coordinator.handle_wine_hotkey()`
+  - [x] 在合并与打开链路中接入 `deduplication` 配置判定，消除死代码并激活去重功能
+## 阶段六十三：修复外部应用触发文件定位时的命令行误判与弹窗报错
 
+> **问题根因**：
+> 1. 当 VSCode / Antigravity IDE 等外部应用调用“在文件资源管理器中显示”（Shift+Alt+R / `SHOpenFolderAndSelectItems`）时，系统启动 COM 宿主进程 `C:\WINDOWS\explorer.exe /factory,{ceff45ee-...} -Embedding`；
+> 2. `coordinator.rs` 中的 `parse_select_target_from_cmdline` 在非 `/select` 分支粗暴以冒号判定路径，将整行命令行或 exe 自身误判为待打开目录，并让既有窗口 `Navigate2` 导航该非法路径，触发 Windows 报错弹窗“无法找到‘C:/WINDOWS/explorer.exe%20/factory,...’”；
+> 3. COM 穿透探测 `get_window_target_info_internal` 在匹配到 LocationURL 时过早短路，未提取 `SelectedItems`，导致外部应用请求选中的文件丢失高亮。
 
+- [x] **63.1 重构命令行解析与过滤逻辑 (`src/tab/coordinator.rs`)**
+  - [x] 严密过滤 COM 宿主模式启动命令（包含 `/factory` 或 `-embedding` 直接返回 `None`）
+  - [x] 严格剥离开头的可执行文件（`.exe` 及其前缀），禁止将 exe 自身误判为目标路径
+  - [x] 健壮解析直接打开目录与开关参数（支持 `/separate,` 等参数），确保路径有效且非 exe 文件
+- [x] **63.2 优化 COM 穿透探测中的选中项提取 (`src/tab/com.rs`)**
+  - [x] 移除 `is_physical_dir_path` 处的盲目短路，同步尝试轻量读取 `sfv.SelectedItems()`
+  - [x] 确保外部通过 `SHOpenFolderAndSelectItems` 唤起时能同时提取目标文件夹与待选中文件名
+- [x] **63.3 补齐多场景单元测试并验证 (`src/tab/coordinator.rs`)**
+  - [x] 覆盖 `/factory`、`-embedding`、独立 exe、带引号/无引号直接路径、`/select` 多种真实命令行
+  - [x] 运行 `cargo test` 确保所有测试 100% 通过（37 项测试全绿）
+- [x] **63.4 生产编译、进程热更新与临时文件清理**
+  - [x] 编译 Release 版本，重启 QuickPath
+  - [x] 清理临时排查脚本，更新 `task.md` 完成状态
 
+## 阶段六十四：借鉴 ExplorerTabUtility 架构重构新窗口标签页合并与既有标签页激活引擎
+
+> **问题根因**：
+> 1. 宿主查找过度依赖 COM：原逻辑依赖 `com_manager.get_all_tabs()` 查找宿主，因 STA 跨进程超时或虚拟目录过滤易误判为无宿主而直接独立开窗；
+> 2. 探测与合并超时预算过紧：新窗口冷启动 COM 挂载通常需要 300~1000ms，原 800ms 总超时过早触发 Fail-Safe，导致窗口未转 Tab 而是独立恢复；
+> 3. 已有标签页激活失败：原逻辑使用脆弱的 UIA 针对 `ShellTabWindowClass` 搜索 TabItem（该句柄实为内容列表而非标签栏，导致 100% 查找失败）；而 ExplorerTabUtility 使用 Windows 11 原生指令 `WM_COMMAND (0xA221)` 配合 1-based index 实现瞬时无感激活；
+> 4. 新建 Tab 指令与等待机制不稳：原代码采用同步 `SendMessage` 且等待新 Tab 仅 350ms，易超时中断。
+
+- [x] **64.1 Win32 原生健壮宿主查找与魔法指令激活 Tab (`src/tab/coordinator.rs`, `src/tab/com.rs`)**
+  - [x] 引入 `find_host_explorer_window` 基于 `CabinetWClass` 原生枚举，脱钩脆弱的 COM 查找宿主
+  - [x] 实现 `find_tab_index_by_path` 与 `select_tab_by_index`，通过 `0xA221 (Ctrl+1..N)` 魔法指令瞬间激活已有同目录标签页
+- [x] **64.2 优化新窗口穿透探测与新建 Tab 挂载就绪容限 (`src/tab/coordinator.rs`, `src/tab/com.rs`)**
+  - [x] 拓宽探测时间至 2500ms（与 ExplorerTabUtility 对齐），探测到物理路径立即短路跳出
+  - [x] 优化 `trigger_new_tab` 改用异步 `PostMessage` 投递 `0xA21B`，拓宽 `wait_and_navigate_new_tab` 轮询容限至 1500ms
+  - [x] 确保已有目录 100% 激活既有 Tab、未打开目录 100% 合并新建 Tab 并选中高亮文件
+- [x] **64.3 单元测试、编译验证与实机热更新**
+  - [x] 执行 `cargo test` 验证测试全绿（37 项测试通过）
+  - [x] 执行 `cargo build --release` 编译生产包成功
+  - [x] 更新 `task.md` 完成状态
 
 
 

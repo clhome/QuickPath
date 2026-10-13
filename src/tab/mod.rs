@@ -3,6 +3,7 @@
 pub mod com;
 pub mod coordinator;
 pub mod hook;
+pub mod keyboard;
 pub mod mouse;
 pub mod select;
 pub mod uia;
@@ -11,6 +12,7 @@ use std::sync::Arc;
 pub use com::ShellComManager;
 pub use coordinator::{TabConfig, TabCoordinator};
 pub use hook::TabHookGuard;
+pub use keyboard::TabKeyboardGuard;
 pub use mouse::TabMouseGuard;
 
 /// QuickPath 资源管理器多标签页增强模块核心服务封装
@@ -19,6 +21,7 @@ pub struct TabModule {
     coordinator: Arc<TabCoordinator>,
     hook_guard: Option<TabHookGuard>,
     mouse_guard: Option<TabMouseGuard>,
+    keyboard_guard: Option<TabKeyboardGuard>,
 }
 
 impl TabModule {
@@ -31,6 +34,7 @@ impl TabModule {
             coordinator,
             hook_guard: None,
             mouse_guard: None,
+            keyboard_guard: None,
         }
     }
 
@@ -44,6 +48,10 @@ impl TabModule {
             let m_guard = TabMouseGuard::new(self.coordinator.clone())?;
             self.mouse_guard = Some(m_guard);
         }
+        if self.keyboard_guard.is_none() {
+            let k_guard = TabKeyboardGuard::new(self.coordinator.clone())?;
+            self.keyboard_guard = Some(k_guard);
+        }
         Ok(())
     }
 
@@ -51,6 +59,7 @@ impl TabModule {
     pub fn stop(&mut self) {
         self.hook_guard = None;
         self.mouse_guard = None;
+        self.keyboard_guard = None;
     }
 
     /// 获取协调器引用

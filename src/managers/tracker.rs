@@ -21,6 +21,8 @@ pub struct WindowTracker {
     pub last_manager_path: Option<String>,
     pub last_manager_time: Option<Instant>,
     pub last_manager_hwnd: Option<HWND>,
+    pub cached_candidates: Vec<FolderCandidate>,
+    pub last_candidates_time: Option<Instant>,
 }
 
 impl WindowTracker {
@@ -31,7 +33,14 @@ impl WindowTracker {
     /// 当系统前台窗口改变时调用，若为文件管理器则记录该状态
     pub fn on_foreground_change(&mut self, hwnd: HWND, class_name: &str, config: &AppConfig) {
         if is_file_manager_class(class_name) {
-            let active_folder = get_current_active_folder(config);
+            // 优先通过短路加速通道提取，避免阻塞
+            let active_folder = if config.enable_win11_tabs && class_name == "CabinetWClass" {
+                super::explorer::get_active_explorer_folder_fast()
+                    .or_else(|| get_current_active_folder(config))
+            } else {
+                get_current_active_folder(config)
+            };
+
             if let Some(folder) = active_folder {
                 self.last_manager_path = Some(folder);
                 self.last_manager_time = Some(Instant::now());
@@ -41,29 +50,41 @@ impl WindowTracker {
     }
 
     /// 获取最推荐的自动秒切目标目录 (AutoSwitch 路径)
-    pub fn get_auto_switch_target(&self, config: &AppConfig) -> Option<String> {
-        // 1. 如果最近（5分钟内）活跃过某个文件管理器，优先使用该路径
+    pub fn get_auto_switch_target(&mut self, config: &AppConfig) -> Option<String> {
+        // 1. 核心提速：极速探测当前或最顶层可见资源管理器的活动 Tab 路径（纳秒/微秒级短路命中）
+        if config.enable_win11_tabs {
+            if let Some(fast_folder) = super::explorer::get_active_explorer_folder_fast() {
+                let norm = normalize_path(&fast_folder);
+                self.last_manager_path = Some(norm.clone());
+                self.last_manager_time = Some(Instant::now());
+                return Some(norm);
+            }
+        }
+
+        // 2. 检查最近活跃的文件管理器缓存（放宽至 30 分钟内有效，避免用户阅读/编辑较久后缓存失效）
         if let (Some(path), Some(time)) = (&self.last_manager_path, self.last_manager_time) {
-            if time.elapsed().as_secs() < 300 && Path::new(path).is_dir() {
+            if time.elapsed().as_secs() < 1800 && is_fast_valid_folder(path) {
                 return Some(path.clone());
             }
         }
 
-        // 2. 实时扫描当前打开的活动/首选文件管理器文件夹
+        // 3. 扫描其他第三方文件管理器（DOpus / TotalCmd / XYplorer）
         if let Some(folder) = get_current_active_folder(config) {
+            self.last_manager_path = Some(folder.clone());
+            self.last_manager_time = Some(Instant::now());
             return Some(folder);
         }
 
-        // 3. 回退策略：使用最后一次访问的历史记录路径 (Last Used Folder)
+        // 4. 回退策略：使用最后一次访问的历史记录路径 (Last Used Folder)
         if let Some(last_history) = config.history_folders.first() {
-            if Path::new(last_history).is_dir() {
+            if is_fast_valid_folder(last_history) {
                 return Some(normalize_path(last_history));
             }
         }
 
-        // 4. 回退策略：使用第一个收藏夹路径
+        // 5. 回退策略：使用第一个收藏夹路径
         if let Some(first_pinned) = config.pinned_folders.first() {
-            if Path::new(first_pinned).is_dir() {
+            if is_fast_valid_folder(first_pinned) {
                 return Some(normalize_path(first_pinned));
             }
         }
@@ -71,8 +92,15 @@ impl WindowTracker {
         None
     }
 
-    /// 收集所有候选路径（包含所有打开的窗口/Tab、历史记录、收藏夹与系统常用）
-    pub fn get_all_candidates(&self, config: &AppConfig) -> Vec<FolderCandidate> {
+    /// 收集所有候选路径（包含所有打开的窗口/Tab、历史记录、收藏夹与系统常用，带 1500ms 短期防抖缓存）
+    pub fn get_all_candidates(&mut self, config: &AppConfig) -> Vec<FolderCandidate> {
+        // 短期防抖：1500ms 内且缓存非空，直接极速返回缓存，杜绝主线程重复并发跨进程枚举
+        if let Some(last_time) = self.last_candidates_time {
+            if last_time.elapsed().as_millis() < 1500 && !self.cached_candidates.is_empty() {
+                return self.cached_candidates.clone();
+            }
+        }
+
         let mut list = Vec::new();
         let mut seen = HashSet::new();
 
@@ -139,7 +167,7 @@ impl WindowTracker {
         // 5. 最近历史记录 (History)
         for h in &config.history_folders {
             let norm = normalize_path(h);
-            if Path::new(&norm).is_dir() && seen.insert(norm.to_lowercase()) {
+            if is_fast_valid_folder(&norm) && seen.insert(norm.to_lowercase()) {
                 list.push(FolderCandidate {
                     path: norm.clone(),
                     title: get_folder_name(&norm),
@@ -152,7 +180,7 @@ impl WindowTracker {
         // 6. 常用固定 (Pinned)
         for p in &config.pinned_folders {
             let norm = normalize_path(p);
-            if Path::new(&norm).is_dir() && seen.insert(norm.to_lowercase()) {
+            if is_fast_valid_folder(&norm) && seen.insert(norm.to_lowercase()) {
                 list.push(FolderCandidate {
                     path: norm.clone(),
                     title: get_folder_name(&norm),
@@ -206,6 +234,9 @@ impl WindowTracker {
         // 排序：活动项最前
         list.sort_by(|a, b| b.is_active.cmp(&a.is_active));
 
+        self.cached_candidates = list.clone();
+        self.last_candidates_time = Some(Instant::now());
+
         list
     }
 }
@@ -222,7 +253,7 @@ fn get_current_active_folder(config: &AppConfig) -> Option<String> {
     // 遍历顺序：DOpus -> TotalCmd -> XYplorer -> 资源管理器
     if config.enable_dopus {
         for f in get_dopus_folders() {
-            if f.is_active && Path::new(&f.path).is_dir() {
+            if f.is_active && is_fast_valid_folder(&f.path) {
                 return Some(normalize_path(&f.path));
             }
         }
@@ -230,7 +261,7 @@ fn get_current_active_folder(config: &AppConfig) -> Option<String> {
 
     if config.enable_totalcmd {
         for f in get_totalcmd_folders() {
-            if f.is_active && Path::new(&f.path).is_dir() {
+            if f.is_active && is_fast_valid_folder(&f.path) {
                 return Some(normalize_path(&f.path));
             }
         }
@@ -238,7 +269,7 @@ fn get_current_active_folder(config: &AppConfig) -> Option<String> {
 
     if config.enable_xyplorer {
         for f in get_xyplorer_folders() {
-            if f.is_active && Path::new(&f.path).is_dir() {
+            if f.is_active && is_fast_valid_folder(&f.path) {
                 return Some(normalize_path(&f.path));
             }
         }
@@ -248,19 +279,36 @@ fn get_current_active_folder(config: &AppConfig) -> Option<String> {
         let expls = get_explorer_folders();
         // 1. 查找明确标记为 active 的
         for f in &expls {
-            if f.is_active && Path::new(&f.path).is_dir() {
+            if f.is_active && is_fast_valid_folder(&f.path) {
                 return Some(normalize_path(&f.path));
             }
         }
         // 2. 否则直接取第一个打开的资源管理器
         if let Some(first) = expls.first() {
-            if Path::new(&first.path).is_dir() {
+            if is_fast_valid_folder(&first.path) {
                 return Some(normalize_path(&first.path));
             }
         }
     }
 
     None
+}
+
+/// 快速校验目录路径有效性（网络 UNC 路径零 I/O 阻塞，本地盘符免除热路径阻塞）
+pub fn is_fast_valid_folder(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // 1. 网络/UNC 路径 (\\server\share)：格式校验，坚决不调用 Path::is_dir() 触发 SMB 超时卡死
+    if trimmed.starts_with("\\\\") {
+        return trimmed.len() >= 5 && trimmed[2..].contains('\\');
+    }
+    // 2. 本地绝对路径 (如 C:\...)：热路径优先信任格式，排除虚拟或非法格式
+    if trimmed.len() >= 3 && &trimmed[1..3] == ":\\" {
+        return true;
+    }
+    Path::new(trimmed).is_dir()
 }
 
 fn normalize_path(path: &str) -> String {

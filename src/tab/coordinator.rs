@@ -11,8 +11,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::com::{is_physical_dir_path, ShellComManager};
-use super::select::{async_select_file_item, try_select_tab_item_by_title};
+use super::select::async_select_file_item;
 use super::uia::trigger_new_tab;
+use windows::core::BOOL;
 
 /// 多标签增强配置
 #[derive(Debug, Clone)]
@@ -218,6 +219,56 @@ impl TabCoordinator {
         &self.com_manager
     }
 
+    /// 查找除 exclude_hwnd 之外真实存活且可见的 Explorer 宿主窗口 (CabinetWClass)
+    pub fn find_host_explorer_window(exclude_hwnd: HWND) -> Option<HWND> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetClassNameW, GetForegroundWindow, IsWindow, IsWindowVisible,
+        };
+
+        // 优先检查当前前台聚焦窗口是否为合法的宿主窗口
+        let fg = unsafe { GetForegroundWindow() };
+        if !fg.0.is_null() && fg != exclude_hwnd && Self::is_explorer_window(fg) && unsafe { IsWindowVisible(fg).as_bool() } {
+            return Some(fg);
+        }
+
+        struct SearchCtx {
+            exclude: HWND,
+            found: Option<HWND>,
+        }
+
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            unsafe {
+                let ctx = &mut *(lparam.0 as *mut SearchCtx);
+                if hwnd == ctx.exclude {
+                    return BOOL(1);
+                }
+                if IsWindow(Some(hwnd)).as_bool() && IsWindowVisible(hwnd).as_bool() {
+                    let mut buf = [0u16; 64];
+                    let len = GetClassNameW(hwnd, &mut buf);
+                    if len > 0 {
+                        let cls = String::from_utf16_lossy(&buf[..len as usize]);
+                        if cls == "CabinetWClass" {
+                            ctx.found = Some(hwnd);
+                            return BOOL(0);
+                        }
+                    }
+                }
+                BOOL(1)
+            }
+        }
+
+        let mut ctx = SearchCtx {
+            exclude: exclude_hwnd,
+            found: None,
+        };
+
+        unsafe {
+            let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
+        }
+
+        ctx.found
+    }
+
     /// 捕获新产生的外部顶级窗口并合并为 Tab
     pub fn handle_new_explorer_window(&self, new_hwnd: HWND) {
         let cfg = self.get_config();
@@ -240,19 +291,11 @@ impl TabCoordinator {
             }
         }
 
-        // 1. 查找除 new_hwnd 之外的真实存活且可见的宿主窗口
-        let tabs = self.com_manager.get_all_tabs();
-        let host_tab = tabs.into_iter().find(|t| {
-            let h = t.hwnd();
-            h != new_hwnd
-                && !h.0.is_null()
-                && unsafe { IsWindow(Some(h)).as_bool() && IsWindowVisible(h).as_bool() }
-        });
-
-        // 关键原则：若当前系统没有其它存活且可见的宿主窗口，坚决不隐藏、不干涉，完全原生放行
-        let host = match host_tab {
+        // 1. 查找除 new_hwnd 之外的真实存活且可见的宿主窗口（原生 Win32 枚举，0ms 延迟）
+        let host_hwnd = match Self::find_host_explorer_window(new_hwnd) {
             Some(h) => h,
             None => {
+                // 关键原则：若当前系统没有其它存活且可见的宿主窗口，坚决不隐藏、不干涉，完全原生放行
                 let _ = self.processing_new_windows.lock().map(|mut set| set.remove(&raw_new));
                 return;
             }
@@ -284,17 +327,20 @@ impl TabCoordinator {
             );
         }
 
-        let raw_host = host.hwnd_raw;
+        let raw_host = host_hwnd.0 as usize;
         let com = self.com_manager.clone();
         let processing = self.processing_new_windows.clone();
+        let cfg_clone = cfg.clone();
+        let bypass = self.bypass_deduplication.clone();
 
         std::thread::spawn(move || {
+            let start_time = std::time::Instant::now();
             let new_h = HWND(raw_new as *mut _);
             let host_h = HWND(raw_host as *mut _);
 
             let mut target_info: Option<(String, Option<String>)> = None;
 
-            // 1. 尝试从新窗口对应的进程命令行提取目标路径（优先识别外部快捷 /select）
+            // 1. 尝试从新窗口对应的进程命令行提取目标路径（优先识别外部快捷 /select 或直接参数）
             let mut pid = 0u32;
             unsafe {
                 let _ = GetWindowThreadProcessId(new_h, Some(&mut pid));
@@ -307,26 +353,26 @@ impl TabCoordinator {
                 }
             }
 
-            // 2. COM 穿透定向探测：最长等待 2000ms（40 轮 × 50ms），确保新窗口在冷启动下有充足时间初始化完成
+            // 2. COM 穿透定向探测：最长等待 2500ms（与 ExplorerTabUtility 架构对齐），确保新窗口在冷启动下挂载完成
             if target_info.is_none() {
-                for round in 0..40 {
+                for round in 0..50 {
+                    if start_time.elapsed() > Duration::from_millis(2500) {
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(50));
                     if !unsafe { IsWindow(Some(new_h)) }.as_bool() {
                         let _ = processing.lock().map(|mut set| set.remove(&raw_new));
                         return; // 窗口已被外部自行关闭
                     }
                     if let Some(info) = com.get_window_target_info(new_h) {
-                        // 核心防误判：如果当前提取出的是空主页（"shell:Home" 或虚拟主文件夹），且没有选中文件，
-                        // 在前 30 轮（1500ms）内判定为过渡初始骨架状态，继续轮询等待真实目标加载完成！
                         let (ref path, ref sel) = info;
                         let is_blank_or_home = path == "shell:Home"
                             || path == "shell:::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}"
                             || path.is_empty();
-                        if is_blank_or_home && sel.is_none() && round < 30 {
-                            continue;
+                        if !is_blank_or_home || (round >= 6 && sel.is_none()) {
+                            target_info = Some(info);
+                            break;
                         }
-                        target_info = Some(info);
-                        break;
                     }
                 }
             }
@@ -340,27 +386,26 @@ impl TabCoordinator {
                         let _ = SetForegroundWindow(host_h);
                     }
 
-                    // 检查宿主窗口是否已经存在该路径的 Tab
-                    let mut already_opened = false;
-                    let current_tabs = com.get_all_tabs();
-                    let norm_target = normalize_path(folder_path);
-                    for tab in &current_tabs {
-                        if tab.hwnd() == host_h && normalize_path(&tab.path) == norm_target {
-                            already_opened = true;
-                            break;
-                        }
+                    // 检查去重配置：若开启去重且非旁路状态，检测宿主中是否已存在该 Tab
+                    let mut matched_tab_index = None;
+                    if cfg_clone.deduplication && !bypass.load(Ordering::SeqCst) {
+                        matched_tab_index = com.find_tab_index_by_path(host_h, folder_path);
                     }
 
-                    if already_opened {
-                        // 宿主已有该 Tab：提取目录名并通过 UIA 切换激活对应的 TabItem
-                        let p = std::path::Path::new(folder_path);
-                        let folder_name = p.file_name()
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| folder_path.clone());
-                        let _ = try_select_tab_item_by_title(host_h, &folder_name);
+                    if let Some(tab_idx) = matched_tab_index {
+                        // 宿主已有该 Tab：通过 0xA221 (Ctrl+1..N) 魔法指令瞬时激活目标 Tab！
+                        unsafe {
+                            use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COMMAND};
+                            let _ = SendMessageW(
+                                host_h,
+                                WM_COMMAND,
+                                Some(WPARAM(0xA221)),
+                                Some(LPARAM((tab_idx + 1) as isize)),
+                            );
+                        }
                         merged_success = true;
                     } else {
-                        // 宿主没有该 Tab，在宿主中新建 Tab 并精准导航
+                        // 宿主没有该 Tab 或未开启去重，在宿主中新建 Tab 并精准导航
                         let count_before = com.get_tabs_count_for_hwnd(host_h);
                         if trigger_new_tab(host_h) {
                             if is_physical_dir_path(folder_path) {
@@ -374,7 +419,7 @@ impl TabCoordinator {
             }
 
             if merged_success {
-                // 如果存在待高亮的文件（外部 /select 唤起），异步在宿主列表中恢复聚焦选中
+                // 如果存在待高亮的文件（外部 /select 唤起或 SHOpenFolderAndSelectItems），异步在宿主列表中恢复聚焦选中
                 if let Some((_, Some(ref file_name))) = target_info {
                     async_select_file_item(host_h, file_name.clone());
                 }
@@ -501,9 +546,16 @@ unsafe fn query_process_cmdline(pid: u32) -> Option<String> {
     }
 }
 
-/// 从外部 Explorer 命令行提取 `/select,"<path>"` 的目标文件与父目录
+/// 从外部 Explorer 命令行提取目标文件与父目录（支持 /select 与常规路径参数，过滤 COM 宿主模式与 exe 自身）
 pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<String>)> {
     let lower = cmd.to_lowercase();
+
+    // 1. 过滤 Windows COM 宿主模式（/factory, {...} -Embedding），此类命令无直接路径参数，交由后续 COM 穿透探测
+    if lower.contains("/factory") || lower.contains("-embedding") {
+        return None;
+    }
+
+    // 2. 优先处理显式的 /select,"<path>" 模式
     if let Some(pos) = lower.find("/select,") {
         let remainder = cmd[pos + 8..].trim();
         let target_str = if remainder.starts_with('"') {
@@ -516,7 +568,8 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
             remainder.split_whitespace().next().unwrap_or(remainder)
         };
 
-        if target_str.len() >= 2 {
+        let target_str = target_str.trim();
+        if is_valid_select_path(target_str) {
             let p = std::path::Path::new(target_str);
             if p.is_file() {
                 let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| target_str.to_string());
@@ -530,8 +583,93 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
                 return Some((folder, file));
             }
         }
+        return None;
     }
+
+    // 3. 处理外部程序直接带路径唤起（如 explorer.exe "D:\Projects" 或 "C:\Windows\explorer.exe" D:\Projects）
+    let args_str = strip_exe_prefix(cmd);
+
+    // 首先尝试在引号部分提取候选路径
+    for part in args_str.split('"') {
+        let mut candidate = part.trim();
+        if let Some(comma_pos) = candidate.find(',') {
+            if candidate.starts_with('/') || candidate.starts_with('-') {
+                candidate = candidate[comma_pos + 1..].trim();
+            }
+        }
+        let candidate = candidate.trim_matches('"').trim();
+        if is_valid_target_dir_path(candidate) {
+            let p = std::path::Path::new(candidate);
+            if p.is_file() {
+                let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| candidate.to_string());
+                let file = p.file_name().map(|f| f.to_string_lossy().to_string());
+                return Some((folder, file));
+            }
+            return Some((candidate.to_string(), None));
+        }
+    }
+
+    // 若未被双引号包裹，按空白切分参数逐项检查
+    for token in args_str.split_whitespace() {
+        let mut candidate = token.trim();
+        if let Some(comma_pos) = candidate.find(',') {
+            if candidate.starts_with('/') || candidate.starts_with('-') {
+                candidate = candidate[comma_pos + 1..].trim();
+            }
+        }
+        let candidate = candidate.trim_matches('"').trim();
+        if is_valid_target_dir_path(candidate) {
+            let p = std::path::Path::new(candidate);
+            if p.is_file() {
+                let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| candidate.to_string());
+                let file = p.file_name().map(|f| f.to_string_lossy().to_string());
+                return Some((folder, file));
+            }
+            return Some((candidate.to_string(), None));
+        }
+    }
+
     None
+}
+
+/// 剥离命令行开头的可执行文件部分
+fn strip_exe_prefix(cmd: &str) -> &str {
+    let trimmed = cmd.trim();
+    if trimmed.starts_with('"') {
+        if let Some(end_quote) = trimmed[1..].find('"') {
+            return trimmed[1 + end_quote + 1..].trim();
+        }
+    }
+
+    if let Some(space_pos) = trimmed.find(char::is_whitespace) {
+        let first_token = &trimmed[..space_pos];
+        if first_token.to_lowercase().ends_with(".exe") || first_token.eq_ignore_ascii_case("explorer") {
+            return trimmed[space_pos..].trim();
+        }
+    }
+
+    ""
+}
+
+/// 检查是否为 /select 候选路径（支持 .exe 等各类目标文件）
+fn is_valid_select_path(path: &str) -> bool {
+    let s = path.trim();
+    if s.len() < 2 || s.starts_with('/') || s.starts_with('-') {
+        return false;
+    }
+    (s.len() >= 2 && &s[1..2] == ":") || s.starts_with("\\\\")
+}
+
+/// 检查是否为直接唤起的目标目录/文件路径（严格排除 .exe 与命令行开关）
+fn is_valid_target_dir_path(path: &str) -> bool {
+    let s = path.trim();
+    if s.len() < 2 || s.starts_with('/') || s.starts_with('-') {
+        return false;
+    }
+    if s.to_lowercase().ends_with(".exe") {
+        return false;
+    }
+    (s.len() >= 2 && &s[1..2] == ":") || s.starts_with("\\\\")
 }
 
 #[cfg(test)]
@@ -556,7 +694,32 @@ mod tests {
 
         let cmd3 = r#"explorer.exe "C:\Users""#;
         let res3 = parse_select_target_from_cmdline(cmd3);
-        assert_eq!(res3, None);
+        assert_eq!(res3, Some(("C:\\Users".to_string(), None)));
+
+        let cmd4 = r#"explorer.exe"#;
+        let res4 = parse_select_target_from_cmdline(cmd4);
+        assert_eq!(res4, None);
+
+        // 测试 COM 宿主模式启动命令过滤（核心防御）
+        let cmd_factory1 = r#"C:\WINDOWS\explorer.exe /factory,{ceff45ee-c862-41de-aee2-a022c81eda92} -Embedding"#;
+        assert_eq!(parse_select_target_from_cmdline(cmd_factory1), None);
+
+        let cmd_factory2 = r#""C:\WINDOWS\explorer.exe" /factory,{75dff2b7-6936-4c06-a8bb-676a7b00b24b} -Embedding"#;
+        assert_eq!(parse_select_target_from_cmdline(cmd_factory2), None);
+
+        // 测试可执行文件独立启动过滤
+        let cmd_exe_only1 = r#"C:\WINDOWS\Explorer.EXE"#;
+        assert_eq!(parse_select_target_from_cmdline(cmd_exe_only1), None);
+
+        let cmd_exe_only2 = r#""C:\WINDOWS\explorer.exe""#;
+        assert_eq!(parse_select_target_from_cmdline(cmd_exe_only2), None);
+
+        // 测试直接带路径唤起
+        let cmd_direct1 = r#"C:\WINDOWS\explorer.exe "D:\My Project""#;
+        assert_eq!(parse_select_target_from_cmdline(cmd_direct1), Some(("D:\\My Project".to_string(), None)));
+
+        let cmd_direct2 = r#"explorer.exe D:\WorkSpace"#;
+        assert_eq!(parse_select_target_from_cmdline(cmd_direct2), Some(("D:\\WorkSpace".to_string(), None)));
     }
 }
 

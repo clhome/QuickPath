@@ -103,7 +103,23 @@ pub fn try_select_tab_item_by_title(host_hwnd: HWND, folder_name: &str) -> bool 
             Err(_) => return false,
         };
 
-        let root: IUIAutomationElement = match uia.ElementFromHandle(host_hwnd) {
+        // 核心性能优化：优先定位 ShellTabWindowClass 控件句柄作为 UIA 搜索根，避免全树深搜成千上万个文件项
+        let search_hwnd = if let Ok(tab_wnd) = windows::Win32::UI::WindowsAndMessaging::FindWindowExW(
+            Some(host_hwnd),
+            None,
+            windows::core::w!("ShellTabWindowClass"),
+            None,
+        ) {
+            if !tab_wnd.0.is_null() {
+                tab_wnd
+            } else {
+                host_hwnd
+            }
+        } else {
+            host_hwnd
+        };
+
+        let root: IUIAutomationElement = match uia.ElementFromHandle(search_hwnd) {
             Ok(r) => r,
             Err(_) => return false,
         };

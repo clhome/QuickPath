@@ -16,7 +16,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, KEYEVENTF_KEYUP, VK_CONTROL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, IsWindow, SendMessageW, SetForegroundWindow, WM_COMMAND,
+    FindWindowExW, IsWindow, PostMessageW, SetForegroundWindow, WM_COMMAND,
 };
 
 /// 尝试向 ShellTabWindowClass 发送 Windows 11 Explorer 内部原生创建新 Tab 的 0xA21B 魔法指令
@@ -35,7 +35,8 @@ fn try_magic_command_add_tab(explorer_hwnd: HWND) -> bool {
             None,
         ) {
             if !tab_wnd.0.is_null() {
-                let _ = SendMessageW(tab_wnd, WM_COMMAND, Some(WPARAM(0xA21B)), Some(LPARAM(0)));
+                // 采用 PostMessageW 异步安全投递，绝不阻塞 UI 消息泵（与 ExplorerTabUtility 架构对齐）
+                let _ = PostMessageW(Some(tab_wnd), WM_COMMAND, WPARAM(0xA21B), LPARAM(0));
                 return true;
             }
         }
