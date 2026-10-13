@@ -79,8 +79,13 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
             hwnd = FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
         }
 
-        // 扫描完成，立即恢复用户原始剪贴板
-        guard.restore_now();
+        // 扫描完成，立即恢复用户原始剪贴板（恢复失败仅记录，不影响扫描结果）
+        if let Err(err) = guard.restore_now() {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_RESTORE_FAILED(totalcmd): {:?}",
+                err
+            ));
+        }
     }
 
     results

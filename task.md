@@ -1147,6 +1147,74 @@
   - [x] 更新 `task.md` 所有子任务打勾状态
   - [x] 成功构建 Release 生产版本并在系统常驻平稳运行
 
+## 阶段六十六：审计报告 v1.2.1 首批发布阻断项加固（v1.2.2）
+
+> **审计依据**：`test/QuickPath_审计评分报告_v1.2.1.md`（基线 `42bdc38` / tag `v1.2.1`，综合 7.3 分，结论“不宜稳定发布”）。
+> **本轮范围（用户确认）**：仅第一批 5 项（2 个 P0 + R-03 / P-01 / S-01）；改造力度=保守加固（保留既有交互链路，补齐校验与失败传播）；验证=本地门禁 + 新增单测；交付=改完先不提交。
+> **不在本轮**：第二批（COM/UIA 隔离与 circuit breaker、第三方 IPC 有界化、钩子生命周期 drain、AppState 消息化、日志轮治）；第三批（Actions pin SHA、Authenticode 签名、发布门禁）。
+
+- [x] **66.1 P0-01 剪贴板恢复事务化（`src/win32/clipboard.rs`）**
+  - [x] 逐格式记录恢复结果，`GlobalAlloc` / `GlobalLock` / `SetClipboardData` 返回值全部检查（句柄未交接前失败必 `GlobalFree`）
+  - [x] 仅在全部格式恢复成功后置 `restored = true`；失败返回 `ClipboardRestoreError::{Busy, EmptyFailed, PartialRestore(Vec<u32>)}` 并有限次重试（仅补写未成功格式，不重复清空）
+  - [x] 记录写入临时内容后的剪贴板序列号 + 精确文本；恢复前若序列号变化且当前文本不再等于本次注入文本 → `SkippedForeignChange`，绝不覆盖用户新内容
+  - [x] `with_temporary_clipboard_text` 将恢复失败向上传播为 `ClipboardSafetyError::RestoreFailed`（不再静默 `Ok`）
+  - [x] 新增 fault-injection 单测：`test_restore_partial_failure_is_reported_and_retryable`（单格式失败必报错且不得自称成功、解除故障后重试可补齐）、`test_restore_refuses_to_overwrite_newer_user_content`、`test_temporary_clipboard_text_propagates_restore_failure`
+- [x] **66.2 P0-02 WPS 注入保守加固（`src/win32/uia.rs`, `src/win32/mod.rs`, `src/dialog/injector.rs`, `src/main.rs`, `src/ui/floating_bar.rs`）**
+  - [x] 引入 `WindowIdentity`（HWND + PID + 进程创建时间 + 窗口类名），每个动作前复核；身份变化/失去前台立即取消（零全局输入）
+  - [x] `bring_to_front()` 不再相信 API 返回值，以 `GetForegroundWindow()` 比对为准（4 次有界重试）
+  - [x] 焦点优先走 UIA `SetFocus` + `CurrentHasKeyboardFocus()` 确认；仅未确认时才补物理点击，且点前复核身份/前台并现场重读控件矩形
+  - [x] `wait_readback_match()`：粘贴或 `SetValue` 后回读校验（最多 3 次、每次间隔 60ms 容忍 Qt 更新延迟）；回读不一致绝不发送 Enter
+  - [x] 恢复原文件名的子线程同样先复核身份与前台；COM 生命周期改用 `ComApartment` RAII，消除提前返回漏 `CoUninitialize` 的问题
+  - [x] 新增 `InjectDone` 回调类型：`inject_path_to_dialog(..., on_done)` 回传真实结果（WPS 异步回调、标准对话框同步回调）；`main.rs` 秒切链路改为按真实结果回报失败重试
+  - [x] 新增单测：`test_normalize_path_text_...` / `test_paths_equal_accepts_wps_style_value_variants`（含 `C:\Users\Test2` vs `C:\Users\Test` 必须判不等的边界）
+- [x] **66.3 R-03 同名标签完整路径核验（`src/tab/select.rs`, `src/tab/coordinator.rs`）**
+  - [x] 删除按标题定身份的 `pick_matching_index` / `pick_matching_tab` / `is_tab_active_by_name` / `try_select_tab_item_by_title`
+  - [x] 新增 `pick_tab_index_for_selection`（唯一精确同名优先，否则回退 COM 索引，目标为空/索引越界/空名项一律拒绝）+ `try_select_tab_item`（只管选择，不声称身份）
+  - [x] `activate_tab_in_host` 每次尝试后由 Shell COM 核验“活动标签规范化完整路径 == 目标路径”；全部失败走 fail-safe，绝不关闭源窗口
+  - [x] 重写把“两个同名 src 固定返回索引 0”当期望值的单测，改为断言标题无法区分身份、必须靠 COM 索引 + 完整路径核验
+- [x] **66.4 P-01 低级钩子瘦身（`src/tab/keyboard.rs`, `src/tab/coordinator.rs`, `src/tab/uia.rs`, `src/tab/mod.rs`, `src/main.rs`）**
+  - [x] 钩子回调移除同步 COM/UIA：只做按键识别 + 配置/宿主廉价判定 + `PostMessageW` 投递，立即返回
+  - [x] 吞键前提收敛为“配置开启 + 存在真实 CabinetWClass 宿主 + 消息投递成功”（`quick_wine_target` 为纯 Win32 判定）
+  - [x] 接管动作改在工作线程执行，并在 800ms 内由 Shell COM 确认新标签出现；未确认则用 System32 绝对路径补偿打开原生窗口（杜绝“按键被吞且无反应”）
+  - [x] 新增 `trigger_new_tab_safe`：Win+E 链路不再使用全局 `Ctrl+T` 模拟；新增宿主消息 `WM_QUICKPATH_WINE_TO_TAB`（0x0400+104）
+  - [x] 钩子回调改用 `Arc::increment_strong_count` + `from_raw` 受控模式（不再临时接管静态指针所有权）；安装失败路径归还静态引用
+  - [x] 未加额外去抖：回调已无任何重活（仅两次廉价 Win32 判定 + 一次投递），保留与系统原生一致的“每次按键一次响应”语义；长按自动重复与原生行为一致
+- [x] **66.5 S-01 禁止高权限 PATH 执行（新增 `src/win32/trusted.rs` + `autostart.rs` + `managers/dopus.rs`）**
+  - [x] 新增可信路径模块：`system32_tool` / `system_tool` / `system_directory`（`GetSystemDirectoryW`）/ `windows_directory` / `trusted_roots`（`SHGetKnownFolderPath`）/ `is_trusted_install_dir`，全程系统 API，不读可被会话覆盖的环境变量
+  - [x] `schtasks.exe` 改为 System32 绝对路径（4 处调用统一走 `schtasks_command()`），找不到可信路径则不执行且不回退 PATH
+  - [x] `dopusrt.exe` 删除 PATH 搜索，仅接受注册表 `InstallDir`（HKLM/HKCU、含 WOW6432Node）或受信 Program Files 标准路径，且必须在受信根目录内
+  - [x] 新增单测 6 项：目录边界（`C:\Program FilesEvil` 不得命中）、规范化（`\\?\` 前缀）、纯文件名校验、受信根目录绝对且非用户目录、真实解析 `schtasks.exe`/`explorer.exe`
+- [x] **66.6 文案与注释修正**
+  - [x] `README.md` / `README_CN.md` 的 WPS 段落改为“在剪贴板可完整备份还原的前提下保留文件名，否则主动放弃改写并降级 UIA 语义写入”
+  - [x] `src/win32/clipboard.rs` 注释移除“100% 零损失”断言
+- [x] **66.7 全量门禁与收尾**
+  - [x] `cargo test --all-targets`：**66 项全绿**（基线 56 → 66，只增不减；新增 10 项）
+  - [x] `cargo build --release`：编译通过（LTO + codegen-units=1）
+  - [x] `cargo clippy --all-targets`：本次新增/重写文件（`win32/trusted.rs`、`tab/keyboard.rs`、`win32/uia.rs`）**零告警**；全仓基线本就有 121+ 条 `collapsible_if` 等历史告警，未新增
+  - [x] 工作区仅含本轮业务文件 + 新增 `src/win32/trusted.rs`；构建产生的 `app.manifest` / `quickpath.rc` / `Cargo.lock` 版本噪声已还原（按用户要求**未提交**）
+
+### 本轮交付记录与逆向验证
+
+**变更清单（20 个文件，+1 新增）**
+- P0-01：`src/win32/clipboard.rs`（事务化恢复 + 3 个故障注入单测）、`src/managers/{totalcmd,xyplorer}.rs`（恢复失败改为记日志）
+- P0-02：`src/win32/uia.rs`（整体重写）、`src/dialog/injector.rs`（`InjectDone`）、`src/dialog/mod.rs`、`src/main.rs`、`src/ui/floating_bar.rs`
+- R-03：`src/tab/select.rs`（选择/核验分离）、`src/tab/coordinator.rs`（COM 完整路径核验）
+- P-01：`src/tab/keyboard.rs`（整体重写）、`src/tab/coordinator.rs`、`src/tab/uia.rs`、`src/tab/mod.rs`、`src/main.rs`
+- S-01：`src/win32/trusted.rs`（新增）、`src/win32/mod.rs`、`src/win32/autostart.rs`、`src/managers/dopus.rs`
+- 文案：`README.md`、`README_CN.md`
+
+**行为兼容性说明（保守加固的取舍）**
+- Win+E：仍为“拦截并转标签”，但吞键前提变严（配置开启 + 存在宿主）；接管失败或 800ms 内未见新标签时补偿打开原生窗口，用户侧始终有可见结果。
+- 标签去重激活：由“按标签标题核验”改为“按 Shell COM 完整路径核验”。若 COM 索引与视觉标签顺序不一致且无唯一同名标签，会判为失败并走 fail-safe（保留原生窗口），宁可多留一个窗口也不误关/误选。
+- WPS 秒切：新增“回读一致才按 Enter”。若某些 WPS 版本的文件名框 ValuePattern 在 Enter 前不回显，会判为验证失败并放弃（不误按 Enter），可在 debug 日志中观察到 `UIA_VERIFY[...]`。
+- 剪贴板：恢复失败不再静默；`with_temporary_clipboard_text` 会向上传播 `RestoreFailed`，WPS 链路据此不再继续按 Enter。
+
+**本轮未做（见报告第二/三批）**
+1. COM/UIA 隔离与 circuit breaker、UIA 专用 worker（P-02）；第三方 IPC 有界化：`SendMessageTimeoutW`、子进程 timeout、结果缓存（P-03）。
+2. 钩子生命周期在途回调 drain（R-04 剩余部分）、`AppState` 消息化收窄（R-05）、调试日志轮换/脱敏/保留期（S-03）。
+3. 发布工程：Actions pin SHA、锁 toolchain、`cargo fmt --check`/`clippy -D warnings`/`cargo audit` 门禁（**当前 `cargo fmt --check` 与 `clippy -D warnings` 在基线就是红的，需先做一次全仓格式化与告警治理**）、Authenticode 签名、README/manifest 版本单一源（`build.rs` 目前仍回写源目录，每次构建都会弄脏 `app.manifest`/`quickpath.rc`）。
+4. 真机验收：报告 §11 的 Windows 11 回归矩阵（WPS 多版本、DOpus/TotalCMD/XYplorer、Win+E 连按 100 次、同名目录标签组、剪贴板混合格式）需在具备对应软件的机器上执行；本机仅完成编译、单测与代码级证明。
+
 
 
 

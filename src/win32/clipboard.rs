@@ -2,10 +2,10 @@
 
 use std::thread;
 use std::time::Duration;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-    OpenClipboard, SetClipboardData,
+    GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{
     GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GHND, GMEM_MOVEABLE,
@@ -46,6 +46,30 @@ pub enum ClipboardSafetyError {
     BackupIncomplete(String),
     /// 剪贴板临时文本写入失败
     WriteFailed,
+    /// 临时使用结束后恢复原剪贴板失败（逐格式恢复未全部成功）
+    RestoreFailed(ClipboardRestoreError),
+}
+
+/// 剪贴板恢复失败原因：与「主动放弃覆盖」严格区分，便于上层决定是否补救与重试
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardRestoreError {
+    /// 剪贴板被其他进程长时间占用，无法打开
+    Busy,
+    /// EmptyClipboard 失败，剪贴板未能清空
+    EmptyFailed,
+    /// 部分格式未能写回（列出失败格式 ID，便于定位与复现）
+    PartialRestore(Vec<u32>),
+}
+
+/// 剪贴板恢复结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreStatus {
+    /// 全部格式已成功写回
+    Restored,
+    /// 此前已成功恢复过，无需重复操作
+    AlreadyRestored,
+    /// 恢复前发现剪贴板已被第三方改写，主动放弃覆盖以保护用户刚复制的新内容
+    SkippedForeignChange,
 }
 
 impl std::fmt::Display for ClipboardSafetyError {
@@ -54,8 +78,22 @@ impl std::fmt::Display for ClipboardSafetyError {
             Self::Busy => write!(f, "剪贴板被其他进程占用，打开超时"),
             Self::BackupIncomplete(msg) => write!(f, "剪贴板备份未完整完成: {}", msg),
             Self::WriteFailed => write!(f, "临时写入剪贴板文本失败"),
+            Self::RestoreFailed(err) => write!(f, "恢复原剪贴板失败: {:?}", err),
         }
     }
+}
+
+/// 单次恢复尝试的最大次数（失败只补写未成功格式，不重复清空已恢复内容）
+const RESTORE_ATTEMPTS: u32 = 3;
+
+/// 无注入测试钩子：值为 u32::MAX 表示不注入失败
+#[cfg(test)]
+static TEST_FAIL_FORMAT: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// 读取系统剪贴板序列号（每次剪贴板内容变化都会自增）
+fn clipboard_sequence_number() -> u32 {
+    unsafe { GetClipboardSequenceNumber() }
 }
 
 impl std::error::Error for ClipboardSafetyError {}
@@ -79,8 +117,18 @@ pub struct ClipboardSnapshot {
     pub items: Vec<(u32, Vec<u8>)>,
     /// 是否在备份时原本就为空
     pub was_empty: bool,
-    /// 是否已完成还原
+    /// 是否已完成还原（仅当全部格式都成功写回才置位）
     pub restored: bool,
+    /// 已成功写回的格式集合：重试时只补写缺失项，避免反复清空导致已恢复数据丢失
+    restored_formats: Vec<u32>,
+    /// 是否已执行过一次 EmptyClipboard
+    emptied: bool,
+    /// 是否因检出第三方改写而主动放弃，一旦放弃不再做任何补救
+    abandoned: bool,
+    /// 写入临时内容后的剪贴板序列号（并发覆盖防护）
+    owned_seq: Option<u32>,
+    /// 写入临时内容的精确文本（序列号变化时作为归属终审依据）
+    owned_text: Option<String>,
 }
 
 impl ClipboardSnapshot {
@@ -100,11 +148,7 @@ impl ClipboardSnapshot {
             if count == 0 {
                 was_empty = true;
                 let _ = CloseClipboard();
-                return Ok(Self {
-                    items,
-                    was_empty,
-                    restored: false,
-                });
+                return Ok(Self::empty(items, was_empty));
             }
 
             was_empty = false;
@@ -210,7 +254,7 @@ impl ClipboardSnapshot {
                         || (dib_captured && (f == CF_BITMAP || f == CF_DIBV5));
 
                     if !is_synthesized_covered {
-                        // 检测到无法保真复制的非内存或专有格式，为确保用户数据 100% 零损失，坚决拒绝改写
+                        // 检测到无法保真复制的非内存或专有格式，为尽可能完整保留用户数据，坚决拒绝改写
                         let _ = CloseClipboard();
                         return Err(ClipboardSafetyError::BackupIncomplete(format!(
                             "检测到不可保真克隆的剪贴板格式 (ID: {})，Fail-Closed 放弃操作以保护用户数据",
@@ -240,49 +284,163 @@ impl ClipboardSnapshot {
             }
         }
 
-        Ok(Self {
+        Ok(Self::empty(items, was_empty))
+    }
+
+    fn empty(items: Vec<(u32, Vec<u8>)>, was_empty: bool) -> Self {
+        Self {
             items,
             was_empty,
             restored: false,
-        })
+            restored_formats: Vec::new(),
+            emptied: false,
+            abandoned: false,
+            owned_seq: None,
+            owned_text: None,
+        }
     }
 
-    /// 还原剪贴板至快照状态
-    pub fn restore(&mut self) -> bool {
-        if self.restored {
+    /// 记录本次向剪贴板写入临时内容后的归属信息（序列号 + 精确文本），
+    /// 供 `restore()` 判断“这份临时内容是否仍归本次操作所有”。
+    pub fn note_temporary_write(&mut self, text: &str, sequence: u32) {
+        self.owned_seq = Some(sequence);
+        self.owned_text = Some(text.to_string());
+    }
+
+    /// 剪贴板当前是否仍由本次临时写入持有。
+    ///
+    /// 序列号相同 → 期间无人改写，判定为持有；
+    /// 序列号变化 → 再比对 Unicode 文本是否仍精确等于本次注入文本：
+    /// 相等（多为剪贴板管理器附加自有格式）仍视为持有，不等则第三方已写入新内容，
+    /// 此时必须拒绝覆盖，否则会静默吃掉用户刚复制的东西。
+    fn still_owned(&self) -> bool {
+        let (Some(seq), Some(text)) = (self.owned_seq.as_ref(), self.owned_text.as_ref()) else {
+            // 未写入过临时内容（纯快照 → 原样恢复）
+            return true;
+        };
+        if clipboard_sequence_number() == *seq {
             return true;
         }
+        matches!(get_clipboard_text(), Some(cur) if cur == *text)
+    }
 
+    /// 尚未成功写回的格式 ID 列表
+    fn pending_formats(&self) -> Vec<u32> {
+        self.items
+            .iter()
+            .map(|(fmt, _)| *fmt)
+            .filter(|fmt| !self.restored_formats.contains(fmt))
+            .collect()
+    }
+
+    /// 还原剪贴板至快照状态。
+    ///
+    /// 语义保证：
+    /// 1. 逐格式检查 `GlobalAlloc` / `GlobalLock` / `SetClipboardData` 返回值，记录每个格式是否写回成功；
+    /// 2. 只有全部格式成功才返回 `Ok(Restored)` 并置 `restored = true`，失败返回结构化错误；
+    /// 3. 失败只做有限次重试，且重试仅补写未成功格式（不再 EmptyClipboard，避免已恢复格式被清掉）；
+    /// 4. 恢复前校验剪贴板归属，若已被第三方改写则返回 `SkippedForeignChange` 且绝不覆盖。
+    pub fn restore(&mut self) -> Result<RestoreStatus, ClipboardRestoreError> {
+        if self.restored {
+            return Ok(RestoreStatus::AlreadyRestored);
+        }
+        if self.abandoned {
+            return Ok(RestoreStatus::SkippedForeignChange);
+        }
+        if !self.still_owned() {
+            // 主动放弃：同时置 restored 让 Drop 不再补救（补救即会覆盖用户新内容）
+            self.abandoned = true;
+            self.restored = true;
+            return Ok(RestoreStatus::SkippedForeignChange);
+        }
+
+        let mut last_error = None;
+        for attempt in 0..RESTORE_ATTEMPTS {
+            if attempt > 0 {
+                thread::sleep(Duration::from_millis(30 * u64::from(attempt)));
+            }
+            match self.restore_attempt() {
+                Ok(true) => {
+                    self.restored = true;
+                    return Ok(RestoreStatus::Restored);
+                }
+                Ok(false) => {
+                    last_error = Some(ClipboardRestoreError::PartialRestore(self.pending_formats()));
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+
+        Err(last_error.unwrap_or(ClipboardRestoreError::Busy))
+    }
+
+    /// 单次恢复尝试：清空（仅首次）后逐格式写回，返回是否全部成功
+    fn restore_attempt(&mut self) -> Result<bool, ClipboardRestoreError> {
         if !open_clipboard_with_retry(None, 4) {
-            return false;
+            return Err(ClipboardRestoreError::Busy);
         }
 
         unsafe {
-            let _ = EmptyClipboard();
+            if !self.emptied {
+                if EmptyClipboard().is_err() {
+                    let _ = CloseClipboard();
+                    return Err(ClipboardRestoreError::EmptyFailed);
+                }
+                self.emptied = true;
+            }
 
-            if !self.was_empty {
-                for (fmt, data) in &self.items {
-                    if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, data.len()) {
-                        if !h.0.is_null() {
-                            let ptr = GlobalLock(h);
-                            if !ptr.is_null() {
-                                std::ptr::copy_nonoverlapping(
-                                    data.as_ptr(),
-                                    ptr as *mut u8,
-                                    data.len(),
-                                );
-                                let _ = GlobalUnlock(h);
-                                let _ = SetClipboardData(*fmt, Some(HANDLE(h.0)));
-                            }
-                        }
-                    }
+            let mut all_ok = true;
+            for (fmt, data) in &self.items {
+                if self.restored_formats.contains(fmt) {
+                    continue;
+                }
+                if write_clipboard_format(*fmt, data) {
+                    self.restored_formats.push(*fmt);
+                } else {
+                    all_ok = false;
                 }
             }
 
             let _ = CloseClipboard();
+            Ok(all_ok)
+        }
+    }
+}
+
+/// 将单格式数据写回剪贴板，全程检查句柄返回值。
+///
+/// 剪贴板数据句柄的所有权只在 `SetClipboardData` 成功那一刻交接给系统；
+/// 此前任一环节失败都必须 `GlobalFree`，否则造成内存泄漏。
+fn write_clipboard_format(format: u32, data: &[u8]) -> bool {
+    if data.is_empty() {
+        return true;
+    }
+
+    #[cfg(test)]
+    if TEST_FAIL_FORMAT.load(std::sync::atomic::Ordering::SeqCst) == format {
+        return false;
+    }
+
+    unsafe {
+        let Ok(handle) = GlobalAlloc(GMEM_MOVEABLE, data.len()) else {
+            return false;
+        };
+        if handle.0.is_null() {
+            return false;
         }
 
-        self.restored = true;
+        let ptr = GlobalLock(handle);
+        if ptr.is_null() {
+            let _ = GlobalFree(Some(handle));
+            return false;
+        }
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
+        let _ = GlobalUnlock(handle);
+
+        if SetClipboardData(format, Some(HANDLE(handle.0))).is_err() {
+            let _ = GlobalFree(Some(handle));
+            return false;
+        }
         true
     }
 }
@@ -299,12 +457,18 @@ impl ClipboardRestoreGuard {
         }
     }
 
-    /// 显式手动还原
-    pub fn restore_now(&mut self) -> bool {
+    /// 记录本次写入临时内容后的归属信息（转发给内部快照）
+    pub fn note_temporary_write(&mut self, text: &str, sequence: u32) {
         if let Some(ref mut snap) = self.snapshot {
-            snap.restore()
-        } else {
-            true
+            snap.note_temporary_write(text, sequence);
+        }
+    }
+
+    /// 显式手动还原
+    pub fn restore_now(&mut self) -> Result<RestoreStatus, ClipboardRestoreError> {
+        match self.snapshot {
+            Some(ref mut snap) => snap.restore(),
+            None => Ok(RestoreStatus::AlreadyRestored),
         }
     }
 }
@@ -317,40 +481,55 @@ impl Drop for ClipboardRestoreGuard {
     }
 }
 
-/// 临时向系统剪贴板写入 Unicode 文本
-fn set_raw_clipboard_text(text: &str) -> bool {
+/// 临时向系统剪贴板写入 Unicode 文本，并返回写入后的剪贴板序列号
+fn set_raw_clipboard_text_tracked(text: &str) -> Option<u32> {
     if !open_clipboard_with_retry(None, 4) {
-        return false;
+        return None;
     }
 
     unsafe {
-        let _ = EmptyClipboard();
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return None;
+        }
+
         let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
         let bytes = wide.len() * 2;
         let mut ok = false;
 
-        if let Ok(h) = GlobalAlloc(GHND, bytes) {
-            if !h.0.is_null() {
-                let ptr = GlobalLock(h);
-                if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
-                    let _ = GlobalUnlock(h);
-                    let _ = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0)));
+        if let Ok(h) = GlobalAlloc(GHND, bytes)
+            && !h.0.is_null()
+        {
+            let ptr = GlobalLock(h);
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(h));
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
+                let _ = GlobalUnlock(h);
+                if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))).is_ok() {
                     ok = true;
+                } else {
+                    let _ = GlobalFree(Some(h));
                 }
             }
         }
 
         let _ = CloseClipboard();
-        ok
+        ok.then(clipboard_sequence_number)
     }
+}
+
+/// 临时向系统剪贴板写入 Unicode 文本
+fn set_raw_clipboard_text(text: &str) -> bool {
+    set_raw_clipboard_text_tracked(text).is_some()
 }
 
 /// 安全地在受保护的环境下临时使用剪贴板注入文本：
 /// 1. 尝试完整快照当前剪贴板（含文件列表 CF_HDROP、位图、文本等）；
 /// 2. 若快照失败（被占/不可保真），直接返回 Err，绝不修改剪贴板；
-/// 3. 设置临时文本，执行物理操作闭包；
-/// 4. 闭包结束后（无论成功或提前早退），RAII 守卫立刻无损还原剪贴板原有内容。
+/// 3. 设置临时文本并登记归属（序列号 + 精确文本），执行物理操作闭包；
+/// 4. 闭包结束后（无论成功或提前早退）立即还原，Drop 阶段还会再做一次补救；
+/// 5. 恢复失败向上传播为 `RestoreFailed`，调用方不得据此认为“已无损还原”。
 pub fn with_temporary_clipboard_text<R, F>(text: &str, action: F) -> Result<R, ClipboardSafetyError>
 where
     F: FnOnce() -> R,
@@ -358,15 +537,30 @@ where
     let snapshot = ClipboardSnapshot::capture()?;
     let mut guard = ClipboardRestoreGuard::new(snapshot);
 
-    if !set_raw_clipboard_text(text) {
+    let Some(sequence) = set_raw_clipboard_text_tracked(text) else {
         // 写入失败时，guard drop 会自动恢复原内容
         return Err(ClipboardSafetyError::WriteFailed);
-    }
+    };
+    guard.note_temporary_write(text, sequence);
 
     let result = action();
 
-    // 动作执行完毕，立即显式还原
-    guard.restore_now();
+    // 动作执行完毕，立即显式还原，并逐一类别处理三种结局
+    match guard.restore_now() {
+        Ok(RestoreStatus::Restored | RestoreStatus::AlreadyRestored) => {}
+        Ok(RestoreStatus::SkippedForeignChange) => {
+            crate::dialog::detector::log_debug(
+                "CLIPBOARD_RESTORE: 检出第三方已改写剪贴板，放弃覆盖其新内容",
+            );
+        }
+        Err(err) => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_RESTORE_FAILED: {:?}",
+                err
+            ));
+            return Err(ClipboardSafetyError::RestoreFailed(err));
+        }
+    }
 
     Ok(result)
 }
@@ -420,7 +614,7 @@ mod tests {
 
         assert_eq!(execution_result, Ok(42));
         let after_restore = get_clipboard_text().unwrap_or_default();
-        assert_eq!(after_restore, initial_text, "闭包执行结束后必须无损还原原有剪贴板内容");
+        assert_eq!(after_restore, initial_text, "闭包执行结束后必须还原原有剪贴板内容");
     }
 
     #[test]
@@ -482,6 +676,140 @@ mod tests {
         if let Some(txt) = original_text {
             let _ = set_raw_clipboard_text(&txt);
         }
+    }
+
+    /// 测试期故障注入开关，保证即使断言失败也不会污染后续用例
+    struct FailInjection;
+
+    impl FailInjection {
+        fn enable(format: u32) -> Self {
+            TEST_FAIL_FORMAT.store(format, std::sync::atomic::Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for FailInjection {
+        fn drop(&mut self) {
+            TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// 写入一个合法的最小 1x1 24-bit DIB，供失败注入用例复用
+    fn seed_dib_clipboard() {
+        let mut dib_data = [0u8; 44];
+        dib_data[0..4].copy_from_slice(&40u32.to_le_bytes()); // biSize = 40
+        dib_data[4..8].copy_from_slice(&1i32.to_le_bytes());  // biWidth = 1
+        dib_data[8..12].copy_from_slice(&1i32.to_le_bytes()); // biHeight = 1
+        dib_data[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes = 1
+        dib_data[14..16].copy_from_slice(&24u16.to_le_bytes()); // biBitCount = 24
+        dib_data[20..24].copy_from_slice(&4u32.to_le_bytes()); // biSizeImage = 4
+
+        assert!(open_clipboard_with_retry(None, 10), "测试初始化必须成功打开剪贴板");
+        unsafe {
+            let _ = EmptyClipboard();
+            if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, dib_data.len()) {
+                let ptr = GlobalLock(h);
+                if !ptr.is_null() {
+                    std::ptr::copy_nonoverlapping(dib_data.as_ptr(), ptr as *mut u8, dib_data.len());
+                    let _ = GlobalUnlock(h);
+                    assert!(SetClipboardData(CF_DIB, Some(HANDLE(h.0))).is_ok(), "种入 CF_DIB 必须成功");
+                }
+            }
+            let _ = CloseClipboard();
+        }
+    }
+
+    /// P0-01：单格式恢复失败时，restore() 必须返回结构化错误且绝不置 restored；
+    /// 清除故障后重试必须能补齐（只补写失败格式，不重复清空已恢复内容）。
+    #[test]
+    fn test_restore_partial_failure_is_reported_and_retryable() {
+        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        seed_dib_clipboard();
+
+        let mut snap = ClipboardSnapshot::capture().expect("含 DIB 的剪贴板必须可被安全捕获");
+        assert!(!snap.items.is_empty(), "快照必须至少含一个格式");
+        // 清掉当前剪贴板，确保后续断言只能来自快照恢复
+        assert!(set_raw_clipboard_text("qp_restore_probe"));
+
+        {
+            let _inject = FailInjection::enable(CF_DIB);
+            let err = snap.restore().expect_err("单格式恢复失败时不得返回成功");
+            match err {
+                ClipboardRestoreError::PartialRestore(ref failed) => {
+                    assert!(failed.contains(&CF_DIB), "失败列表必须包含 CF_DIB，实际 {:?}", failed);
+                }
+                other => panic!("期望 PartialRestore，实际 {:?}", other),
+            }
+            assert!(!snap.restored, "部分失败时绝不能标记为已恢复");
+        }
+
+        // 故障解除后重试只补写缺失格式
+        assert_eq!(snap.restore(), Ok(RestoreStatus::Restored));
+        assert!(snap.restored, "成功恢复后必须置位 restored");
+        // 幂等：重复调用不得再动剪贴板
+        assert_eq!(snap.restore(), Ok(RestoreStatus::AlreadyRestored));
+
+        assert!(open_clipboard_with_retry(None, 10));
+        unsafe {
+            let restored = GetClipboardData(CF_DIB);
+            assert!(restored.is_ok(), "重试成功后剪贴板必须重新持有 CF_DIB");
+            let _ = CloseClipboard();
+        }
+    }
+
+    /// P0-01：写入临时内容后若第三方（用户）已复制新内容，恢复必须主动放弃覆盖
+    #[test]
+    fn test_restore_refuses_to_overwrite_newer_user_content() {
+        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        assert!(set_raw_clipboard_text("qp_snapshot_seed"));
+
+        let mut snap = ClipboardSnapshot::capture().expect("文本剪贴板必须可被安全捕获");
+        let seq = set_raw_clipboard_text_tracked("C:\\TemporaryInjection")
+            .expect("写入临时文本必须成功");
+        snap.note_temporary_write("C:\\TemporaryInjection", seq);
+
+        // 模拟用户/第三方在恢复前复制了全新内容
+        assert!(set_raw_clipboard_text("qp_user_new_content"));
+
+        assert_eq!(
+            snap.restore(),
+            Ok(RestoreStatus::SkippedForeignChange),
+            "序列号变化且内容不再匹配时必须放弃覆盖"
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_user_new_content"),
+            "用户新复制的内容绝不能被旧快照覆盖"
+        );
+
+        let _ = set_raw_clipboard_text("qp_snapshot_seed");
+    }
+
+    /// P0-01：`with_temporary_clipboard_text` 必须把恢复失败向上传播，而不是静默返回 Ok
+    #[test]
+    fn test_temporary_clipboard_text_propagates_restore_failure() {
+        let _guard = CLIP_TEST_LOCK.lock().unwrap();
+        assert!(set_raw_clipboard_text("qp_propagate_seed"));
+
+        let _inject = FailInjection::enable(CF_UNICODETEXT);
+        let outcome: Result<u32, ClipboardSafetyError> =
+            with_temporary_clipboard_text("C:\\PropagateProbe", || 7);
+
+        match outcome {
+            Err(ClipboardSafetyError::RestoreFailed(err)) => {
+                assert!(
+                    matches!(err, ClipboardRestoreError::PartialRestore(_)),
+                    "恢复失败必须是结构化的 PartialRestore，实际 {:?}",
+                    err
+                );
+                // 内容未恢复也不能假报成功：调用方拿不到闭包结果
+                assert!(matches!(err, ClipboardRestoreError::PartialRestore(ref v) if v.contains(&CF_UNICODETEXT)));
+            }
+            other => panic!("期望 RestoreFailed 错误，实际 {:?}", other),
+        }
+
+        drop(_inject);
+        let _ = set_raw_clipboard_text("qp_propagate_seed");
     }
 }
 

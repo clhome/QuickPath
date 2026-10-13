@@ -340,6 +340,7 @@ impl FloatingBar {
                 edit_hwnd,
                 &path,
                 kind,
+                None,
             );
         }
     }
@@ -780,6 +781,7 @@ fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
                     edit_hwnd,
                     &path,
                     kind,
+                    None,
                 );
             }
         }

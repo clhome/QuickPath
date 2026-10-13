@@ -6,6 +6,26 @@ use std::process::Command;
 const TASK_NAME: &str = "QuickPath";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// 通过 System32 绝对路径构造 schtasks 调用。
+///
+/// 审计报告 S-01：在“最高权限自启”模式下，裸程序名会被 Windows 按 PATH 搜索，
+/// 用户 PATH 中的同名程序可能被高权限进程拉起。因此只接受系统目录下的绝对路径，
+/// 解析失败直接返回错误，绝不回退 PATH 搜索。
+fn schtasks_command() -> Result<Command, String> {
+    let exe = crate::win32::trusted::system32_tool("schtasks.exe")
+        .ok_or_else(|| "未在系统目录找到可信的 schtasks.exe".to_string())?;
+    let mut cmd = Command::new(exe);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    Ok(cmd)
+}
+
+/// 静默执行一次 schtasks 子命令（仅用于清理/查询，忽略结果）
+fn run_schtasks_quiet(args: &[&str]) {
+    if let Ok(mut cmd) = schtasks_command() {
+        let _ = cmd.args(args).status();
+    }
+}
+
 /// 设置或移除开机自启动（规范带双引号包裹并进行写后一致性校验）
 pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), String> {
     let current_exe = std::env::current_exe()
@@ -16,45 +36,50 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
 
     if enable {
         if use_task_scheduler {
-            // 使用任务计划程序以最高权限（免 UAC）开机自启
-            let status = Command::new("schtasks")
-                .args([
-                    "/create",
-                    "/tn",
-                    TASK_NAME,
-                    "/tr",
-                    &quoted_exe,
-                    "/sc",
-                    "onlogon",
-                    "/rl",
-                    "highest",
-                    "/f",
-                ])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status()
-                .map_err(|e| format!("调用 schtasks 失败: {}", e))?;
+            // 使用任务计划程序以最高权限（免 UAC）开机自启。
+            // 提交给任务计划程序的目标**只有本程序自身的规范绝对路径**，
+            // 不对外部工具做任何 PATH 搜索，因此不存在 S-01 描述的提权路径劫持面。
+            let task_created = match schtasks_command() {
+                Ok(mut cmd) => cmd
+                    .args([
+                        "/create",
+                        "/tn",
+                        TASK_NAME,
+                        "/tr",
+                        &quoted_exe,
+                        "/sc",
+                        "onlogon",
+                        "/rl",
+                        "highest",
+                        "/f",
+                    ])
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false),
+                Err(err) => {
+                    crate::dialog::detector::log_debug(&format!(
+                        "AUTOSTART: 无可信 schtasks.exe，回退注册表模式 ({})",
+                        err
+                    ));
+                    false
+                }
+            };
 
-            if !status.success() {
-                // 如果任务计划程序失败（可能权限不足），回退到注册表模式
-                set_registry_run(&quoted_exe, true)?;
-            } else {
+            if task_created {
                 // 任务计划程序成功，清理注册表中残留项避免重复拉起
                 let _ = set_registry_run(&quoted_exe, false);
+            } else {
+                // 任务计划程序不可用或权限不足：回退到 HKCU Run（无需提权）
+                set_registry_run(&quoted_exe, true)?;
             }
         } else {
             // 普通模式：清理旧的任务计划程序（若有），并写入注册表
-            let _ = Command::new("schtasks")
-                .args(["/delete", "/tn", TASK_NAME, "/f"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
+            run_schtasks_quiet(&["/delete", "/tn", TASK_NAME, "/f"]);
             set_registry_run(&quoted_exe, true)?;
         }
     } else {
         // 清理两种方式的自启
-        let _ = Command::new("schtasks")
-            .args(["/delete", "/tn", TASK_NAME, "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
+        run_schtasks_quiet(&["/delete", "/tn", TASK_NAME, "/f"]);
 
         let _ = set_registry_run(&quoted_exe, false);
     }
@@ -65,15 +90,16 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
 /// 检查是否已设置开机自启
 pub fn is_autostart_enabled() -> bool {
     // 检查任务计划程序
-    let task_check = Command::new("schtasks")
-        .args(["/query", "/tn", TASK_NAME])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    if let Ok(out) = task_check {
-        if out.status.success() {
-            return true;
-        }
+    let task_exists = match schtasks_command() {
+        Ok(mut cmd) => cmd
+            .args(["/query", "/tn", TASK_NAME])
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    if task_exists {
+        return true;
     }
 
     // 检查注册表

@@ -13,6 +13,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const EM_SETSEL: u32 = 0x00B1;
 const MESSAGE_TIMEOUT_MS: u32 = 200;
 
+/// 注入完成回调类型：接收**真实完成结果**。
+/// 标准对话框为同步回调；WPS 自绘对话框的注入工作线程完成后异步回调。
+pub type InjectDone = Box<dyn FnOnce(bool) + Send + 'static>;
+
 /// 安全将目标目录注入到文件对话框中，并促使其平滑导航切换
 /// 根据 DialogKind 严格物理隔离：标准 Win32 走纯 Win32 消息，WPS Office 走专用 UIA 引擎
 pub fn inject_path_to_dialog(
@@ -20,23 +24,32 @@ pub fn inject_path_to_dialog(
     edit_hwnd: HWND,
     target_path: &str,
     kind: DialogKind,
+    on_done: Option<InjectDone>,
 ) -> bool {
     let clean_path = clean_directory_path(target_path);
     if !unsafe { IsWindow(Some(dialog_hwnd)).as_bool() }
         || !Path::new(clean_path).is_absolute()
         || !Path::new(clean_path).is_dir()
     {
+        if let Some(done) = on_done {
+            done(false);
+        }
         return false;
     }
 
     match kind {
         DialogKind::WpsOffice => {
-            // 针对 WPS Office 自绘对话框，通过专用的 UI Automation 引擎进行注入
-            crate::win32::uia::inject_path_to_wps_dialog(dialog_hwnd, target_path)
+            // 针对 WPS Office 自绘对话框，通过专用的 UI Automation 引擎进行注入。
+            // 注入实际在工作线程完成，**真实结果**经 on_done 回传（启动线程不等于注入成功）。
+            crate::win32::uia::inject_path_to_wps_dialog(dialog_hwnd, target_path, on_done)
         }
         DialogKind::StandardWin32 => {
             // 针对标准 Win32 对话框，绝对只走纯原生 Win32 消息通道，绝不调用 UIA！
-            inject_path_to_standard_dialog(dialog_hwnd, edit_hwnd, clean_path)
+            let ok = inject_path_to_standard_dialog(dialog_hwnd, edit_hwnd, clean_path);
+            if let Some(done) = on_done {
+                done(ok);
+            }
+            ok
         }
     }
 }

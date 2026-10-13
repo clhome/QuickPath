@@ -154,43 +154,47 @@ unsafe fn collect_tab_items(
     }
 }
 
-/// 目标标签匹配（纯逻辑，便于单测）：精确同名优先；仅当“包含匹配唯一”时才接受模糊命中，
-/// 杜绝 `C:\ProjectA\src` 与 `D:\ProjectB\src` 这类同名目录互相误激活。
-fn pick_matching_index(names: &[String], target: &str) -> Option<usize> {
-    let target = target.to_lowercase();
-    if target.is_empty() {
+/// 选择定位策略（纯逻辑，便于单测）。
+///
+/// 标签标题（末级目录名）不是身份：同一窗口中可以有多个 `src`。因此：
+/// 1. 存在唯一精确同名项 → 选它（最常见、最准）；
+/// 2. 否则（同名多个 / 无精确匹配）→ 回退到 Shell COM 枚举得到的索引；
+/// 3. 目标为空或回退索引越界时返回 None（宁可放弃，也不猜）。
+///
+/// 真正的身份确认不在这里，而由调用方在选中后回查 Shell COM 的**完整路径**。
+fn pick_tab_index_for_selection(
+    names: &[String],
+    target: &str,
+    com_index: usize,
+) -> Option<usize> {
+    let lower = target.to_lowercase();
+    if lower.is_empty() {
         return None;
     }
-    if let Some(idx) = names.iter().position(|n| *n == target) {
-        return Some(idx);
+
+    let exact: Vec<usize> = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| !n.is_empty() && **n == lower)
+        .map(|(i, _)| i)
+        .collect();
+    if exact.len() == 1 {
+        return Some(exact[0]);
     }
-    let mut found = None;
-    for (i, name) in names.iter().enumerate() {
-        if !name.is_empty() && (name.contains(target.as_str()) || target.contains(name.as_str())) {
-            if found.is_some() {
-                // 多个模糊候选：无法确定唯一目标，宁可放弃也不猜测
-                return None;
-            }
-            found = Some(i);
-        }
+
+    // 回退到 COM 索引：仅接受名称非空的项（空名多为尚未加载完成的退化标签，选中无意义）
+    if com_index < names.len() && !names[com_index].is_empty() {
+        return Some(com_index);
     }
-    found
+    None
 }
 
-/// 目标标签匹配：返回唯一确定的目标元素
-fn pick_matching_tab<'a>(
-    items: &'a [(IUIAutomationElement, String)],
-    target: &str,
-) -> Option<&'a IUIAutomationElement> {
-    let names: Vec<String> = items.iter().map(|(_, n)| n.clone()).collect();
-    let idx = pick_matching_index(&names, target)?;
-    items.get(idx).map(|(elem, _)| elem)
-}
-
-/// 检查宿主窗口中当前选中的 TabItem 是否为目标文件夹（用于核验标签页激活结果）。
-/// 通过 UIA SelectionItemPattern.IsSelected() 定位真正的活动标签，而非猜测顺序或相信魔法指令的返回值。
-pub fn is_tab_active_by_name(host_hwnd: HWND, folder_name: &str) -> bool {
-    if host_hwnd.0.is_null() || folder_name.is_empty() {
+/// 在 Explorer 宿主窗口中选择目标标签。
+///
+/// 本函数**只负责选择动作**，不做任何身份声称：
+/// 选择结果必须由调用方回查 Shell COM 的完整路径后才能确认。
+pub fn try_select_tab_item(host_hwnd: HWND, com_index: usize, leaf_name: &str) -> bool {
+    if host_hwnd.0.is_null() {
         return false;
     }
 
@@ -201,70 +205,21 @@ pub fn is_tab_active_by_name(host_hwnd: HWND, folder_name: &str) -> bool {
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
-        let uia = match uia {
-            Ok(u) => u,
-            Err(_) => return false,
+        let Ok(uia) = uia else {
+            return false;
         };
+
         let root: IUIAutomationElement = match uia.ElementFromHandle(host_hwnd) {
             Ok(r) => r,
             Err(_) => return false,
         };
 
         let items = collect_tab_items(&uia, &root);
-        if items.is_empty() {
-            return false;
-        }
         let names: Vec<String> = items.iter().map(|(_, n)| n.clone()).collect();
-
-        // 定位当前处于选中态的标签
-        let mut selected_idx: Option<usize> = None;
-        for (i, (tab, _)) in items.iter().enumerate() {
-            let selected = tab
-                .GetCurrentPattern(UIA_SelectionItemPatternId)
-                .ok()
-                .and_then(|p| p.cast::<IUIAutomationSelectionItemPattern>().ok())
-                .and_then(|sel| sel.CurrentIsSelected().ok())
-                .map(|b| b.as_bool())
-                .unwrap_or(false);
-            if selected {
-                selected_idx = Some(i);
-                break;
-            }
-        }
-
-        // 活动标签必须就是目标标签：精确同名，或唯一模糊候选
-        let Some(sel_idx) = selected_idx else {
+        let Some(idx) = pick_tab_index_for_selection(&names, leaf_name, com_index) else {
             return false;
         };
-        pick_matching_index(&names, folder_name) == Some(sel_idx)
-    }
-}
-
-/// 在 Explorer 宿主窗口内，通过 UI Automation 尝试激活指定标题/文件夹名称的 TabItem
-pub fn try_select_tab_item_by_title(host_hwnd: HWND, folder_name: &str) -> bool {
-    if host_hwnd.0.is_null() || folder_name.is_empty() {
-        return false;
-    }
-
-    unsafe {
-        if !IsWindow(Some(host_hwnd)).as_bool() {
-            return false;
-        }
-
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
-        let uia = match uia {
-            Ok(u) => u,
-            Err(_) => return false,
-        };
-
-        let root: IUIAutomationElement = match uia.ElementFromHandle(host_hwnd) {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-
-        let items = collect_tab_items(&uia, &root);
-        let Some(tab) = pick_matching_tab(&items, folder_name) else {
+        let Some((tab, _)) = items.get(idx) else {
             return false;
         };
 
@@ -285,37 +240,39 @@ mod tests {
     }
 
     #[test]
-    fn test_pick_matching_index_prefers_exact_name() {
+    fn test_pick_tab_index_prefers_unique_exact_name() {
         let tabs = names(&["src", "target", "release"]);
-        assert_eq!(pick_matching_index(&tabs, "release"), Some(2));
-        assert_eq!(pick_matching_index(&tabs, "RELEASE"), Some(2));
-        assert_eq!(pick_matching_index(&tabs, "target"), Some(1));
+        assert_eq!(pick_tab_index_for_selection(&tabs, "release", 0), Some(2));
+        assert_eq!(pick_tab_index_for_selection(&tabs, "RELEASE", 0), Some(2));
+        assert_eq!(pick_tab_index_for_selection(&tabs, "target", 2), Some(1));
     }
 
     #[test]
-    fn test_pick_matching_index_rejects_ambiguous_fuzzy() {
-        // 两个标签都包含 "src"：无法唯一确定，必须放弃而不是猜
-        let tabs = names(&["src", "src-backup", "other"]);
-        assert_eq!(pick_matching_index(&tabs, "sr"), None);
-        // 唯一模糊候选才接受
-        let unique = names(&["my-src-folder", "other"]);
-        assert_eq!(pick_matching_index(&unique, "src"), Some(0));
-    }
-
-    #[test]
-    fn test_pick_matching_index_ignores_empty_names() {
-        let tabs = names(&["", "release"]);
-        assert_eq!(pick_matching_index(&tabs, "release"), Some(1));
-        // 空目标与全空名称均不得命中
-        assert_eq!(pick_matching_index(&tabs, ""), None);
-        assert_eq!(pick_matching_index(&names(&["", ""]), "src"), None);
-    }
-
-    #[test]
-    fn test_pick_matching_index_same_leaf_different_parents() {
-        // 同名叶子目录（C:/ProjectA/src / D:/ProjectB/src）在标签上同名，
-        // 精确匹配返回首个，但绝不会因为父路径不同而互相误判
+    fn test_pick_tab_index_same_leaf_uses_com_index_and_needs_path_proof() {
+        // 同名叶子目录（C:/ProjectA/src 与 D:/ProjectB/src）在标签标题上无法区分：
+        // 必须回退到 COM 枚举索引定位，再由调用方回查完整路径核验身份。
         let tabs = names(&["src", "src"]);
-        assert_eq!(pick_matching_index(&tabs, "src"), Some(0));
+        assert_eq!(pick_tab_index_for_selection(&tabs, "src", 1), Some(1));
+        assert_eq!(pick_tab_index_for_selection(&tabs, "src", 0), Some(0));
+        // 索引越界且无法唯一定位时宁可放弃，绝不猜测
+        assert_eq!(pick_tab_index_for_selection(&tabs, "src", 9), None);
+
+        // 唯一精确同名项优先于 COM 索引（避免索引与视觉顺序不一致时选错）
+        let unique = names(&["build", "src"]);
+        assert_eq!(pick_tab_index_for_selection(&unique, "src", 0), Some(1));
+
+        // 无精确同名（标题带后缀等）时同样交由 COM 索引定位
+        let fuzzy = names(&["src-backup", "other"]);
+        assert_eq!(pick_tab_index_for_selection(&fuzzy, "src", 1), Some(1));
+        assert_eq!(pick_tab_index_for_selection(&fuzzy, "src", 2), None);
+    }
+
+    #[test]
+    fn test_pick_tab_index_ignores_empty_names_and_targets() {
+        let tabs = names(&["", "release"]);
+        assert_eq!(pick_tab_index_for_selection(&tabs, "release", 0), Some(1));
+        // 空目标与全空名称均不得命中
+        assert_eq!(pick_tab_index_for_selection(&tabs, "", 0), None);
+        assert_eq!(pick_tab_index_for_selection(&names(&["", ""]), "src", 0), None);
     }
 }

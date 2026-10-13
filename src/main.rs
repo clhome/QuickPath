@@ -8,7 +8,7 @@ pub mod tab;
 mod ui;
 mod win32;
 
-use dialog::{detect_file_dialog, inject_path_to_dialog};
+use dialog::{detect_file_dialog, inject_path_to_dialog, InjectDone};
 use managers::WindowTracker;
 use monitor::MonitorManager;
 use rules::AppConfig;
@@ -40,6 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const HOTKEY_ID: i32 = 101;
 const WM_QUICKPATH_RETRY_CHECK: u32 = 0x0400 + 102;
 const WM_QUICKPATH_INJECT_FAILED: u32 = 0x0400 + 103;
+/// Win+E 接管请求（由低级键盘钩子投递；钩子自身只做识别与投递，不做重活）
+const WM_QUICKPATH_WINE_TO_TAB: u32 = tab::keyboard::WM_QUICKPATH_WINE_TO_TAB;
 /// 对话框控件异步初始化期间的最大探测次数与间隔
 /// （合计约 1.2s：慢速机器/首次加载的 shell 扩展常需数百毫秒才出现
 ///  DirectUIHWND / ComboBoxEx32 / Edit，过短会导致完全不弹窗）
@@ -141,7 +143,7 @@ fn main() {
         };
         tab_module.update_config(tab_cfg);
         if config.tab_module.enabled && win32::version::is_tab_module_supported() {
-            let _ = tab_module.start();
+            let _ = tab_module.start(host_hwnd);
         }
 
         let state = Box::new(AppState {
@@ -201,6 +203,10 @@ unsafe extern "system" fn host_wnd_proc(
         WM_QUICKPATH_FOREGROUND => {
             let fg_hwnd = HWND(wparam.0 as *mut _);
             on_foreground_window_changed(fg_hwnd);
+            LRESULT(0)
+        }
+        WM_QUICKPATH_WINE_TO_TAB => {
+            handle_wine_to_tab_request(HWND(wparam.0 as *mut _));
             LRESULT(0)
         }
         WM_QUICKPATH_RETRY_CHECK => {
@@ -422,22 +428,33 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                     // 延时秒切，确保宿主应用对话框完成初始化绘制与控件就绪
                     thread::spawn(move || {
                         thread::sleep(Duration::from_millis(delay_ms));
-                        let injected = inject_path_to_dialog(
+
+                        // 注入**真实结果**回调：失败必须回报主线程，否则去重标记会让该对话框永远不再尝试秒切。
+                        // 标准对话框为同步回调；WPS 自绘对话框为异步回调（启动线程不等于注入成功）。
+                        let on_done: InjectDone = Box::new(move |injected| {
+                            if !injected && host_raw != 0 {
+                                unsafe {
+                                    let _ = PostMessageW(
+                                        Some(HWND(host_raw as *mut _)),
+                                        WM_QUICKPATH_INJECT_FAILED,
+                                        WPARAM(dlg_raw),
+                                        LPARAM(if already_retried { 1 } else { 0 }),
+                                    );
+                                }
+                            }
+                        });
+
+                        let accepted = inject_path_to_dialog(
                             HWND(dlg_raw as *mut _),
                             HWND(edit_raw as *mut _),
                             &target,
                             kind,
+                            Some(on_done),
                         );
-                        // 注入失败必须回报主线程，否则去重标记会让该对话框永远不再尝试秒切
-                        if !injected && host_raw != 0 {
-                            unsafe {
-                                let _ = PostMessageW(
-                                    Some(HWND(host_raw as *mut _)),
-                                    WM_QUICKPATH_INJECT_FAILED,
-                                    WPARAM(dlg_raw),
-                                    LPARAM(if already_retried { 1 } else { 0 }),
-                                );
-                            }
+                        if !accepted {
+                            dialog::detector::log_debug(
+                                "MAIN: 注入请求未被受理（对话框已失效或路径非法）",
+                            );
                         }
                     });
                 }
@@ -509,6 +526,81 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
     }
 }
 
+/// 处理 Win+E 接管请求（由低级键盘钩子投递，系统原生按键已被吞掉）。
+///
+/// 关键闭环：接管动作在工作线程执行，并在 800ms 内确认“新标签确实出现”；
+/// 一旦接管动作未被接受、或标签始终未出现，立即补偿打开原生资源管理器窗口，
+/// 保证每一次 Win+E 都有可见结果（绝不出现“按键被吞且毫无反应”）。
+fn handle_wine_to_tab_request(target: HWND) {
+    let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
+    if state_ptr.is_null() {
+        launch_native_explorer_window();
+        return;
+    }
+
+    let coordinator = unsafe {
+        (*state_ptr)
+            .tab_module
+            .as_ref()
+            .map(|tab_mod| tab_mod.coordinator())
+    };
+    let Some(coordinator) = coordinator else {
+        launch_native_explorer_window();
+        return;
+    };
+
+    // HWND 不是 Send，跨线程只传递裸值，进入线程后再重建句柄
+    let target_raw = target.0 as usize;
+
+    thread::spawn(move || {
+        let target = HWND(target_raw as *mut _);
+        let com = coordinator.com_manager().clone();
+        let count_before = com.get_tabs_count_for_hwnd(target);
+
+        if !coordinator.wine_to_tab_in(target) {
+            launch_native_explorer_window();
+            return;
+        }
+
+        // 等待新标签在 Shell COM 中注册（最多 800ms）；未确认成功则走原生兜底
+        for _ in 0..8 {
+            thread::sleep(Duration::from_millis(100));
+            if com.get_tabs_count_for_hwnd(target) > count_before {
+                return;
+            }
+        }
+        dialog::detector::log_debug(&format!(
+            "WINE_TO_TAB: host=0x{:X} 新标签未出现，补偿打开原生窗口",
+            target_raw
+        ));
+        launch_native_explorer_window();
+    });
+}
+
+/// 已吞掉 Win+E 但标签接管未成功时的补偿动作：打开一个原生资源管理器窗口。
+/// 使用 System32 绝对路径，绝不使用裸程序名（避免命中 PATH 中的同名程序）。
+fn launch_native_explorer_window() {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let Some(exe) = win32::trusted::system_tool("explorer.exe") else {
+        dialog::detector::log_debug("WINE_TO_TAB: 无可信 explorer.exe，无法补偿原生窗口");
+        return;
+    };
+    let file = HSTRING::from(exe.as_os_str());
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &file,
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
+}
+
 fn on_hotkey_triggered() {
     let state_ptr = MAIN_APP_STATE.load(Ordering::SeqCst);
     if state_ptr.is_null() {
@@ -576,7 +668,10 @@ pub fn update_global_config(new_config: AppConfig) {
                 };
                 tab_mod.update_config(tab_cfg);
                 if new_config.tab_module.enabled && win32::version::is_tab_module_supported() {
-                    let _ = tab_mod.start();
+                    let host_hwnd = HOST_HWND.load(Ordering::SeqCst);
+                    if !host_hwnd.is_null() {
+                        let _ = tab_mod.start(HWND(host_hwnd));
+                    }
                 } else {
                     tab_mod.stop();
                 }

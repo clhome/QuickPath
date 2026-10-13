@@ -102,6 +102,16 @@ pub fn trigger_new_tab(explorer_hwnd: HWND) -> bool {
     simulate_ctrl_t(explorer_hwnd)
 }
 
+/// 无全局输入的安全新建标签：仅使用窗口消息与 UIA 语义动作，
+/// 绝不发送全局键盘事件（Ctrl+T 兜底会把按键送到当时的前台窗口，
+/// 属于跨应用输入风险）。调用方在返回 false 时应用原生窗口兜底。
+pub fn trigger_new_tab_safe(explorer_hwnd: HWND) -> bool {
+    if try_magic_command_add_tab(explorer_hwnd) {
+        return true;
+    }
+    try_uia_add_button(explorer_hwnd)
+}
+
 /// 兼容旧命名
 pub fn trigger_new_tab_via_message(explorer_hwnd: HWND) -> bool {
     trigger_new_tab(explorer_hwnd)

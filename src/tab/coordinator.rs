@@ -11,8 +11,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::com::{is_physical_dir_path, ShellComManager};
-use super::select::{async_select_file_item, is_tab_active_by_name, try_select_tab_item_by_title};
-use super::uia::trigger_new_tab;
+use super::select::{async_select_file_item, try_select_tab_item};
+use super::uia::{trigger_new_tab, trigger_new_tab_safe};
 use windows::core::BOOL;
 
 /// 多标签增强配置
@@ -147,43 +147,48 @@ impl TabCoordinator {
         self.bypass_deduplication.store(false, Ordering::SeqCst);
     }
 
-    /// 处理 Win + E 拦截与自适应分流
-    /// 返回 true 表示已被成功拦截并转为在现有窗口中新建 Tab；返回 false 表示放行原生窗口创建
-    pub fn handle_wine_hotkey(&self) -> bool {
+    /// 廉价判定（纯 Win32，无 COM/UIA，微秒级）：当前是否存在可作为标签宿主的
+    /// 资源管理器顶级窗口。供低级键盘钩子回调在“吞键 / 放行系统原生”之间快速决策。
+    pub fn quick_wine_target() -> Option<HWND> {
+        unsafe {
+            let fg = GetForegroundWindow();
+            if Self::is_explorer_window(fg) && IsWindowVisible(fg).as_bool() {
+                return Some(fg);
+            }
+
+            let found = windows::Win32::UI::WindowsAndMessaging::FindWindowExW(
+                None,
+                None,
+                windows::core::w!("CabinetWClass"),
+                windows::core::PCWSTR::null(),
+            )
+            .ok()?;
+            if found.0.is_null() || !IsWindowVisible(found).as_bool() {
+                return None;
+            }
+            Some(found)
+        }
+    }
+
+    /// Win+E 接管：在目标宿主窗口中新建标签页。
+    ///
+    /// 必须在工作线程/宿主消息线程执行（内部含 COM 枚举与 UIA），绝不可放进低级钩子回调。
+    /// 只走「窗口消息 + UIA 语义动作」这条安全链路，不做任何全局键鼠模拟：
+    /// 失败时返回 false，由宿主用原生资源管理器窗口兜底，保证“按键必有结果”。
+    pub fn wine_to_tab_in(&self, target_hwnd: HWND) -> bool {
         let cfg = self.get_config();
         if !cfg.enabled || !cfg.wine_to_tab {
             return false;
         }
-
-        let tabs = self.com_manager.get_all_tabs();
-        if tabs.is_empty() {
-            // 当前系统没有任何已打开的资源管理器窗口，放行系统原生创建
+        if !Self::is_explorer_window(target_hwnd) {
             return false;
         }
 
-        // 寻找当前聚焦或最近活跃的 Explorer 顶级窗口
-        let fg_hwnd = unsafe { GetForegroundWindow() };
-        let target_hwnd = if Self::is_explorer_window(fg_hwnd) {
-            fg_hwnd
-        } else {
-            // 否则挑选列表中活跃的窗口
-            tabs.iter()
-                .find(|t| t.is_active)
-                .map(|t| t.hwnd())
-                .unwrap_or_else(|| tabs[0].hwnd())
-        };
-
-        // 激活目标窗口
+        // 工作线程的 SetForegroundWindow 会被前台锁静默拒绝，必须走输入桥接
         unsafe {
-            let _ = SetForegroundWindow(target_hwnd);
+            bring_window_to_front(target_hwnd);
         }
-
-        // 触发在目标窗口中新建 Tab
-        if trigger_new_tab(target_hwnd) {
-            return true;
-        }
-
-        false
+        trigger_new_tab_safe(target_hwnd)
     }
 
     /// 当外部或用户请求打开某个目录时的去重判定与处理
@@ -427,7 +432,7 @@ impl TabCoordinator {
                         // 改为 UIA 直选优先、0xA221 兜底，每次都核验活动标签，
                         // 全部失败则回退 fail-safe（保留源窗口），绝不出现"点了像没反应"。
                         merged_success =
-                            Self::activate_tab_in_host(host_h, folder_path, tab_idx);
+                            Self::activate_tab_in_host(&com, host_h, folder_path, tab_idx);
                     } else if is_physical_dir_path(folder_path) {
                         // 宿主没有该 Tab 或未开启去重，在宿主中新建 Tab 并精准导航
                         let count_before = com.get_tabs_count_for_hwnd(host_h);
@@ -537,11 +542,19 @@ impl TabCoordinator {
 
     /// 激活宿主窗口中指定路径的标签页（带核验）。
     ///
-    /// 策略：UIA SelectionItemPattern 直选 TabItem 优先（公开无障碍接口，最可靠）→
-    /// 0xA221 (Ctrl+1..N) 魔法指令兜底（同步 SendMessageW，部分构建有效）→
-    /// 每次尝试后都用 IsSelected() 核验活动标签是否确为目标。
-    /// 返回 true 当且仅当目标标签已是活动标签；否则返回 false，调用方回退 fail-safe。
-    fn activate_tab_in_host(host_h: HWND, folder_path: &str, tab_idx: usize) -> bool {
+    /// 策略：
+    /// 1. UIA `SelectionItemPattern` 只负责“选择”动作（唯一精确同名优先，否则按 COM 索引）；
+    /// 2. 选择后必须回查 Shell COM，确认**活动标签的规范化完整路径**等于 `folder_path`，
+    ///    标题（末级目录名）绝不作为身份依据（`C:\ProjectA\src` 与 `D:\ProjectB\src` 同名）；
+    /// 3. UIA 路径未证实才尝试 0xA221（Ctrl+1..N）魔法指令兜底，同样必须通过 COM 核验。
+    ///
+    /// 返回 true 当且仅当目标完整路径已是活动标签；否则返回 false，调用方回退 fail-safe。
+    fn activate_tab_in_host(
+        com: &ShellComManager,
+        host_h: HWND,
+        folder_path: &str,
+        tab_idx: usize,
+    ) -> bool {
         let folder_name = std::path::Path::new(folder_path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -551,24 +564,19 @@ impl TabCoordinator {
             return false;
         }
 
-        // 尝试 1：UIA 直选 TabItem（公开无障碍接口，最可靠）
-        let uia_selected = try_select_tab_item_by_title(host_h, &folder_name);
-        if uia_selected {
-            // 选择生效需要时间，分两次核验，避免“已选中但尚未切换完成”的假失败
-            for _ in 0..2 {
-                std::thread::sleep(Duration::from_millis(150));
-                if is_tab_active_by_name(host_h, &folder_name) {
-                    crate::dialog::detector::log_debug(&format!(
-                        "TAB_ACTIVATE: host=0x{:X} target='{}' via=UIA idx={} -> ok",
-                        host_h.0 as usize, folder_name, tab_idx
-                    ));
-                    return true;
-                }
-            }
+        // 尝试 1：UIA 选择 + Shell COM 完整路径核验
+        if try_select_tab_item(host_h, tab_idx, &folder_name)
+            && Self::verify_active_tab_path(com, host_h, folder_path)
+        {
+            crate::dialog::detector::log_debug(&format!(
+                "TAB_ACTIVATE: host=0x{:X} target='{}' via=UIA idx={} -> ok",
+                host_h.0 as usize, folder_path, tab_idx
+            ));
+            return true;
         }
 
         // 尝试 2：0xA221 魔法指令兜底（未公开指令，部分构建有效；
-        // COM 枚举序号未必等于视觉标签顺序，因此仅作兜底且必须核验）
+        // COM 枚举序号未必等于视觉标签顺序，因此仅作兜底且必须核验完整路径）
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COMMAND};
             let _ = SendMessageW(
@@ -578,23 +586,35 @@ impl TabCoordinator {
                 Some(LPARAM((tab_idx + 1) as isize)),
             );
         }
-        for _ in 0..2 {
-            std::thread::sleep(Duration::from_millis(150));
-            if is_tab_active_by_name(host_h, &folder_name) {
-                crate::dialog::detector::log_debug(&format!(
-                    "TAB_ACTIVATE: host=0x{:X} target='{}' via=0xA221 idx={} -> ok",
-                    host_h.0 as usize, folder_name, tab_idx
-                ));
-                return true;
-            }
+        if Self::verify_active_tab_path(com, host_h, folder_path) {
+            crate::dialog::detector::log_debug(&format!(
+                "TAB_ACTIVATE: host=0x{:X} target='{}' via=0xA221 idx={} -> ok",
+                host_h.0 as usize, folder_path, tab_idx
+            ));
+            return true;
         }
 
-        // 全部尝试后目标标签仍未激活：返回 false，交由调用方 fail-safe 保留原生窗口，
+        // 全部尝试后目标完整路径仍非活动标签：返回 false，交由调用方 fail-safe 保留原生窗口，
         // 绝不静默关闭源窗口（那会让用户以为“完全没反应”）
         crate::dialog::detector::log_debug(&format!(
-            "TAB_ACTIVATE: host=0x{:X} target='{}' idx={} uia_select={} -> FAILED (fail-safe)",
-            host_h.0 as usize, folder_name, tab_idx, uia_selected
+            "TAB_ACTIVATE: host=0x{:X} target='{}' idx={} -> FAILED (fail-safe)",
+            host_h.0 as usize, folder_path, tab_idx
         ));
+        false
+    }
+
+    /// 回查 Shell COM，核验宿主窗口当前活动标签的规范化完整路径是否等于期望路径。
+    /// 选择生效需要时间，分两次核验，避免“已选中但尚未切换完成”的假失败。
+    fn verify_active_tab_path(com: &ShellComManager, host_h: HWND, expected_path: &str) -> bool {
+        let expected = normalize_path(expected_path);
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_millis(150));
+            if let Some(active) = com.get_active_tab_path(Some(host_h)) {
+                if normalize_path(&active) == expected {
+                    return true;
+                }
+            }
+        }
         false
     }
 
