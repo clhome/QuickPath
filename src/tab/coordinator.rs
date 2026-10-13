@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::com::{is_physical_dir_path, ShellComManager};
-use super::select::async_select_file_item;
+use super::select::try_select_file_item;
 use super::uia::trigger_new_tab;
 use windows::core::BOOL;
 
@@ -355,7 +355,7 @@ impl TabCoordinator {
 
             // 2. COM 穿透定向探测：有界等待预算 800ms，识别到有效物理路径立即短路跳出
             if target_info.is_none() {
-                for round in 0..25 {
+                for _ in 0..25 {
                     if start_time.elapsed() > Duration::from_millis(800) {
                         break;
                     }
@@ -365,11 +365,13 @@ impl TabCoordinator {
                         return; // 窗口已被外部自行关闭
                     }
                     if let Some(info) = com.get_window_target_info(new_h) {
-                        let (ref path, ref sel) = info;
+                        let (ref path, ref _sel) = info;
                         let is_blank_or_home = path == "shell:Home"
                             || path == "shell:::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}"
                             || path.is_empty();
-                        if !is_blank_or_home || (round >= 6 && sel.is_none()) {
+                        // 无效路径（blank/home/空）永远不接受：宁可超时走 fail-safe 恢复，
+                        // 也绝不拿一个假路径去"合并成功"并关闭源窗口（否则用户点击完全无响应）
+                        if !is_blank_or_home {
                             target_info = Some(info);
                             break;
                         }
@@ -382,8 +384,10 @@ impl TabCoordinator {
             if let Some((ref folder_path, _)) = target_info {
                 // 校验宿主窗口依然存活
                 if unsafe { IsWindow(Some(host_h)).as_bool() && IsWindowVisible(host_h).as_bool() } {
+                    // 工作线程的 SetForegroundWindow 会被前台锁静默拒绝（后台进程无前台权限），
+                    // 必须用输入桥接，否则合并成功了用户也看不见宿主窗口
                     unsafe {
-                        let _ = SetForegroundWindow(host_h);
+                        bring_window_to_front(host_h);
                     }
 
                     // 检查去重配置：若开启去重且非旁路状态，检测宿主中是否已存在该 Tab
@@ -404,26 +408,38 @@ impl TabCoordinator {
                             );
                         }
                         merged_success = true;
-                    } else {
+                    } else if is_physical_dir_path(folder_path) {
                         // 宿主没有该 Tab 或未开启去重，在宿主中新建 Tab 并精准导航
                         let count_before = com.get_tabs_count_for_hwnd(host_h);
                         if trigger_new_tab(host_h) {
-                            if is_physical_dir_path(folder_path) {
-                                merged_success = com.wait_and_navigate_new_tab(host_h, count_before, folder_path);
-                            } else {
-                                merged_success = true;
-                            }
+                            merged_success = com.wait_and_navigate_new_tab(host_h, count_before, folder_path);
                         }
+                    } else {
+                        // 非物理路径（shell: 等）无法在标签页中重建：不创建空标签、不关闭源窗口，
+                        // merged_success 保持 false，交由 fail-safe 恢复原生窗口
+                    }
+                }
+            }
+
+            // 外部 /select 携带文件名：在关闭源窗口前，必须同步确认宿主已选中该文件；
+            // 确认失败则视为合并未完成，回退 fail-safe（原生窗口天然保证选中文件），绝不静默吞掉这次唤起
+            if merged_success {
+                if let Some((_, Some(ref file_name))) = target_info {
+                    let mut file_selected = false;
+                    for _ in 0..10 {
+                        if try_select_file_item(host_h, file_name) {
+                            file_selected = true;
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(80));
+                    }
+                    if !file_selected {
+                        merged_success = false;
                     }
                 }
             }
 
             if merged_success {
-                // 如果存在待高亮的文件（外部 /select 唤起或 SHOpenFolderAndSelectItems），异步在宿主列表中恢复聚焦选中
-                if let Some((_, Some(ref file_name))) = target_info {
-                    async_select_file_item(host_h, file_name.clone());
-                }
-
                 // 只有在彻底确认合并成功的情况下，才安全销毁源窗口
                 unsafe {
                     let _ = PostMessageW(
@@ -443,6 +459,28 @@ impl TabCoordinator {
                             WPARAM(0),
                             LPARAM(0),
                         );
+                    }
+                }
+                // 最终核查：若源窗口依然存活（WM_CLOSE 被忽略），绝不能让它保持隐身状态，
+                // 立即恢复不透明度并移回可见区域，避免窗口永久隐身只能重启 Explorer 找回
+                std::thread::sleep(Duration::from_millis(400));
+                unsafe {
+                    use windows::Win32::Foundation::COLORREF;
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetLayeredWindowAttributes, LWA_ALPHA,
+                    };
+                    if IsWindow(Some(new_h)).as_bool() {
+                        let _ = SetLayeredWindowAttributes(new_h, COLORREF(0), 255, LWA_ALPHA);
+                        let _ = SetWindowPos(
+                            new_h,
+                            None,
+                            100,
+                            100,
+                            0,
+                            0,
+                            SWP_NOSIZE | SWP_SHOWWINDOW,
+                        );
+                        bring_window_to_front(new_h);
                     }
                 }
             } else {
@@ -466,7 +504,8 @@ impl TabCoordinator {
                         0,
                         SWP_NOSIZE | SWP_SHOWWINDOW,
                     );
-                    let _ = SetForegroundWindow(new_h);
+                    // 同样走输入桥接：fail-safe 恢复的窗口是用户当前最期望看到的，必须尽力前台化
+                    bring_window_to_front(new_h);
                 }
             }
 
@@ -483,6 +522,70 @@ impl TabCoordinator {
             bypass_deduplication: self.bypass_deduplication.clone(),
             processing_new_windows: self.processing_new_windows.clone(),
         })
+    }
+}
+
+/// 尝试将窗口真正带到前台。
+///
+/// 背景：后台进程在工作线程直接调 SetForegroundWindow 会被 Windows 前台锁静默拒绝
+/// （返回 FALSE），导致"合并成功了但用户什么都看不见"。本函数按以下顺序尽力而为：
+/// 1) 常规 SetForegroundWindow；2) AttachThreadInput 桥接输入状态后重试；
+/// 3) 退化为任务栏闪烁 + SWP_SHOWWINDOW 确保窗口至少可见。
+unsafe fn bring_window_to_front(hwnd: HWND) -> bool {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetWindowThreadProcessId,
+        IsWindow, SetForegroundWindow, SetWindowPos, FLASHWINFO, FLASHW_ALL,
+        FLASHW_TIMERNOFG, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+    };
+
+    // 仓库风格：unsafe fn 内部再包一层 unsafe 块，避免 unsafe_op_in_unsafe_fn lint
+    unsafe {
+        if hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() {
+            return false;
+        }
+
+        // 1. 常规尝试（前台进程/刚收过输入时可直接成功）
+        if SetForegroundWindow(hwnd).as_bool() {
+            return true;
+        }
+
+        // 2. AttachThreadInput 桥接：将当前线程输入状态挂到前台线程上再抢前台
+        let fg = GetForegroundWindow();
+        if !fg.0.is_null() {
+            let mut _pid = 0u32;
+            let fg_tid = GetWindowThreadProcessId(fg, Some(&mut _pid));
+            let cur_tid = GetCurrentThreadId();
+            if fg_tid != 0 && fg_tid != cur_tid
+                && AttachThreadInput(cur_tid, fg_tid, true).as_bool()
+            {
+                let ok = SetForegroundWindow(hwnd).as_bool();
+                let _ = BringWindowToTop(hwnd);
+                let _ = AttachThreadInput(cur_tid, fg_tid, false);
+                if ok {
+                    return true;
+                }
+            }
+        }
+
+        // 3. 退化方案：任务栏闪烁提示 + 确保窗口可见（不抢焦点也至少让用户感知到）
+        let mut fwi: FLASHWINFO = std::mem::zeroed();
+        fwi.cbSize = std::mem::size_of::<FLASHWINFO>() as u32;
+        fwi.hwnd = hwnd;
+        fwi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+        fwi.uCount = 3;
+        fwi.dwTimeout = 0;
+        let _ = FlashWindowEx(&fwi);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+        );
+        false
     }
 }
 
