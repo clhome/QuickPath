@@ -100,6 +100,11 @@ const RESTORE_ATTEMPTS: u32 = 3;
 #[cfg(test)]
 static TEST_FAIL_FORMAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
+/// 测试注入的失败环节（仅当 `TEST_FAIL_FORMAT` 命中时生效）：
+/// 0 = `SetClipboardData` 失败（默认），1 = `GlobalAlloc` 失败，2 = `GlobalLock` 失败。
+#[cfg(test)]
+static TEST_FAIL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 /// 读取系统剪贴板序列号（每次剪贴板内容变化都会自增）
 fn clipboard_sequence_number() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
@@ -110,6 +115,12 @@ impl std::error::Error for ClipboardSafetyError {}
 /// 测试期强制「剪贴板被占用」注入（同进程内无法真实模拟跨进程独占）
 #[cfg(test)]
 static TEST_FORCE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 测试期强制「owner 创建失败」注入：让 `clipboard_owner()` 返回 None，
+/// 用于验证 §12「owner 创建失败时原剪贴板保持不变」的 fail-closed 语义。
+#[cfg(test)]
+static TEST_FORCE_NO_OWNER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 带指数退避的剪贴板独占打开函数
 fn open_clipboard_with_retry(hwnd: Option<HWND>, max_retries: u32) -> bool {
@@ -151,6 +162,11 @@ unsafe extern "system" fn clipboard_owner_proc(
 /// `EmptyClipboard` / `SetClipboardData` 的写路径都必须以有效 HWND 打开剪贴板。
 /// 这里在专用线程上创建一个隐藏顶层窗口并跑消息泵，使句柄在进程存活期内始终有效。
 fn clipboard_owner() -> Option<HWND> {
+    #[cfg(test)]
+    if TEST_FORCE_NO_OWNER.load(Ordering::SeqCst) {
+        return None;
+    }
+
     OWNER_INIT.call_once(|| {
         let (tx, rx) = std::sync::mpsc::channel::<usize>();
         let spawned = thread::Builder::new()
@@ -618,10 +634,22 @@ fn prod_set(format: u32, handle: HGLOBAL) -> bool {
 fn write_clipboard_format(format: u32, data: &[u8]) -> bool {
     #[cfg(test)]
     if TEST_FAIL_FORMAT.load(std::sync::atomic::Ordering::SeqCst) == format {
-        // 端到端用例沿用的“该格式写回必失败”注入，等价于 SetClipboardData 失败
-        let ops = HandleOps {
-            set: |_, _| false,
-            ..PROD_HANDLE_OPS
+        // 端到端用例沿用的“该格式写回必失败”注入：按 `TEST_FAIL_MODE` 选定
+        // 分配 / 加锁 / 设置哪一环失败。三条分支都必须返回失败，
+        // 绝不允许“失败仍上报成功”。
+        let ops = match TEST_FAIL_MODE.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => HandleOps {
+                alloc: |_| None,
+                ..PROD_HANDLE_OPS
+            },
+            2 => HandleOps {
+                lock: |_| std::ptr::null_mut(),
+                ..PROD_HANDLE_OPS
+            },
+            _ => HandleOps {
+                set: |_, _| false,
+                ..PROD_HANDLE_OPS
+            },
         };
         return write_clipboard_format_with(format, data, &ops);
     }
@@ -928,11 +956,38 @@ mod tests {
         }
     }
 
+    /// 单格式写回可注入的失败环节，逐一对应 `HandleOps` 的三个可失败入口。
+    #[derive(Clone, Copy, Debug)]
+    enum FailOp {
+        /// `SetClipboardData` 失败（等价于既有默认注入）
+        Set,
+        /// `GlobalAlloc` 分配失败
+        Alloc,
+        /// `GlobalLock` 加锁失败
+        Lock,
+    }
+
+    impl FailOp {
+        fn mode(self) -> u8 {
+            match self {
+                FailOp::Set => 0,
+                FailOp::Alloc => 1,
+                FailOp::Lock => 2,
+            }
+        }
+    }
+
     /// 测试期故障注入开关，保证即使断言失败也不会污染后续用例
     struct FailInjection;
 
     impl FailInjection {
         fn enable(format: u32) -> Self {
+            Self::enable_with(format, FailOp::Set)
+        }
+
+        /// 指定失败环节注入：格式 `format` 的写回必须在 `op` 处失败
+        fn enable_with(format: u32, op: FailOp) -> Self {
+            TEST_FAIL_MODE.store(op.mode(), std::sync::atomic::Ordering::SeqCst);
             TEST_FAIL_FORMAT.store(format, std::sync::atomic::Ordering::SeqCst);
             Self
         }
@@ -954,14 +1009,31 @@ mod tests {
         }
     }
 
-    impl Drop for FailInjection {
-        fn drop(&mut self) {
-            TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+    /// 测试期「owner 创建失败」故障注入
+    struct OwnerFailInjection;
+
+    impl OwnerFailInjection {
+        fn enable() -> Self {
+            TEST_FORCE_NO_OWNER.store(true, std::sync::atomic::Ordering::SeqCst);
+            Self
         }
     }
 
-    /// 写入一个合法的最小 1x1 24-bit DIB，供失败注入用例复用
-    fn seed_dib_clipboard() {
+    impl Drop for OwnerFailInjection {
+        fn drop(&mut self) {
+            TEST_FORCE_NO_OWNER.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl Drop for FailInjection {
+        fn drop(&mut self) {
+            TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+            TEST_FAIL_MODE.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// 构造合法的最小 1x1 24-bit DIB 内存块（40 字节 BITMAPINFOHEADER + 4 字节像素）
+    fn minimal_dib_blob() -> [u8; 44] {
         let mut dib_data = [0u8; 44];
         dib_data[0..4].copy_from_slice(&40u32.to_le_bytes()); // biSize = 40
         dib_data[4..8].copy_from_slice(&1i32.to_le_bytes()); // biWidth = 1
@@ -969,71 +1041,73 @@ mod tests {
         dib_data[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes = 1
         dib_data[14..16].copy_from_slice(&24u16.to_le_bytes()); // biBitCount = 24
         dib_data[20..24].copy_from_slice(&4u32.to_le_bytes()); // biSizeImage = 4
-
-        assert!(
-            open_clipboard_for_write(10),
-            "测试初始化必须以合法 owner 打开剪贴板"
-        );
-        unsafe {
-            let _ = EmptyClipboard();
-            if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, dib_data.len()) {
-                let ptr = GlobalLock(h);
-                if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(
-                        dib_data.as_ptr(),
-                        ptr as *mut u8,
-                        dib_data.len(),
-                    );
-                    let _ = GlobalUnlock(h);
-                    assert!(
-                        SetClipboardData(CF_DIB, Some(HANDLE(h.0))).is_ok(),
-                        "种入 CF_DIB 必须成功"
-                    );
-                }
-            }
-            let _ = CloseClipboard();
-        }
+        dib_data
     }
 
-    /// P0-01：单格式恢复失败时，restore() 必须返回结构化错误且绝不置 restored；
+    /// 写入一个合法的最小 1x1 24-bit DIB（并附带 Unicode 文本），供失败注入用例复用
+    fn seed_dib_clipboard() {
+        seed_clipboard_formats(&[(CF_DIB, &minimal_dib_blob()[..])]);
+    }
+
+    /// P0-01：单格式恢复失败时（分配 / 加锁 / 设置三处故障逐个注入），
+    /// restore() 必须返回结构化错误且绝不置 restored；失败后其它格式不得被清掉；
     /// 清除故障后重试必须能补齐（只补写失败格式，不重复清空已恢复内容）。
     #[test]
     fn test_restore_partial_failure_is_reported_and_retryable() {
         let _guard = clip_test_lock();
-        seed_dib_clipboard();
 
-        let mut snap = ClipboardSnapshot::capture().expect("含 DIB 的剪贴板必须可被安全捕获");
-        assert!(!snap.items.is_empty(), "快照必须至少含一个格式");
-        // 清掉当前剪贴板，确保后续断言只能来自快照恢复
-        assert!(set_raw_clipboard_text("qp_restore_probe"));
+        for op in [FailOp::Set, FailOp::Alloc, FailOp::Lock] {
+            seed_dib_clipboard();
 
-        {
-            let _inject = FailInjection::enable(CF_DIB);
-            let err = snap.restore().expect_err("单格式恢复失败时不得返回成功");
-            match err {
-                ClipboardRestoreError::PartialRestore(ref failed) => {
-                    assert!(
-                        failed.contains(&CF_DIB),
-                        "失败列表必须包含 CF_DIB，实际 {:?}",
-                        failed
-                    );
+            let mut snap = ClipboardSnapshot::capture().expect("含 DIB 的剪贴板必须可被安全捕获");
+            assert!(
+                snap.items.iter().any(|(f, _)| *f == CF_DIB),
+                "快照必须含 CF_DIB"
+            );
+            assert!(
+                snap.items.iter().any(|(f, _)| *f == CF_UNICODETEXT),
+                "快照必须含 CF_UNICODETEXT，用于验证失败时其它格式不被破坏"
+            );
+            // 清掉当前剪贴板，确保后续断言只能来自快照恢复
+            assert!(set_raw_clipboard_text("qp_restore_probe"));
+
+            {
+                let _inject = FailInjection::enable_with(CF_DIB, op);
+                let err = snap.restore().expect_err("单格式恢复失败时不得返回成功");
+                match err {
+                    ClipboardRestoreError::PartialRestore(ref failed) => {
+                        assert!(
+                            failed.contains(&CF_DIB),
+                            "{:?}: 失败列表必须包含 CF_DIB，实际 {:?}",
+                            op,
+                            failed
+                        );
+                    }
+                    other => panic!("{:?}: 期望 PartialRestore，实际 {:?}", op, other),
                 }
-                other => panic!("期望 PartialRestore，实际 {:?}", other),
+                assert!(!snap.restored, "部分失败时绝不能标记为已恢复");
+
+                // 未注入故障的格式必须已写回，且重试时不得被再次清空
+                assert_eq!(
+                    get_clipboard_text().as_deref(),
+                    Some("qp_multiformat_seed"),
+                    "{:?}: 失败后其它格式必须仍保留在剪贴板中",
+                    op
+                );
             }
-            assert!(!snap.restored, "部分失败时绝不能标记为已恢复");
-        }
 
-        // 故障解除后重试只补写缺失格式
-        assert_eq!(snap.restore(), Ok(RestoreStatus::Restored));
-        assert!(snap.restored, "成功恢复后必须置位 restored");
-        // 幂等：重复调用不得再动剪贴板
-        assert_eq!(snap.restore(), Ok(RestoreStatus::AlreadyRestored));
+            // 故障解除后重试只补写缺失格式
+            assert_eq!(snap.restore(), Ok(RestoreStatus::Restored));
+            assert!(snap.restored, "成功恢复后必须置位 restored");
+            // 幂等：重复调用不得再动剪贴板
+            assert_eq!(snap.restore(), Ok(RestoreStatus::AlreadyRestored));
 
-        assert!(open_clipboard_for_read(10));
-        unsafe {
-            let restored = GetClipboardData(CF_DIB);
-            assert!(restored.is_ok(), "重试成功后剪贴板必须重新持有 CF_DIB");
-            let _ = CloseClipboard();
+            assert!(open_clipboard_for_read(10));
+            unsafe {
+                let restored = GetClipboardData(CF_DIB);
+                assert!(restored.is_ok(), "重试成功后剪贴板必须重新持有 CF_DIB");
+                let _ = CloseClipboard();
+            }
         }
     }
 
@@ -1065,32 +1139,34 @@ mod tests {
         let _ = set_raw_clipboard_text("qp_snapshot_seed");
     }
 
-    /// P0-01：`with_temporary_clipboard_text` 必须把恢复失败向上传播，而不是静默返回 Ok
+    /// P0-01：`with_temporary_clipboard_text` 必须把恢复失败向上传播，而不是静默返回 Ok。
+    /// 分配 / 加锁 / 设置三处故障逐个注入，均不得假报成功。
     #[test]
     fn test_temporary_clipboard_text_propagates_restore_failure() {
         let _guard = clip_test_lock();
-        assert!(set_raw_clipboard_text("qp_propagate_seed"));
 
-        let _inject = FailInjection::enable(CF_UNICODETEXT);
-        let outcome: Result<u32, ClipboardSafetyError> =
-            with_temporary_clipboard_text("C:\\PropagateProbe", || 7);
+        for op in [FailOp::Set, FailOp::Alloc, FailOp::Lock] {
+            assert!(set_raw_clipboard_text("qp_propagate_seed"));
 
-        match outcome {
-            Err(ClipboardSafetyError::RestoreFailed(err)) => {
-                assert!(
-                    matches!(err, ClipboardRestoreError::PartialRestore(_)),
-                    "恢复失败必须是结构化的 PartialRestore，实际 {:?}",
-                    err
-                );
-                // 内容未恢复也不能假报成功：调用方拿不到闭包结果
-                assert!(
-                    matches!(err, ClipboardRestoreError::PartialRestore(ref v) if v.contains(&CF_UNICODETEXT))
-                );
+            let inject = FailInjection::enable_with(CF_UNICODETEXT, op);
+            let outcome: Result<u32, ClipboardSafetyError> =
+                with_temporary_clipboard_text("C:\\PropagateProbe", || 7);
+            drop(inject);
+
+            match outcome {
+                Err(ClipboardSafetyError::RestoreFailed(err)) => {
+                    // 内容未恢复也不能假报成功：调用方拿不到闭包结果
+                    assert!(
+                        matches!(err, ClipboardRestoreError::PartialRestore(ref v) if v.contains(&CF_UNICODETEXT)),
+                        "{:?}: 恢复失败必须是含 CF_UNICODETEXT 的 PartialRestore，实际 {:?}",
+                        op,
+                        err
+                    );
+                }
+                other => panic!("{:?}: 期望 RestoreFailed 错误，实际 {:?}", op, other),
             }
-            other => panic!("期望 RestoreFailed 错误，实际 {:?}", other),
         }
 
-        drop(_inject);
         let _ = set_raw_clipboard_text("qp_propagate_seed");
     }
 
@@ -1213,6 +1289,52 @@ mod tests {
         }
     }
 
+    /// DIB 规范化容忍比对：`BITMAPINFOHEADER` 关键字段 + 总大小 + 像素数据必须一致。
+    /// 比「只要存在就算过」严格，同时容忍 Windows 对头部字段的规范化。
+    fn assert_dib_equivalent(got: &[u8], want: &[u8], label: &str) {
+        assert!(
+            got.len() >= 40 && want.len() >= 40,
+            "{}: DIB 必须至少含 40 字节 BITMAPINFOHEADER",
+            label
+        );
+        // biSize / biWidth / biHeight / biPlanes / biBitCount
+        for (offset, len) in [(0usize, 4usize), (4, 4), (8, 4), (12, 2), (14, 2)] {
+            assert_eq!(
+                &got[offset..offset + len],
+                &want[offset..offset + len],
+                "{}: DIB 头字段 @{} 必须一致",
+                label,
+                offset
+            );
+        }
+        assert_eq!(got.len(), want.len(), "{}: DIB 总大小必须一致", label);
+        assert_eq!(&got[40..], &want[40..], "{}: DIB 像素数据必须一致", label);
+    }
+
+    /// 逐格式断言恢复后内容保真：DIB 走 `assert_dib_equivalent`（容忍头部规范化），
+    /// 其余格式必须字节完全一致。任何格式丢失都直接报错。
+    fn assert_mixed_roundtrip(original: &ClipboardSnapshot, label: &str) {
+        let after = ClipboardSnapshot::capture()
+            .unwrap_or_else(|err| panic!("{}: 恢复后应能再次安全捕获: {:?}", label, err));
+        for (format, data) in &original.items {
+            let got = after
+                .items
+                .iter()
+                .find(|(f, _)| f == format)
+                .map(|(_, d)| d)
+                .unwrap_or_else(|| panic!("{}: 格式 {} 在恢复后丢失", label, format));
+            if *format == CF_DIB {
+                assert_dib_equivalent(got, data, label);
+            } else {
+                assert_eq!(
+                    got, data,
+                    "{}: 格式 {} 必须在恢复后字节完全一致",
+                    label, format
+                );
+            }
+        }
+    }
+
     /// P0-01：文件列表（CF_HDROP）+ 注册格式 + Unicode 文本混合剪贴板必须完整往返
     #[test]
     fn test_hdrop_and_registered_format_survive_temporary_text_injection() {
@@ -1252,6 +1374,93 @@ mod tests {
         assert_snapshot_roundtrip(&before, "CF_HDROP+注册格式+文本");
     }
 
+    /// 审计报告 §10-2 + §12 剪贴板清单：Unicode、HTML、RTF、CF_HDROP、DIB 与自定义
+    /// 注册 HGLOBAL 格式同处一次剪贴板会话，经真实「临时文本注入 + 恢复」后逐格式保真往返。
+    ///
+    /// 断言强度：
+    /// - 每个格式都必须存在于快照中（防止种子阶段静默丢格式）；
+    /// - 恢复后每个格式都必须字节一致（DIB 按 `assert_dib_equivalent` 比对关键头字段、
+    ///   总大小与像素数据，而不是「只要存在就算过」）；
+    /// - 恢复后剪贴板必须不再持有临时注入文本。
+    #[test]
+    fn test_mixed_formats_survive_temporary_text_injection() {
+        let _guard = clip_test_lock();
+
+        let html_format = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "HTML Format"
+            ))
+        };
+        let rtf_format = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "Rich Text Format"
+            ))
+        };
+        let custom_format = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "QuickPathMixedFormatProbe"
+            ))
+        };
+        assert!(
+            html_format != 0 && rtf_format != 0 && custom_format != 0,
+            "HTML/RTF/自定义格式注册必须成功"
+        );
+
+        let html = "<html><body>QuickPath HTML 中文</body></html>"
+            .as_bytes()
+            .to_vec();
+        let rtf = r"{\rtf1\ansi QuickPath RTF 中文}".as_bytes().to_vec();
+        let custom = b"quickpath-custom-hglobal-probe".to_vec();
+        let hdrop = hdrop_blob(&[
+            r"C:\QuickPath\one.txt",
+            r"D:\QuickPath\two.bin",
+            r"E:\QuickPath\three.log",
+        ]);
+        let dib = minimal_dib_blob();
+
+        // seed_clipboard_formats 会额外写入 CF_UNICODETEXT，故六类格式同处一份剪贴板
+        seed_clipboard_formats(&[
+            (html_format, &html),
+            (rtf_format, &rtf),
+            (custom_format, &custom),
+            (CF_HDROP, &hdrop),
+            (CF_DIB, &dib[..]),
+        ]);
+
+        let before = ClipboardSnapshot::capture().expect("混合格式剪贴板必须能被安全完整捕获");
+        for fmt in [
+            CF_UNICODETEXT,
+            html_format,
+            rtf_format,
+            CF_HDROP,
+            CF_DIB,
+            custom_format,
+        ] {
+            assert!(
+                before.items.iter().any(|(f, _)| *f == fmt),
+                "快照必须含格式 {}",
+                fmt
+            );
+        }
+
+        with_temporary_clipboard_text("C:\\TemporaryInjection", || {
+            assert_eq!(
+                get_clipboard_text().as_deref(),
+                Some("C:\\TemporaryInjection"),
+                "闭包内部应为临时注入文本"
+            );
+        })
+        .expect("混合格式下的临时注入与恢复必须成功");
+
+        assert_mixed_roundtrip(&before, "混合格式(Unicode/HTML/RTF/HDROP/DIB/自定义)");
+
+        assert_ne!(
+            get_clipboard_text().as_deref(),
+            Some("C:\\TemporaryInjection"),
+            "恢复后剪贴板不得再持有临时注入文本"
+        );
+    }
+
     /// P0-01：剪贴板被其他进程/线程独占时，捕获/恢复必须返回结构化 Busy，且绝不置 restored
     #[test]
     fn test_clipboard_busy_is_reported_and_never_claims_success() {
@@ -1278,6 +1487,48 @@ mod tests {
         // 占用解除后必须能正常完成恢复
         assert_eq!(snap.restore(), Ok(RestoreStatus::Restored));
         let _ = set_raw_clipboard_text("qp_busy_seed");
+    }
+
+    /// 审计报告 §12 剪贴板清单：owner 创建失败时，所有写路径必须 fail-closed，
+    /// 调用方收到明确失败（绝不假报成功），且原剪贴板内容保持不变。
+    #[test]
+    fn test_owner_creation_failure_keeps_clipboard_unchanged() {
+        let _guard = clip_test_lock();
+
+        assert!(set_raw_clipboard_text("qp_owner_fail_seed"));
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_owner_fail_seed"),
+            "前置条件：种子文本必须写入成功"
+        );
+
+        {
+            let _no_owner = OwnerFailInjection::enable();
+
+            assert!(clipboard_owner().is_none(), "注入后 owner 必须不可用");
+            assert!(
+                !open_clipboard_for_write(4),
+                "owner 不可用时写路径打开剪贴板必须失败"
+            );
+
+            let outcome: Result<u32, ClipboardSafetyError> =
+                with_temporary_clipboard_text("C:\\OwnerFailProbe", || 9);
+            assert_eq!(
+                outcome,
+                Err(ClipboardSafetyError::WriteFailed),
+                "owner 创建失败时临时写入必须明确失败"
+            );
+
+            // 关键断言：原剪贴板内容不得被破坏
+            assert_eq!(
+                get_clipboard_text().as_deref(),
+                Some("qp_owner_fail_seed"),
+                "owner 创建失败时原剪贴板必须保持不变"
+            );
+        }
+
+        // 注入解除后写路径恢复可用
+        assert!(set_raw_clipboard_text("qp_owner_fail_seed"));
     }
 
     /// P0-01：所有写路径必须以「有效窗口」为 owner 打开剪贴板；

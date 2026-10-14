@@ -1515,7 +1515,7 @@
 
 - [x] t0 基线校验（见上）
 - [x] t1 S-02 `hinstance` 配对 + owner 创建集成测试
-- [ ] t2 剪贴板混合格式往返 + 失败不上报成功测试
+- [x] t2 剪贴板混合格式往返 + 失败不上报成功测试
 - [ ] t3 移除 `AppState` 裸指针
 - [ ] t4 COM worker 重建上限/退避/降级
 - [ ] t5 owner 线程退出协议
@@ -1525,6 +1525,7 @@
 - [ ] t9 Win+E 失败分支测试 + 真机验收清单文档化
 - [ ] t10 收口（全量门禁 + 逐项对照 + 清理）
 - t1（S-02，父 agent 已独立复核）：owner 窗口注册/创建 `hinstance` 配对 + `GetModuleHandleW`/`RegisterClassW` 显式错误处理 + 集成回归测试（test 99→100）；门禁：fmt 干净 / clippy 0 告警 / test 100 通过 / build --release 通过。**父 agent 变异复核结论**：把 `CreateWindowExW` 实例参数改回 `None` 后 10 个剪贴板用例仍全绿（`GetLastError=0`、HWND 非空、`IsWindow=true`），即报告 S-02 声称的「创建失败」在本机 Win11 上**不可达**（进程本地窗口类的查找不依赖 `CreateWindowExW` 的 `hinstance`），该修复属与 MSDN 写法一致的健壮性/一致性修复，**不构成发布阻塞**。真实 commit hash 见 t10 对照表（此处不再内联 hash，避免 amend 后失效）
+- t2（测试(clipboard): 补齐混合格式往返与失败 fail-closed 断言）：新增 `test_mixed_formats_survive_temporary_text_injection`（Unicode/HTML/RTF/CF_HDROP/DIB/自定义注册格式六类同处一次剪贴板会话，真实临时文本注入+恢复后逐格式字节保真，DIB 按关键头字段+总大小+像素数据比对，非「存在即通过」）；强化 `test_restore_partial_failure_is_reported_and_retryable`（分配/加锁/设置三处故障逐个注入，restore 必返 Err、绝不置 restored、其它格式不被清掉、可重试）与 `test_temporary_clipboard_text_propagates_restore_failure`（同三处注入均不得假报 Ok）；新增 `test_owner_creation_failure_keeps_clipboard_unchanged`（§12：owner 创建失败时写路径 fail-closed 且原剪贴板保持不变）。未发现生产缺陷，仅新增 `#[cfg(test)]` 注入钩子 `TEST_FAIL_MODE` / `TEST_FORCE_NO_OWNER`。变异自证：把 `restore_attempt` 失败分支改为 `all_ok=true`、在 `restore_attempt` 中跳过 `CF_HDROP`、以及让 `open_clipboard_for_write` 在 owner 失败时回退 NULL，三处变异均使对应用例变红，恢复后全绿。门禁：fmt 干净 / clippy 0 告警 / test 100→102 通过 / build --release 通过。
 
 
 
