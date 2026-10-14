@@ -22,7 +22,7 @@ use win32::events::{WM_QUICKPATH_FOREGROUND, WinEventHookGuard, get_active_foreg
 
 use std::cell::RefCell;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -76,15 +76,39 @@ thread_local! {
     static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
+/// 宿主状态重入被跳过（降级为 `None`）的累计次数；用于诊断日志限频与汇总。
+static APP_STATE_REENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// 重入诊断日志的限频间隔：首次立即告警，之后每 `APP_STATE_REENTRY_LOG_EVERY` 次
+/// 汇总一条，避免同一时刻高频重入刷屏写盘。
+const APP_STATE_REENTRY_LOG_EVERY: u64 = 100;
+
 /// 在宿主消息线程内以闭包作用域访问 `AppState`；非宿主线程或已卸载时返回 `None`。
 ///
-/// 闭包持有 `RefCell` 的可变借用。调用方必须保证闭包作用域内不再进入
-/// `with_state`（否则 `RefCell` 会 panic）；需要把状态交给下游函数时改为显式
-/// 传入 `&mut AppState` / `&AppState`，并在调用可能泵消息的 Win32 API
-/// （如 `TrackPopupMenu`）前释放借用。
+/// 闭包持有 `RefCell` 的可变借用。设计约定：正常路径必须避免重入——需要把状态
+/// 交给下游函数时改为显式传入 `&mut AppState` / `&AppState`，并在调用可能泵消息的
+/// Win32 API（如 `TrackPopupMenu`、STA COM/UIA 调用）前释放借用。
+///
+/// 但重入无法在类型层面彻底排除：`WM_TRAY_CALLBACK` 之外仍可能有 Win32 API 在持
+/// 借用期间泵消息并重入 `host_wnd_proc`。因此这里用 `try_borrow_mut()` 让重入
+/// **降级**而非 panic——重入时记录一条限频结构化诊断并返回 `None`。这一点至关重要：
+/// `[profile.release] panic = "abort"` 且访问器经 `extern "system" fn host_wnd_proc`
+/// 跨 FFI 边界调用，任何 panic 都会直接终止整个托盘进程，即一次重入 = 程序崩溃退出。
 fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
     APP_STATE.with(|cell| {
-        let mut guard = cell.borrow_mut();
+        let mut guard = match cell.try_borrow_mut() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // 当前线程已有活动借用 = 重入。降级为 `None` + 限频诊断，绝不 panic。
+                let count = APP_STATE_REENTRY_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                if count == 1 || count.is_multiple_of(APP_STATE_REENTRY_LOG_EVERY) {
+                    crate::dialog::detector::log_debug(&format!(
+                        "APP_STATE_REENTRANT: 宿主状态正被占用，跳过本次重入访问（累计 {count} 次）"
+                    ));
+                }
+                return None;
+            }
+        };
         guard.as_mut().map(f)
     })
 }
@@ -970,6 +994,25 @@ mod tests {
         // 可再次安装并访问（幂等）
         install_state();
         assert!(with_state(|state| state.manager_scan_generation).is_some());
+
+        reset_state();
+    }
+
+    #[test]
+    fn with_state_reentrant_access_degrades_to_none_without_panic() {
+        reset_state();
+        install_state();
+
+        // 模拟 WndProc 重入：外层闭包仍持有 `AppState` 借用时再次进入 `with_state`。
+        // 现实触发路径是「持借用期间泵消息」——如 `on_foreground_window_changed_impl`
+        // 内的 `get_active_explorer_folder_fast()`（IShellWindows COM）/`detect_file_dialog`
+        // （UIA）在 STA 上内部泵消息，从而重入 `host_wnd_proc` → 再次 `with_state`。
+        // 这正是本次修复的可用性回归点：`[profile.release] panic = "abort"` 下
+        // `borrow_mut()` 在重入时 panic，而访问器又经 `extern "system" fn` 跨 FFI 调用，
+        // 会让整个托盘程序直接崩溃退出。修复后必须降级而非 abort：
+        // 内层因重入返回 `None`，外层正常返回 `Some(None)`。
+        let outer = with_state(|_| with_state(|state| state.manager_scan_generation));
+        assert_eq!(outer, Some(None));
 
         reset_state();
     }
