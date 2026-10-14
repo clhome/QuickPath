@@ -105,12 +105,23 @@ struct StaWorker {
 const MAX_CONSECUTIVE_TIMEOUTS: u64 = 2;
 /// 累计重建告警阈值：每到达这个倍数就输出一条显式告警（报告第二批“重建上限监控”）
 const MAX_REBUILDS_ALERT: u64 = 5;
+/// 熔断硬上限：自上次成功以来累计重建达到该值即进入降级（OPEN）。
+///
+/// 取值 8 的理由：单次卡死由 `MAX_CONSECUTIVE_TIMEOUTS = 2` 触发，8 次重建约等于
+/// 16 次连续超时，已远超“偶发卡顿”的合理范围；同时被放弃的 STA 线程（每个约 1 MB 栈）
+/// 累计仍属可接受量级。既给短时抖动留出恢复窗口，又能及时止损，避免持续异常下
+/// 无限重建造成的线程/资源压力（报告 §8 开放项）。
+const MAX_REBUILDS_BEFORE_DEGRADE: u64 = 8;
+/// 降级退避基准：首轮降级 2s，之后每轮翻倍（2s → 4s → 8s …）
+const DEGRADE_BACKOFF_BASE: Duration = Duration::from_secs(2);
+/// 退避上限：避免指数增长到不可接受的时长（第 6 轮起 64s 被截断为 60s）
+const DEGRADE_BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// 耗时样本环大小
 const LATENCY_SAMPLES: usize = 256;
 /// 每处理多少次请求输出一次埋点汇总
 const STATS_LOG_EVERY: u64 = 500;
 
-/// STA 队列埋点快照（P50/P95/P99、队列深度、超时率、重建次数）
+/// STA 队列埋点快照（P50/P95/P99、队列深度、超时率、重建次数、熔断器三态）
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ComStatsSnapshot {
     pub requests: u64,
@@ -120,6 +131,14 @@ pub struct ComStatsSnapshot {
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub p99_ms: f64,
+    /// 是否处于降级（OPEN）状态
+    pub degraded: bool,
+    /// 自上次成功以来的重建次数（任何一次成功请求都会清零）
+    pub rebuilds_since_success: u64,
+    /// 降级期被 fail-fast 跳过的请求数
+    pub skipped_while_degraded: u64,
+    /// 连续降级轮次（决定退避时长）
+    pub degraded_rounds: u64,
 }
 
 impl ComStatsSnapshot {
@@ -133,11 +152,15 @@ impl ComStatsSnapshot {
 
     pub fn describe(&self) -> String {
         format!(
-            "req={} timeout={} ({:.2}%) rebuild={} depth={} p50={:.1}ms p95={:.1}ms p99={:.1}ms",
+            "req={} timeout={} ({:.2}%) rebuild={} rebuild_since_ok={} degraded={} rounds={} skipped={} depth={} p50={:.1}ms p95={:.1}ms p99={:.1}ms",
             self.requests,
             self.timeouts,
             self.timeout_rate() * 100.0,
             self.worker_rebuilds,
+            self.rebuilds_since_success,
+            self.degraded,
+            self.degraded_rounds,
+            self.skipped_while_degraded,
             self.queue_depth,
             self.p50_ms,
             self.p95_ms,
@@ -152,8 +175,10 @@ struct ComStats {
     timeouts: AtomicU64,
     consecutive_timeouts: AtomicU64,
     worker_rebuilds: AtomicU64,
+    skipped_while_degraded: AtomicU64,
     queue_depth: AtomicU64,
     latencies_us: Mutex<VecDeque<u64>>,
+    circuit: Mutex<CircuitState>,
 }
 
 impl ComStats {
@@ -190,6 +215,118 @@ impl ComStats {
         self.consecutive_timeouts.fetch_add(1, Ordering::SeqCst) + 1
     }
 
+    /// 记录一次重建，返回「自上次成功以来的重建次数」
+    fn record_rebuild(&self) -> u64 {
+        let mut circuit = self
+            .circuit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        circuit.rebuilds_since_success += 1;
+        circuit.rebuilds_since_success
+    }
+
+    fn rebuilds_since_success(&self) -> u64 {
+        self.circuit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rebuilds_since_success
+    }
+
+    /// 熔断准入：正常放行 / 半开放行一次探测 / 降级 fail-fast
+    fn circuit_admit(&self) -> CircuitAdmit {
+        let now = Instant::now();
+        let (admit, probe_rounds) = {
+            let mut circuit = self
+                .circuit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match circuit.phase(now) {
+                CircuitPhase::Closed => (CircuitAdmit::Closed, None),
+                CircuitPhase::Open => (CircuitAdmit::FailFast, None),
+                CircuitPhase::HalfOpen => {
+                    circuit.probe_in_flight = true;
+                    (CircuitAdmit::Probe, Some(circuit.degraded_rounds))
+                }
+            }
+        };
+        if let Some(rounds) = probe_rounds {
+            crate::dialog::detector::log_debug(&format!(
+                "COM_HALF_OPEN: 退避到期，放行一次探测性重建 + 请求（连续降级第 {} 轮） | {}",
+                rounds,
+                self.snapshot().describe()
+            ));
+        }
+        admit
+    }
+
+    /// 成功：清零重建计数与退避轮次，退出降级；若此前处于降级/半开则记录恢复
+    fn circuit_on_success(&self) {
+        let was_degraded = {
+            let mut circuit = self
+                .circuit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let was = circuit.degraded_until.is_some() || circuit.probe_in_flight;
+            circuit.rebuilds_since_success = 0;
+            circuit.degraded_rounds = 0;
+            circuit.degraded_until = None;
+            circuit.probe_in_flight = false;
+            was
+        };
+        if was_degraded {
+            crate::dialog::detector::log_debug(&format!(
+                "COM_RECOVERED: STA worker 探测成功，熔断器恢复正常（重建计数与退避轮次清零） | {}",
+                self.snapshot().describe()
+            ));
+        }
+    }
+
+    /// 进入降级（幂等：已降级时不再重复推进轮次）
+    fn enter_degraded(&self, reason: &str) {
+        let (rounds, backoff_secs) = {
+            let mut circuit = self
+                .circuit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if circuit.degraded_until.is_some() {
+                return;
+            }
+            circuit.degraded_rounds += 1;
+            circuit.probe_in_flight = false;
+            let backoff = degrade_backoff(circuit.degraded_rounds);
+            circuit.degraded_until = Some(Instant::now() + backoff);
+            (circuit.degraded_rounds, backoff.as_secs())
+        };
+        crate::dialog::detector::log_debug(&format!(
+            "COM_DEGRADED: {}，进入降级（第 {} 轮，退避 {}s），降级期 dispatch 立即返回 None 且不再重建 | {}",
+            reason,
+            rounds,
+            backoff_secs,
+            self.snapshot().describe()
+        ));
+    }
+
+    /// 半开探测失败：回到降级并把退避翻倍
+    fn circuit_on_probe_failure(&self) {
+        let (rounds, backoff_secs) = {
+            let mut circuit = self
+                .circuit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            circuit.probe_in_flight = false;
+            circuit.degraded_rounds += 1;
+            let backoff = degrade_backoff(circuit.degraded_rounds);
+            circuit.degraded_until = Some(Instant::now() + backoff);
+            (circuit.degraded_rounds, backoff.as_secs())
+        };
+        crate::dialog::detector::log_debug(&format!(
+            "COM_DEGRADED: 半开探测失败，重新降级（第 {} 轮，退避 {}s） | {}",
+            rounds,
+            backoff_secs,
+            self.snapshot().describe()
+        ));
+    }
+
     fn snapshot(&self) -> ComStatsSnapshot {
         let mut samples: Vec<u64> = self
             .latencies_us
@@ -199,6 +336,10 @@ impl ComStats {
             .copied()
             .collect();
         samples.sort_unstable();
+        let circuit = *self
+            .circuit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         ComStatsSnapshot {
             requests: self.requests.load(Ordering::SeqCst),
@@ -208,8 +349,65 @@ impl ComStats {
             p50_ms: percentile_ms(&samples, 50.0),
             p95_ms: percentile_ms(&samples, 95.0),
             p99_ms: percentile_ms(&samples, 99.0),
+            degraded: circuit.degraded_until.is_some(),
+            rebuilds_since_success: circuit.rebuilds_since_success,
+            skipped_while_degraded: self.skipped_while_degraded.load(Ordering::SeqCst),
+            degraded_rounds: circuit.degraded_rounds,
         }
     }
+}
+
+/// 熔断器三态相位（Closed 正常 / Open 降级 / HalfOpen 半开探测）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CircuitPhase {
+    /// 正常：worker 健康，请求按既有路径投递
+    Closed,
+    /// 降级：停止重建，`dispatch()` 立即返回 `None`
+    Open,
+    /// 半开：退避到期，放行一次探测性重建 + 请求
+    HalfOpen,
+}
+
+/// 熔断器准入结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CircuitAdmit {
+    /// 正常路径：按既有队列投递
+    Closed,
+    /// 半开：本次为探测，需要先重建一次 worker
+    Probe,
+    /// 降级：立即失败，不重建也不等待
+    FailFast,
+}
+
+/// 熔断器状态：自上次成功以来的重建次数、连续降级轮次、降级截止时刻与探测占用标记
+#[derive(Debug, Clone, Copy, Default)]
+struct CircuitState {
+    rebuilds_since_success: u64,
+    degraded_rounds: u64,
+    degraded_until: Option<Instant>,
+    probe_in_flight: bool,
+}
+
+impl CircuitState {
+    fn phase(&self, now: Instant) -> CircuitPhase {
+        match self.degraded_until {
+            None => CircuitPhase::Closed,
+            Some(until) if now < until => CircuitPhase::Open,
+            // 退避已到期：探测占用中则继续 fail-fast，否则进入半开
+            Some(_) if self.probe_in_flight => CircuitPhase::Open,
+            Some(_) => CircuitPhase::HalfOpen,
+        }
+    }
+}
+
+/// 第 `rounds` 轮降级的退避时长：2s → 4s → 8s …，上限 60s
+fn degrade_backoff(rounds: u64) -> Duration {
+    let shift = rounds.saturating_sub(1).min(16) as u32;
+    let secs = DEGRADE_BACKOFF_BASE
+        .as_secs()
+        .saturating_mul(1u64 << shift)
+        .min(DEGRADE_BACKOFF_MAX.as_secs());
+    Duration::from_secs(secs)
 }
 
 fn percentile_ms(sorted_us: &[u64], percentile: f64) -> f64 {
@@ -227,14 +425,34 @@ fn percentile_ms(sorted_us: &[u64], percentile: f64) -> f64 {
 /// **绝不允许在 STA 线程内调用 UIA** —— UIA 一旦挂起会永久堵死整个 COM 队列。
 ///
 /// 审计报告 P-02：`deadline` 只能丢弃“尚未开始”的请求，无法中断已经开始的 COM 调用
-/// （`IShellWindows` 枚举没有可取消版本）。因此这里补上 **circuit breaker**：
+/// （`IShellWindows` 枚举没有可取消版本）。因此这里实现 **circuit breaker**：
 /// 连续多次超时即判定该 worker 已卡死，**放弃该 worker 的结果并重建新 worker**，
 /// 让后续请求立即回到可用队列，而不是一起饿死。被放弃的线程会在当前调用返回后
 /// 因通道断开而自行退出；若永远不返回，则线程泄漏（宁可泄漏一个 worker，也不永久饿死）。
+///
+/// 报告 §8 开放项：单纯“无限重建 + 告警”在持续异常下仍会不断堆积不可取消的 STA 线程。
+/// 因此重建受 **硬上限** 约束，并给出三态降级语义：
+///
+/// - **Closed（正常）**：按既有路径投递请求；
+/// - **Open（降级）**：自上次成功以来重建达到 `MAX_REBUILDS_BEFORE_DEGRADE` 后进入，
+///   退避时长按 `DEGRADE_BACKOFF_BASE` 指数增长并受 `DEGRADE_BACKOFF_MAX` 封顶。
+///   降级期 `dispatch()` **不重建、不等待**，立即返回 `None`，把结果交给调用方的
+///   原生兜底逻辑（如 Win+E 补偿打开原生窗口）；
+/// - **HalfOpen（半开）**：退避到期后放行一次探测性重建 + 请求。成功则清零重建计数
+///   与退避轮次回到 Closed；失败则回到 Open 并把退避翻倍。
+///
+/// worker 健康时投递、超时值、重试次数与返回值语义与之前完全一致。
 pub struct ShellComManager {
     worker: Mutex<StaWorker>,
     stats: ComStats,
+    /// 测试专用：拦截 `rebuild_worker` 的线程创建，注入可控的假 worker 以验证三态迁移
+    #[cfg(test)]
+    worker_factory: Mutex<Option<WorkerFactory>>,
 }
+
+/// 测试专用 worker 工厂：按 generation 生成一个可控的 `StaWorker`
+#[cfg(test)]
+type WorkerFactory = std::sync::Arc<dyn Fn(u64) -> StaWorker + Send + Sync>;
 
 impl Default for ShellComManager {
     fn default() -> Self {
@@ -247,6 +465,8 @@ impl ShellComManager {
         Self {
             worker: Mutex::new(spawn_sta_worker(1)),
             stats: ComStats::default(),
+            #[cfg(test)]
+            worker_factory: Mutex::new(None),
         }
     }
 
@@ -255,10 +475,11 @@ impl ShellComManager {
         Self {
             worker: Mutex::new(worker),
             stats: ComStats::default(),
+            worker_factory: Mutex::new(None),
         }
     }
 
-    /// STA 队列埋点快照（P50/P95/P99、队列深度、超时率、重建次数）
+    /// STA 队列埋点快照（P50/P95/P99、队列深度、超时率、重建次数、熔断器三态）
     pub fn stats(&self) -> ComStatsSnapshot {
         self.stats.snapshot()
     }
@@ -279,6 +500,54 @@ impl ShellComManager {
             .generation
     }
 
+    /// 测试专用：直接设置熔断器状态（降级截止时刻 + 退避轮次），便于验证三态迁移
+    #[cfg(test)]
+    fn force_degraded(&self, until: Instant, rounds: u64) {
+        let mut circuit = self
+            .stats
+            .circuit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        circuit.rebuilds_since_success = MAX_REBUILDS_BEFORE_DEGRADE;
+        circuit.degraded_rounds = rounds;
+        circuit.degraded_until = Some(until);
+        circuit.probe_in_flight = false;
+    }
+
+    /// 测试专用：读取当前降级截止时刻
+    #[cfg(test)]
+    fn degraded_until(&self) -> Option<Instant> {
+        self.stats
+            .circuit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .degraded_until
+    }
+
+    /// 测试专用：注入 worker 工厂，使重建得到的 worker 行为可控
+    #[cfg(test)]
+    fn set_worker_factory(&self, factory: WorkerFactory) {
+        *self
+            .worker_factory
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(factory);
+    }
+
+    /// 生成新 worker：测试可注入工厂，生产环境直接创建真实 STA 线程
+    fn make_worker(&self, generation: u64) -> StaWorker {
+        #[cfg(test)]
+        {
+            let factory = self
+                .worker_factory
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(factory) = factory.as_ref() {
+                return factory(generation);
+            }
+        }
+        spawn_sta_worker(generation)
+    }
+
     /// 放弃当前 worker，换一个全新 STA 线程继续服务
     fn rebuild_worker(&self) -> Sender<ComRequest> {
         let mut guard = self
@@ -286,7 +555,7 @@ impl ShellComManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let generation = guard.generation + 1;
-        let fresh = spawn_sta_worker(generation);
+        let fresh = self.make_worker(generation);
         // 丢弃旧 Sender：卡死的 worker 在下次通道轮询时会发现断开而退出
         let _old = std::mem::replace(&mut *guard, fresh);
         drop(_old);
@@ -294,17 +563,19 @@ impl ShellComManager {
         self.stats.worker_rebuilds.fetch_add(1, Ordering::SeqCst);
         self.stats.consecutive_timeouts.store(0, Ordering::SeqCst);
         let rebuilds = self.stats.worker_rebuilds.load(Ordering::SeqCst);
+        let since_success = self.stats.record_rebuild();
         crate::dialog::detector::log_debug(&format!(
-            "COM_CIRCUIT_BREAKER: 连续超时 {} 次，已重建 STA worker (gen={}, rebuild_total={}) | {}",
+            "COM_CIRCUIT_BREAKER: 连续超时 {} 次，已重建 STA worker (gen={}, rebuild_total={}, rebuild_since_ok={}) | {}",
             MAX_CONSECUTIVE_TIMEOUTS,
             generation,
             rebuilds,
+            since_success,
             self.stats.snapshot().describe()
         ));
 
-        // 重建上限监控（报告第二批）：重建只是“恢复手段”，已开始的 COM 调用无法取消，
-        // 被放弃的 STA 线程可能永久泄漏。因此累计重建达到阈值时给出显式告警，
-        // 便于现场区分“偶发卡顿”与“某次调用已把线程钉死”。
+        // 重建上限监控（报告第二批，保留既有语义）：重建只是“恢复手段”，已开始的 COM 调用
+        // 无法取消，被放弃的 STA 线程可能永久泄漏。因此累计重建达到阈值时给出显式告警，
+        // 便于现场区分“偶发卡顿”与“某次调用已把线程钉死”。达到硬上限后由 COM_DEGRADED 接管。
         if rebuilds >= MAX_REBUILDS_ALERT && rebuilds.is_multiple_of(MAX_REBUILDS_ALERT) {
             crate::dialog::detector::log_debug(&format!(
                 "COM_WORKER_ALERT: STA worker 累计重建 {} 次（每 {} 次告警一次），可能存在不可取消的 COM 调用，被放弃的线程会泄漏 | {}",
@@ -316,11 +587,38 @@ impl ShellComManager {
         guard.tx.clone()
     }
 
-    /// 统一的请求投递：负责埋点、超时计数、circuit breaker 与一次性重试
+    /// 受硬上限约束的重建：达到上限则转为降级并放弃本次重建（返回 `None`）
+    fn try_rebuild(&self) -> Option<Sender<ComRequest>> {
+        if self.stats.rebuilds_since_success() >= MAX_REBUILDS_BEFORE_DEGRADE {
+            self.stats
+                .enter_degraded("自上次成功以来重建次数达到硬上限");
+            return None;
+        }
+        Some(self.rebuild_worker())
+    }
+
+    /// 统一的请求投递：负责熔断准入、埋点、超时计数、重建与一次性重试
     fn dispatch<T>(&self, make: impl Fn(Sender<T>) -> ComRequest, timeout: Duration) -> Option<T> {
+        // 熔断闸门：降级期 fail-fast（不重建、不等待）；退避到期则放行一次半开探测
+        let is_probe = match self.stats.circuit_admit() {
+            CircuitAdmit::FailFast => {
+                self.stats
+                    .skipped_while_degraded
+                    .fetch_add(1, Ordering::SeqCst);
+                return None;
+            }
+            CircuitAdmit::Probe => true,
+            CircuitAdmit::Closed => false,
+        };
+
         let (reply_tx, reply_rx) = channel::<T>();
-        let mut sender = self.worker_sender();
         self.stats.record_request();
+        let mut sender = if is_probe {
+            // 半开探测：重建一次 worker（探测本身即恢复手段，不受硬上限拦截）
+            self.rebuild_worker()
+        } else {
+            self.worker_sender()
+        };
 
         for attempt in 0..2 {
             self.stats.queue_depth.fetch_add(1, Ordering::SeqCst);
@@ -337,21 +635,37 @@ impl ShellComManager {
             match reply {
                 Ok(value) => {
                     self.stats.record_success(started.elapsed());
+                    self.stats.circuit_on_success();
                     return Some(value);
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     // 超时可能是“这次真的很慢”，也可能是 worker 已卡死：交给 circuit breaker 判定
                     let consecutive = self.stats.record_timeout();
+                    if is_probe {
+                        // 半开探测失败：回到降级并把退避翻倍
+                        self.stats.circuit_on_probe_failure();
+                        return None;
+                    }
                     if consecutive >= MAX_CONSECUTIVE_TIMEOUTS {
-                        let _ = self.rebuild_worker();
+                        let _ = self.try_rebuild();
                     }
                     return None;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
+                    if is_probe {
+                        // 探测线程已消失：同样视为探测失败
+                        self.stats.circuit_on_probe_failure();
+                        return None;
+                    }
                     // worker 线程已消失（panic / 通道断开）：重建后重试一次
                     if attempt == 0 {
-                        sender = self.rebuild_worker();
-                        continue;
+                        match self.try_rebuild() {
+                            Some(fresh) => {
+                                sender = fresh;
+                                continue;
+                            }
+                            None => return None,
+                        }
                     }
                     return None;
                 }
@@ -1143,11 +1457,34 @@ fn url_decode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn silent_worker() -> (StaWorker, std::sync::mpsc::Receiver<ComRequest>) {
         // 保留接收端但不消费也不回复，模拟“STA 线程卡死在 COM 调用里”
         let (tx, rx) = channel::<ComRequest>();
         (StaWorker { tx, generation: 1 }, rx)
+    }
+
+    /// 模拟一个健康的 STA worker：对 `GetAllTabs` 立即回复空列表
+    fn responding_worker(generation: u64) -> StaWorker {
+        let (tx, rx) = channel::<ComRequest>();
+        thread::spawn(move || {
+            while let Ok(request) = rx.recv() {
+                if let ComRequest::GetAllTabs { reply, .. } = request {
+                    let _ = reply.send(Vec::new());
+                }
+            }
+        });
+        StaWorker { tx, generation }
+    }
+
+    /// 模拟“重建后依旧卡死”的 worker：通道存活但永不回复
+    fn silent_worker_factory() -> WorkerFactory {
+        Arc::new(|generation| {
+            let (tx, rx) = channel::<ComRequest>();
+            std::mem::forget(rx);
+            StaWorker { tx, generation }
+        })
     }
 
     #[test]
@@ -1218,6 +1555,201 @@ mod tests {
             last = now;
         }
         assert_eq!(manager.stats().worker_rebuilds, MAX_REBUILDS_ALERT);
+    }
+
+    /// 退避时长必须指数增长并受上限封顶（报告 §8 降级退避）
+    #[test]
+    fn test_degrade_backoff_grows_exponentially_with_cap() {
+        assert_eq!(degrade_backoff(1), Duration::from_secs(2));
+        assert_eq!(degrade_backoff(2), Duration::from_secs(4));
+        assert_eq!(degrade_backoff(3), Duration::from_secs(8));
+        assert_eq!(
+            degrade_backoff(6),
+            Duration::from_secs(60),
+            "第 6 轮 64s 必须被 DEGRADE_BACKOFF_MAX 封顶到 60s"
+        );
+        assert_eq!(degrade_backoff(100), Duration::from_secs(60));
+    }
+
+    /// 报告 §8：持续异常时重建必须有硬上限，达到即进入降级且不再 spawn 新 worker
+    #[test]
+    fn test_rebuild_hard_cap_enters_degraded_and_stops_spawning() {
+        let (worker, _rx) = silent_worker();
+        let manager = ShellComManager::new_with_worker(worker);
+        manager.set_worker_factory(silent_worker_factory());
+        let timeout = Duration::from_millis(5);
+        let request = |reply| ComRequest::GetAllTabs {
+            reply,
+            deadline: Instant::now() + timeout,
+        };
+
+        // 每 MAX_CONSECUTIVE_TIMEOUTS 次连续超时触发一次重建，直到达到硬上限
+        for _ in 0..(MAX_REBUILDS_BEFORE_DEGRADE * MAX_CONSECUTIVE_TIMEOUTS) {
+            assert!(manager.dispatch(request, timeout).is_none(), "环境应超时");
+        }
+        let at_cap = manager.stats();
+        assert_eq!(
+            at_cap.worker_rebuilds, MAX_REBUILDS_BEFORE_DEGRADE,
+            "达到硬上限时应恰好重建 {} 次",
+            MAX_REBUILDS_BEFORE_DEGRADE
+        );
+        assert!(
+            !at_cap.degraded,
+            "仅达到重建次数上限、尚未再次超时前不应降级"
+        );
+
+        // 再来一次连续超时：应转为降级，且不再重建
+        for _ in 0..MAX_CONSECUTIVE_TIMEOUTS {
+            assert!(manager.dispatch(request, timeout).is_none(), "环境应超时");
+        }
+        let degraded = manager.stats();
+        assert!(degraded.degraded, "重建达到硬上限后必须进入降级");
+        assert_eq!(
+            degraded.worker_rebuilds, MAX_REBUILDS_BEFORE_DEGRADE,
+            "降级后不得再重建"
+        );
+        let generation_at_degrade = manager.generation();
+
+        // 降级期多次调用：不得再 spawn（generation 不变），且立即返回 None
+        for _ in 0..5 {
+            assert!(manager.dispatch(request, timeout).is_none());
+        }
+        assert_eq!(
+            manager.generation(),
+            generation_at_degrade,
+            "降级期不得再 spawn 新 worker"
+        );
+        assert_eq!(
+            manager.stats().worker_rebuilds,
+            MAX_REBUILDS_BEFORE_DEGRADE,
+            "降级期重建计数必须冻结"
+        );
+    }
+
+    /// 降级期 dispatch 必须 fail-fast：立即返回 None，不等待完整 timeout，也不 spawn
+    #[test]
+    fn test_degraded_dispatch_fails_fast_without_waiting_or_spawning() {
+        let (worker, _rx) = silent_worker();
+        let manager = ShellComManager::new_with_worker(worker);
+        // 强制降级：退避远未到期
+        manager.force_degraded(Instant::now() + Duration::from_secs(60), 1);
+        let generation_before = manager.generation();
+
+        let timeout = Duration::from_millis(500);
+        let start = Instant::now();
+        let result = manager.dispatch(
+            |reply| ComRequest::GetAllTabs {
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none());
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "降级期必须立即返回，远小于 timeout=500ms，实际 {:?}",
+            elapsed
+        );
+        let snapshot = manager.stats();
+        assert_eq!(snapshot.skipped_while_degraded, 1, "降级跳过计数必须累加");
+        assert!(snapshot.degraded);
+        assert_eq!(
+            manager.generation(),
+            generation_before,
+            "降级期不得 spawn 新 worker"
+        );
+    }
+
+    /// 半开探测成功：清零重建计数与退避轮次，恢复正常
+    #[test]
+    fn test_half_open_probe_success_recovers_circuit() {
+        let (worker, _rx) = silent_worker();
+        let manager = ShellComManager::new_with_worker(worker);
+        manager.set_worker_factory(Arc::new(responding_worker));
+        // 退避已到期 → 下一次 dispatch 即为半开探测
+        manager.force_degraded(Instant::now() - Duration::from_millis(1), 1);
+
+        let timeout = Duration::from_millis(200);
+        let result = manager.dispatch(
+            |reply| ComRequest::GetAllTabs {
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        );
+
+        assert!(result.is_some(), "半开探测必须成功返回");
+        let snapshot = manager.stats();
+        assert!(!snapshot.degraded, "探测成功后必须退出降级");
+        assert_eq!(snapshot.rebuilds_since_success, 0, "恢复后重建计数必须清零");
+        assert_eq!(snapshot.degraded_rounds, 0, "恢复后退避轮次必须清零");
+        assert!(manager.generation() >= 2, "半开必须重建一次 worker");
+        assert_eq!(snapshot.skipped_while_degraded, 0);
+    }
+
+    /// 半开探测失败：回到降级且退避翻倍
+    #[test]
+    fn test_half_open_probe_failure_returns_to_degraded_with_doubled_backoff() {
+        let (worker, _rx) = silent_worker();
+        let manager = ShellComManager::new_with_worker(worker);
+        // 探测得到的 worker 同样沉默（不回复）
+        manager.set_worker_factory(silent_worker_factory());
+        let rounds_before = 1u64;
+        manager.force_degraded(Instant::now() - Duration::from_millis(1), rounds_before);
+
+        let timeout = Duration::from_millis(20);
+        let result = manager.dispatch(
+            |reply| ComRequest::GetAllTabs {
+                reply,
+                deadline: Instant::now() + timeout,
+            },
+            timeout,
+        );
+
+        assert!(result.is_none(), "探测超时必须返回 None");
+        let snapshot = manager.stats();
+        assert!(snapshot.degraded, "探测失败必须回到降级");
+        assert_eq!(
+            snapshot.degraded_rounds,
+            rounds_before + 1,
+            "退避轮次必须递增"
+        );
+        let remaining = manager
+            .degraded_until()
+            .expect("降级必须有截止时刻")
+            .saturating_duration_since(Instant::now());
+        assert!(
+            remaining > Duration::from_secs(3) && remaining <= Duration::from_secs(4),
+            "第 2 轮退避应为 4s（翻倍），实际剩余 {:?}",
+            remaining
+        );
+    }
+
+    /// 正常路径回归：健康 worker 的成功请求不触发任何降级/重建计数
+    #[test]
+    fn test_healthy_worker_success_keeps_circuit_closed() {
+        let manager = ShellComManager::new_with_worker(responding_worker(1));
+        let timeout = Duration::from_millis(200);
+        for _ in 0..3 {
+            let result = manager.dispatch(
+                |reply| ComRequest::GetAllTabs {
+                    reply,
+                    deadline: Instant::now() + timeout,
+                },
+                timeout,
+            );
+            assert!(result.is_some(), "健康 worker 必须正常返回");
+        }
+        let snapshot = manager.stats();
+        assert!(!snapshot.degraded);
+        assert_eq!(snapshot.rebuilds_since_success, 0);
+        assert_eq!(snapshot.degraded_rounds, 0);
+        assert_eq!(snapshot.skipped_while_degraded, 0);
+        assert_eq!(snapshot.worker_rebuilds, 0);
+        assert_eq!(snapshot.timeouts, 0);
+        assert_eq!(snapshot.requests, 3);
     }
 
     #[test]
