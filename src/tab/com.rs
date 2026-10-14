@@ -878,14 +878,49 @@ impl ShellComManager {
     }
 }
 
-/// 启动一个全新的 STA worker 线程
-fn spawn_sta_worker(generation: u64) -> StaWorker {
-    let (tx, rx) = channel::<ComRequest>();
+/// 测试期强制「STA 线程创建失败」注入：让 `spawn_sta_thread` 流经与生产**完全相同**的
+/// `Err(err)` 分支，用于验证线程创建失败时降为 fail-safe，而不是 panic / 伪造成功。
+#[cfg(test)]
+static TEST_FORCE_SPAWN_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 实际创建 STA 线程：抽出以便测试注入系统 spawn 失败（只 stub 掉系统调用本身，
+/// 使注入路径与生产共用同一条 `Err(err)` 分支）。成功时立即丢弃 `JoinHandle`（detach），
+/// 与修复前语义一致。
+fn spawn_sta_thread(
+    generation: u64,
+    rx: std::sync::mpsc::Receiver<ComRequest>,
+) -> std::io::Result<()> {
+    #[cfg(test)]
+    if TEST_FORCE_SPAWN_FAILURE.load(Ordering::SeqCst) {
+        // 模拟系统线程创建失败：`rx` 随本函数返回被丢弃（与 spawn 失败丢弃闭包一致）
+        return Err(std::io::Error::other("injected STA spawn failure"));
+    }
     thread::Builder::new()
         .name(format!("QuickPath-ShellComSTA#{}", generation))
         .spawn(move || sta_worker_loop(rx))
-        .expect("创建 ShellComManager STA 线程失败");
-    StaWorker { tx, generation }
+        .map(|_handle| ())
+}
+
+/// 启动一个全新的 STA worker 线程
+///
+/// 线程创建失败（OS 资源耗尽时的 `spawn` 错误）**不得 panic**：release 为 `panic = "abort"`，
+/// 且本路径经 `dispatch`→`try_rebuild` 可由窗口过程到达，一旦 `.expect` 触发即终止整个托盘
+/// 程序。改为返回一个「接收端已随闭包丢弃」的 worker —— 其 `tx.send` 立即返回
+/// `Err(Disconnected)`，自然走 `dispatch` 的断连分支 → `try_rebuild` → 达到
+/// `MAX_REBUILDS_BEFORE_DEGRADE` 后由既有 `enter_degraded` 接管为 `COM_DEGRADED`。
+fn spawn_sta_worker(generation: u64) -> StaWorker {
+    let (tx, rx) = channel::<ComRequest>();
+    match spawn_sta_thread(generation, rx) {
+        Ok(()) => StaWorker { tx, generation },
+        Err(err) => {
+            crate::dialog::detector::log_debug(&format!(
+                "COM_WORKER_SPAWN_FAILED: 创建 ShellComManager STA 线程失败（gen={}, err={:?}），进入既有降级链",
+                generation, err
+            ));
+            StaWorker { tx, generation }
+        }
+    }
 }
 
 /// STA worker 主循环：单线程串行处理请求
@@ -1462,6 +1497,22 @@ mod tests {
         })
     }
 
+    /// 测试期「STA 线程创建失败」故障注入；`Drop` 保证即使断言失败也不会污染后续用例。
+    struct SpawnFailInjection;
+
+    impl SpawnFailInjection {
+        fn enable() -> Self {
+            TEST_FORCE_SPAWN_FAILURE.store(true, Ordering::SeqCst);
+            Self
+        }
+    }
+
+    impl Drop for SpawnFailInjection {
+        fn drop(&mut self) {
+            TEST_FORCE_SPAWN_FAILURE.store(false, Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn test_stats_percentiles_and_describe() {
         let stats = ComStats::default();
@@ -1598,6 +1649,58 @@ mod tests {
             manager.stats().worker_rebuilds,
             MAX_REBUILDS_BEFORE_DEGRADE,
             "降级期重建计数必须冻结"
+        );
+    }
+
+    /// 线程创建失败必须 fail-safe：不 panic、不伪造成功，并沿**既有熔断/降级链**进入降级。
+    ///
+    /// 确定性：注入只 stub 掉系统 spawn，失败分支同步返回，不依赖 sleep、不依赖真实线程耗尽。
+    #[test]
+    fn test_spawn_failure_degrades_without_panic_or_fake_success() {
+        let _inject = SpawnFailInjection::enable();
+        // 初始 worker 创建即走注入失败分支（与生产同一条 Err 路径）
+        let manager = ShellComManager::new();
+
+        let timeout = Duration::from_millis(5);
+        let request = |reply| ComRequest::GetAllTabs {
+            reply,
+            deadline: Instant::now() + timeout,
+        };
+
+        // 每次 dispatch 都应返回 None：绝不把“连不上 worker”当作成功结果
+        for _ in 0..(MAX_REBUILDS_BEFORE_DEGRADE + 4) {
+            assert!(
+                manager.dispatch(request, timeout).is_none(),
+                "线程创建失败时 dispatch 必须返回 None，绝不能伪造成功结果"
+            );
+        }
+
+        let snapshot = manager.stats();
+        assert!(
+            snapshot.degraded,
+            "线程创建持续失败必须沿既有熔断链最终进入 degraded（COM_DEGRADED）"
+        );
+        assert_eq!(
+            snapshot.rebuilds_since_success, MAX_REBUILDS_BEFORE_DEGRADE,
+            "注入路径必须复用既有硬上限，达到后由 enter_degraded 接管"
+        );
+        assert_eq!(
+            snapshot.worker_rebuilds, MAX_REBUILDS_BEFORE_DEGRADE,
+            "达到硬上限后不得再重建"
+        );
+        assert!(
+            snapshot.skipped_while_degraded >= 1,
+            "降级后继续调用必须走既有 fail-fast 分支"
+        );
+
+        let generation_at_degrade = manager.generation();
+        for _ in 0..3 {
+            assert!(manager.dispatch(request, timeout).is_none());
+        }
+        assert_eq!(
+            manager.generation(),
+            generation_at_degrade,
+            "降级期不得再创建 worker"
         );
     }
 

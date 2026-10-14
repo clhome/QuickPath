@@ -15,6 +15,7 @@
 //! 才做字符串格式化，宿主热路径（零预算缓存读取）不产生任何日志。
 
 use std::collections::HashSet;
+use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
@@ -70,7 +71,47 @@ impl Scanner {
 
 static SCANNER: OnceLock<Scanner> = OnceLock::new();
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
-static WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// 后台扫描 worker 的「只启动一次」闸门；`spawn` 失败时归还启动权以便重试。
+static WORKER_GATE: WorkerStartGate = WorkerStartGate::new();
+
+/// 后台扫描 worker 的「只启动一次」闸门。
+///
+/// `spawn` 失败时必须**归还启动权**：若先把标志置位再吞掉 spawn 结果，线程创建失败
+/// （OS 资源耗尽）会让后台扫描线程静默永久不启动——无日志、无重试，候选永远退回缓存/历史。
+/// 因此这里在失败时复位标志并记一条诊断日志，允许下次调用重试。
+struct WorkerStartGate {
+    started: AtomicBool,
+}
+
+impl WorkerStartGate {
+    const fn new() -> Self {
+        Self {
+            started: AtomicBool::new(false),
+        }
+    }
+
+    /// 抢占启动权并执行 `spawn`。
+    ///
+    /// 返回 `true` 当且仅当**本次调用成功创建了 worker**；已启动（含被其他线程抢先）
+    /// 或 `spawn` 失败均返回 `false`。失败时复位启动权，使后续调用可重试。
+    fn try_start(&self, spawn: impl FnOnce() -> io::Result<()>) -> bool {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return false; // 已启动或已被抢先：不重复启动
+        }
+        match spawn() {
+            Ok(()) => true,
+            Err(err) => {
+                crate::dialog::detector::log_debug(&format!(
+                    "SCANNER_WORKER_SPAWN_FAILED: 后台扫描线程创建失败（err={:?}），已复位启动标志以便下次重试",
+                    err
+                ));
+                self.started.store(false, Ordering::SeqCst);
+                false
+            }
+        }
+    }
+}
 
 /// 后台扫描遥测快照（P-04：预算耗尽 / 队头阻塞 / 缓存命中率 / worker 与 caller 分位耗时）。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -211,11 +252,12 @@ pub fn stats() -> ScanStatsSnapshot {
 
 fn scanner() -> &'static Scanner {
     let scanner = SCANNER.get_or_init(Scanner::new);
-    if !WORKER_STARTED.swap(true, Ordering::SeqCst) {
-        let _ = thread::Builder::new()
+    WORKER_GATE.try_start(|| {
+        thread::Builder::new()
             .name("QuickPath-ManagerScan".to_string())
-            .spawn(move || worker_loop(scanner));
-    }
+            .spawn(move || worker_loop(scanner))
+            .map(|_handle| ())
+    });
     scanner
 }
 
@@ -645,5 +687,43 @@ mod tests {
             "样本数必须被环容量封顶，不得无限增长"
         );
         assert_eq!(snap.worker_runs, records, "计数不受环容量限制");
+    }
+
+    /// 启动闸门：`spawn` 失败必须归还启动权以允许重试；成功后不得重复启动。
+    ///
+    /// 确定性：以独立 `WorkerStartGate` 实例 + 计数闭包验证，不碰全局 `WORKER_GATE`，
+    /// 因此与并行运行的其他 scanner 用例互不干扰。
+    #[test]
+    fn test_worker_start_gate_retries_after_spawn_failure() {
+        let gate = WorkerStartGate::new();
+        let attempts = AtomicU64::new(0);
+
+        // 首次 spawn 失败：返回 false，且不得留下“已启动”状态
+        let failed = gate.try_start(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::other("injected scanner spawn failure"))
+        });
+        assert!(!failed, "spawn 失败时 try_start 必须返回 false");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+
+        // 已归还启动权 → 后续调用必须能重试并成功
+        let retried = gate.try_start(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(retried, "归还启动权后必须允许重试并成功");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        // 成功后不得重复启动
+        let again = gate.try_start(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(!again, "已启动后 try_start 必须返回 false");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "已启动后不得再次执行 spawn"
+        );
     }
 }
