@@ -110,7 +110,18 @@ jobs:
           Compress-Archive -Path "dist/QuickPath.exe" -DestinationPath "dist/QuickPath-$TAG_NAME-windows-x64.zip"
 
           # 生成严谨的 SHA-256 校验和清单
-          Get-ChildItem -Path "dist" -File -Include "*.exe", "*.zip" | ForEach-Object {
+          #
+          # 注意：`-Include` 必须配合带通配符的路径或 `-Recurse` 才生效。
+          # 写成 `-Path "dist"` 时 PowerShell 不会应用 `-Include` 过滤，结果是**一个文件都匹配不到**，
+          # 于是清单会静默变成空文件（已在本机用 5 组变体实测确认：`-Path "dist"` → 0 命中，
+          # `-Path "dist\*"` / `-Recurse` → 3 命中）。而报告 §4.3 正是把本清单当作产物字节一致性的
+          # 兜底校验手段，空清单等于该兜底失效，因此这里既修正过滤写法、又加 fail-closed 守卫。
+          $artifacts = Get-ChildItem -Path "dist\*" -File -Include "*.exe", "*.zip"
+          if (-not $artifacts) {
+              Write-Error "未能匹配到任何待校验产物（dist 为空或 -Include 未生效），拒绝生成空 SHA-256 清单"
+              exit 1
+          }
+          $artifacts | ForEach-Object {
               $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
               "$hash  $($_.Name)"
           } | Out-File -FilePath "dist/sha256sums.txt" -Encoding ascii
