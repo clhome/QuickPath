@@ -6,7 +6,7 @@ use crate::monitor::window::tooltip::MonitorTooltip;
 use crate::rules::{I18n, Language, MonitorConfig, MonitorPosition};
 use arc_swap::ArcSwap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::Ordering;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::GetMonitorInfoW;
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
@@ -20,13 +20,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-    DestroyWindow, FindWindowExW, FindWindowW, GetCursorPos, GetForegroundWindow, GetWindowRect,
-    HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MF_UNCHECKED, PostMessageW, RegisterClassW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos,
-    ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu,
-    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP, WM_EXITMENULOOP, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETCURSOR,
+    DestroyWindow, FindWindowExW, FindWindowW, GWLP_USERDATA, GetCursorPos, GetForegroundWindow,
+    GetWindowLongPtrW, GetWindowRect, HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MF_CHECKED,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu, WM_COMMAND, WM_DESTROY,
+    WM_DPICHANGED, WM_ENTERMENULOOP, WM_EXITMENULOOP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETCURSOR,
     WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
@@ -53,15 +54,18 @@ const IDM_MONITOR_EXIT: usize = 3010;
 const IDM_POS_TRAY_LEFT: usize = 3011;
 const IDM_POS_TASKBAR_LEFT: usize = 3012;
 
-static BAR_INSTANCE: AtomicPtr<BarWindowInner> = AtomicPtr::new(std::ptr::null_mut());
+/// 窗口类名（单实例互斥体保证至多一个监控条窗口）。
+const BAR_WINDOW_CLASS: PCWSTR = w!("QuickPath_Taskbar_Monitor_Class");
+
+/// 读取监控条实例的 `BarWindowInner` 拥有值（存储在窗口私有存储 `GWLP_USERDATA`）。
+unsafe fn bar_inner(hwnd: HWND) -> *mut BarWindowInner {
+    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut BarWindowInner
+}
 
 pub fn get_bar_hwnd() -> Option<HWND> {
-    let ptr = BAR_INSTANCE.load(Ordering::SeqCst);
-    if !ptr.is_null() {
-        unsafe { Some((*ptr).hwnd) }
-    } else {
-        None
-    }
+    // 按窗口类名查找，避免全局静态裸指针；单实例保证唯一。
+    let hwnd = unsafe { FindWindowW(BAR_WINDOW_CLASS, None) }.unwrap_or_default();
+    if hwnd.0.is_null() { None } else { Some(hwnd) }
 }
 
 pub struct BarWindow {
@@ -89,7 +93,7 @@ impl BarWindow {
     ) -> Result<Self, String> {
         crate::win32::icon::ensure_gdiplus();
 
-        let class_name = w!("QuickPath_Taskbar_Monitor_Class");
+        let class_name = BAR_WINDOW_CLASS;
         unsafe {
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
@@ -137,7 +141,7 @@ impl BarWindow {
                 last_rect: RECT::default(),
             });
 
-            BAR_INSTANCE.store(Box::into_raw(inner), Ordering::SeqCst);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(inner) as isize);
 
             // 启动定时刷新与全屏应用避让监测
             let _ = SetTimer(Some(hwnd), TIMER_REFRESH_ID, 1000, None);
@@ -152,7 +156,7 @@ impl BarWindow {
     }
 
     pub fn update_config(&self, new_config: MonitorConfig) {
-        let ptr = BAR_INSTANCE.load(Ordering::SeqCst);
+        let ptr = unsafe { bar_inner(self.hwnd) };
         if !ptr.is_null() {
             unsafe {
                 let inner = &mut *ptr;
@@ -170,7 +174,7 @@ impl BarWindow {
     }
 
     pub fn update_language(&self, lang: Language) {
-        let ptr = BAR_INSTANCE.load(Ordering::SeqCst);
+        let ptr = unsafe { bar_inner(self.hwnd) };
         if !ptr.is_null() {
             unsafe {
                 let inner = &mut *ptr;
@@ -186,24 +190,23 @@ impl BarWindow {
     }
 }
 
-impl Drop for BarWindow {
-    fn drop(&mut self) {
-        let ptr = BAR_INSTANCE.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Box::from_raw(ptr);
-            }
-        }
-    }
-}
-
 unsafe extern "system" fn bar_wnd_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let ptr = BAR_INSTANCE.load(Ordering::SeqCst);
+    // 窗口销毁即回收实例：这是 `Box::from_raw` 唯一允许出现的规范位置。
+    if msg == WM_NCDESTROY {
+        let ptr = bar_inner(hwnd);
+        if !ptr.is_null() {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            drop(Box::from_raw(ptr));
+        }
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+
+    let ptr = bar_inner(hwnd);
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
@@ -633,7 +636,7 @@ unsafe fn handle_context_command(inner: &mut BarWindowInner, cmd: usize) {
 
 /// 更新位置与重绘
 unsafe fn update_position_and_render(hwnd: HWND) {
-    let ptr = BAR_INSTANCE.load(Ordering::SeqCst);
+    let ptr = bar_inner(hwnd);
     if ptr.is_null() {
         return;
     }

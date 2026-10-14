@@ -196,9 +196,8 @@ impl SettingsWindow {
         }
     }
 
-    pub fn show(&self) {
+    pub fn show(&self, current: AppConfig) {
         crate::dialog::detector::set_debug_mode_enabled(false);
-        let current = crate::get_global_config();
         set_draft_config(current);
         IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);

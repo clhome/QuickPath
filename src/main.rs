@@ -20,7 +20,10 @@ use ui::{FloatingBar, SettingsWindow};
 use win32::autostart::set_autostart;
 use win32::events::{WM_QUICKPATH_FOREGROUND, WinEventHookGuard, get_active_foreground_window};
 
+use std::cell::RefCell;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
@@ -55,29 +58,34 @@ const RETRY_INTERVAL_MS: u64 = 60;
 const INJECT_RETRY_DELAY_MS: u64 = 250;
 static HOST_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
+/// 后台文件管理器扫描结果回传通道的发送端。
+///
+/// 宿主消息线程持有接收端（`AppState::scan_rx`）；后台扫描线程 `send` 成功后
+/// 用 `PostMessageW` 唤醒宿主排空队列。宿主已退出（接收端被 drop）时 `send`
+/// 失败，结果由发送方自然丢弃，绝不泄漏。
+static MANAGER_SCAN_TX: OnceLock<Sender<ManagerScanResult>> = OnceLock::new();
+
 thread_local! {
-    /// 宿主消息线程独占的 `AppState` 指针。
+    /// 宿主消息线程独占的 `AppState` 拥有值。
     ///
-    /// 审计报告：原先用 `static AtomicPtr<AppState>` 表达“全局可变入口”，
-    /// 类型系统无法阻止将来某个工作线程误用。改为 `thread_local` 后，
-    /// 只有创建它的宿主消息线程能读到该指针，其他线程恒为 null，
-    /// 从运行时层面把 AppState 收窄为“仅宿主消息线程所有”；
-    /// 其余线程只能通过 `PostMessageW` 投递不可变数据。
-    static APP_STATE: std::cell::Cell<*mut AppState> =
-        const { std::cell::Cell::new(std::ptr::null_mut()) };
+    /// 审计报告 R-05：原先以裸指针（`AtomicPtr` → `thread_local` + `Cell<*mut _>`）
+    /// 表达“全局可变入口”，类型系统无法表达所有权，访问器还返回 `&'static mut`，
+    /// 一旦重入即 UB。改为线程内自持的 `RefCell<Option<AppState>>` 后，状态由
+    /// 宿主消息线程拥有、在 `main()` 作用域内正常 drop，对外只经作用域化的
+    /// `with_state` 闭包访问；重入由 `RefCell` 在运行时拦截而非未定义行为。
+    static APP_STATE: RefCell<Option<AppState>> = const { RefCell::new(None) };
 }
 
-/// 在宿主消息线程内取得 `AppState`；非宿主线程或已卸载时返回 `None`。
-fn state_mut() -> Option<&'static mut AppState> {
+/// 在宿主消息线程内以闭包作用域访问 `AppState`；非宿主线程或已卸载时返回 `None`。
+///
+/// 闭包持有 `RefCell` 的可变借用。调用方必须保证闭包作用域内不再进入
+/// `with_state`（否则 `RefCell` 会 panic）；需要把状态交给下游函数时改为显式
+/// 传入 `&mut AppState` / `&AppState`，并在调用可能泵消息的 Win32 API
+/// （如 `TrackPopupMenu`）前释放借用。
+fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
     APP_STATE.with(|cell| {
-        let ptr = cell.get();
-        if ptr.is_null() {
-            None
-        } else {
-            // SAFETY: 指针只可能在 `main()`（宿主消息线程）中设置，且只在该线程读取；
-            // 其生命周期覆盖整个消息循环，退出前才由 `Box::from_raw` 释放。
-            Some(unsafe { &mut *ptr })
-        }
+        let mut guard = cell.borrow_mut();
+        guard.as_mut().map(f)
     })
 }
 
@@ -96,11 +104,11 @@ pub struct AppState {
     pub manager_scan_generation: u64,
     /// 已为哪个对话框补刷过一次候选列表（冷启动补偿只做一次）
     pub refreshed_dialog: Option<HWND>,
+    /// 后台文件管理器扫描结果回传通道的接收端（宿主消息线程独占）
+    scan_rx: Receiver<ManagerScanResult>,
 }
 
-/// 后台文件管理器扫描结果：经宿主窗口消息回传（报告 P1-02）。
-/// 以裸指针在 `WPARAM` 中传递，接收方用 `Box::from_raw` 回收；
-/// 投递失败时发送方自行回收，绝不泄漏。
+/// 后台文件管理器扫描结果：经 `mpsc` 通道回传（报告 P1-02）。
 struct ManagerScanResult {
     generation: u64,
     hwnd_raw: usize,
@@ -187,7 +195,11 @@ fn main() {
             let _ = tab_module.start(host_hwnd);
         }
 
-        let state = Box::new(AppState {
+        // 建立后台扫描结果回传通道：发送端放入静态供后台线程取用，接收端由宿主线程持有
+        let (scan_tx, scan_rx) = std::sync::mpsc::channel();
+        let _ = MANAGER_SCAN_TX.set(scan_tx);
+
+        let state = AppState {
             config,
             tracker: WindowTracker::new(),
             floating_bar: floating_bar_res.ok(),
@@ -199,9 +211,10 @@ fn main() {
             retried_dialog: None,
             manager_scan_generation: 0,
             refreshed_dialog: None,
-        });
+            scan_rx,
+        };
 
-        APP_STATE.with(|cell| cell.set(Box::into_raw(state)));
+        APP_STATE.with(|cell| *cell.borrow_mut() = Some(state));
 
         // 6. 开启全局系统前台窗口事件监听钩子
         let _hook_guard = WinEventHookGuard::new(host_hwnd);
@@ -212,7 +225,7 @@ fn main() {
             win32::version::set_mock_tab_unsupported(true);
         }
         if args.iter().any(|a| a == "--settings") {
-            open_settings();
+            with_state(|state| open_settings(state));
         }
 
         // 7. 进入 Win32 标准消息驱动循环
@@ -227,10 +240,9 @@ fn main() {
         let _ = UnregisterHotKey(Some(host_hwnd), HOTKEY_ID);
         drop(tray_res);
 
-        let raw_ptr = APP_STATE.with(|cell| cell.replace(std::ptr::null_mut()));
-        if !raw_ptr.is_null() {
-            let _ = Box::from_raw(raw_ptr);
-        }
+        // 取出并正常 drop `AppState`：后台线程若仍有扫描结果未送达，其 `send`
+        // 会失败并自然丢弃，不产生泄漏；退出路径不再依赖裸指针手动回收。
+        drop(APP_STATE.with(|cell| cell.borrow_mut().take()));
 
         CoUninitialize();
     }
@@ -249,20 +261,27 @@ unsafe extern "system" fn host_wnd_proc(
             LRESULT(0)
         }
         WM_QUICKPATH_WINE_TO_TAB => {
-            handle_wine_to_tab_request(HWND(wparam.0 as *mut _));
+            let target = HWND(wparam.0 as *mut _);
+            let handled = with_state(|state| handle_wine_to_tab_request(state, target));
+            if handled.is_none() {
+                // 宿主状态尚未安装：与原先 `state_mut()` 返回 None 时一致，补偿原生窗口
+                launch_native_explorer_window();
+            }
             LRESULT(0)
         }
         WM_QUICKPATH_MANAGER_SCAN_RESULT => {
-            let raw = wparam.0 as *mut ManagerScanResult;
-            if !raw.is_null() {
-                // 无论是否采纳，都必须回收后台线程移交过来的 Box
-                let payload = unsafe { Box::from_raw(raw) };
-                if let Some(state) = state_mut() {
-                    let current_fg = win32::events::get_active_foreground_window();
+            // 后台线程只负责 `send` + 唤醒；这里排空通道，按原有
+            // 「generation + 前台窗口一致性」规则采纳，陈旧结果自然丢弃。
+            with_state(|state| {
+                let current_fg = win32::events::get_active_foreground_window();
+                let fg_raw = current_fg.0 as usize;
+                let generation = state.manager_scan_generation;
+                let payloads: Vec<ManagerScanResult> = state.scan_rx.try_iter().collect();
+                for payload in payloads {
                     // 只接受“仍对应当前前台窗口”的本次世代结果，
                     // 避免用户已切走后把一个陈旧目录写进追踪器
-                    if payload.generation == state.manager_scan_generation
-                        && current_fg.0 as usize == payload.hwnd_raw
+                    if payload.generation == generation
+                        && fg_raw == payload.hwnd_raw
                         && let Some(path) = payload.path
                     {
                         state
@@ -270,38 +289,38 @@ unsafe extern "system" fn host_wnd_proc(
                             .note_manager_folder(path, HWND(payload.hwnd_raw as *mut _));
                     }
                 }
-            }
+            });
             LRESULT(0)
         }
         WM_QUICKPATH_CANDIDATES_REFRESH => {
             // 后台首轮扫描完成后的冷启动补刷：仅在仍停留在同一对话框时重绘候选列表。
             let raw = wparam.0;
-            if raw != 0
-                && let Some(state) = state_mut()
-            {
-                let dlg = HWND(raw as *mut _);
-                let current_fg = win32::events::get_active_foreground_window();
-                let still_same = current_fg == dlg
-                    || dialog::detector::find_dialog_root(current_fg)
-                        == dialog::detector::find_dialog_root(dlg);
-                if still_same
-                    && let Some(dlg_info) = detect_file_dialog(dlg)
-                    && !state.config.is_blacklisted(&dlg_info.process_name)
-                {
-                    let candidates = state.tracker.get_all_candidates(&state.config);
-                    if let Some(bar) = &mut state.floating_bar {
-                        let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
-                        bar.show(
-                            dlg_info.hwnd,
-                            edit_target,
-                            dlg_info.rect,
-                            candidates,
-                            state.config.floating_bar_opacity,
-                            state.config.language.clone(),
-                            dlg_info.kind,
-                        );
+            if raw != 0 {
+                with_state(|state| {
+                    let dlg = HWND(raw as *mut _);
+                    let current_fg = win32::events::get_active_foreground_window();
+                    let still_same = current_fg == dlg
+                        || dialog::detector::find_dialog_root(current_fg)
+                            == dialog::detector::find_dialog_root(dlg);
+                    if still_same
+                        && let Some(dlg_info) = detect_file_dialog(dlg)
+                        && !state.config.is_blacklisted(&dlg_info.process_name)
+                    {
+                        let candidates = state.tracker.get_all_candidates(&state.config);
+                        if let Some(bar) = &mut state.floating_bar {
+                            let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
+                            bar.show(
+                                dlg_info.hwnd,
+                                edit_target,
+                                dlg_info.rect,
+                                candidates,
+                                state.config.floating_bar_opacity,
+                                state.config.language.clone(),
+                                dlg_info.kind,
+                            );
+                        }
                     }
-                }
+                });
             }
             LRESULT(0)
         }
@@ -311,7 +330,7 @@ unsafe extern "system" fn host_wnd_proc(
             let current_fg = win32::events::get_active_foreground_window();
             let current_root = dialog::detector::find_dialog_root(current_fg);
             if current_fg == h || current_root == dialog::detector::find_dialog_root(h) {
-                on_foreground_window_changed_impl(h, next_retry);
+                with_state(|state| on_foreground_window_changed_impl(state, h, next_retry));
             }
             LRESULT(0)
         }
@@ -320,7 +339,7 @@ unsafe extern "system" fn host_wnd_proc(
             // 杜绝“点了没反应、且此后再也不重试”的静默失效。
             let dlg = HWND(wparam.0 as *mut _);
             let already_retried = lparam.0 != 0;
-            if let Some(state) = state_mut() {
+            with_state(|state| {
                 if state.last_switched_dialog == Some(dlg) {
                     state.last_switched_dialog = None;
                 }
@@ -345,30 +364,42 @@ unsafe extern "system" fn host_wnd_proc(
                         });
                     }
                 }
-            }
+            });
             LRESULT(0)
         }
         WM_HOTKEY => {
             if wparam.0 == HOTKEY_ID as usize {
-                on_hotkey_triggered();
+                with_state(on_hotkey_triggered);
             }
             LRESULT(0)
         }
         WM_TRAY_CALLBACK => {
             let event = lparam.0 as u32;
             if event == WM_RBUTTONUP {
-                if let Some(state) = state_mut() {
-                    TrayIcon::show_context_menu(
-                        hwnd,
+                // 先取出菜单所需配置再释放借用：`TrackPopupMenu` 会进入模态消息
+                // 循环，期间可能重入宿主窗口过程；若此时仍持有 `APP_STATE` 借用
+                // 会触发 `RefCell` panic。
+                let menu_ctx = with_state(|state| {
+                    (
                         state.config.auto_switch_enabled,
                         state.config.autostart_enabled,
                         state.config.monitor.enabled,
                         state.config.language.clone(),
-                        &state.config.hotkey,
+                        state.config.hotkey.clone(),
+                    )
+                });
+                if let Some((auto_switch, autostart, monitor, language, hotkey)) = menu_ctx {
+                    TrayIcon::show_context_menu(
+                        hwnd,
+                        auto_switch,
+                        autostart,
+                        monitor,
+                        language,
+                        &hotkey,
                     );
                 }
             } else if event == WM_LBUTTONUP {
-                open_settings();
+                with_state(|state| open_settings(state));
             }
             LRESULT(0)
         }
@@ -376,35 +407,35 @@ unsafe extern "system" fn host_wnd_proc(
             let cmd_id = wparam.0 & 0xffff;
             match cmd_id {
                 IDM_TOGGLE_AUTOSWITCH => {
-                    if let Some(state) = state_mut() {
+                    with_state(|state| {
                         state.config.auto_switch_enabled = !state.config.auto_switch_enabled;
                         let _ = state.config.save();
-                    }
+                    });
                 }
                 IDM_TOGGLE_AUTOSTART => {
-                    if let Some(state) = state_mut() {
+                    with_state(|state| {
                         state.config.autostart_enabled = !state.config.autostart_enabled;
                         let _ = set_autostart(
                             state.config.autostart_enabled,
                             state.config.autostart_task_scheduler,
                         );
                         let _ = state.config.save();
-                    }
+                    });
                 }
                 IDM_TOGGLE_MONITOR => {
-                    if let Some(state) = state_mut() {
+                    with_state(|state| {
                         state.config.monitor.enabled = !state.config.monitor.enabled;
                         let _ = state.config.save();
                         if let Some(mgr) = &mut state.monitor_manager {
                             mgr.sync_config(&state.config.monitor);
                         }
-                    }
+                    });
                 }
                 IDM_SHOW_CANDIDATES => {
-                    on_hotkey_triggered();
+                    with_state(on_hotkey_triggered);
                 }
                 IDM_OPEN_SETTINGS => {
-                    open_settings();
+                    with_state(|state| open_settings(state));
                 }
                 IDM_EXIT => unsafe {
                     PostQuitMessage(0);
@@ -422,14 +453,10 @@ unsafe extern "system" fn host_wnd_proc(
 }
 
 fn on_foreground_window_changed(fg_hwnd: HWND) {
-    on_foreground_window_changed_impl(fg_hwnd, 0);
+    with_state(|state| on_foreground_window_changed_impl(state, fg_hwnd, 0));
 }
 
-fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
-    let Some(state) = state_mut() else {
-        return;
-    };
-
+fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_count: u32) {
     // 0. 如果前台窗口是悬浮吸附条自身，直接忽略，避免用户点击或交互时将吸附条误隐藏
     if let Some(bar) = &state.floating_bar
         && bar.hwnd() == fg_hwnd
@@ -483,25 +510,27 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
                         .into_iter()
                         .find(|c| c.is_active && managers::tracker::is_fast_valid_folder(&c.path))
                         .map(|c| c.path);
-                    let raw = Box::into_raw(Box::new(ManagerScanResult {
+                    let result = ManagerScanResult {
                         generation,
                         hwnd_raw,
                         path,
-                    }));
-                    let delivered = unsafe {
-                        let host_ptr = HOST_HWND.load(Ordering::SeqCst);
-                        !host_ptr.is_null()
-                            && PostMessageW(
-                                Some(HWND(host_ptr as *mut _)),
-                                WM_QUICKPATH_MANAGER_SCAN_RESULT,
-                                WPARAM(raw as usize),
-                                LPARAM(0),
-                            )
-                            .is_ok()
                     };
-                    if !delivered {
-                        // 宿主已退出或投递失败：由发送方回收，避免泄漏
-                        drop(unsafe { Box::from_raw(raw) });
+                    // 经通道回传：宿主已退出（接收端已 drop）时 `send` 失败，
+                    // 结果在此自然 drop，绝不泄漏；成功后再唤醒宿主排空队列。
+                    if let Some(tx) = MANAGER_SCAN_TX.get()
+                        && tx.send(result).is_ok()
+                    {
+                        let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                        if !host_ptr.is_null() {
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(HWND(host_ptr as *mut _)),
+                                    WM_QUICKPATH_MANAGER_SCAN_RESULT,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            }
+                        }
                     }
                 });
             }
@@ -732,12 +761,7 @@ fn schedule_candidates_refresh(dialog_hwnd: HWND, config: &AppConfig) {
 /// 关键闭环：接管动作在工作线程执行，并在 800ms 内确认“新标签确实出现”；
 /// 一旦接管动作未被接受、或标签始终未出现，立即补偿打开原生资源管理器窗口，
 /// 保证每一次 Win+E 都有可见结果（绝不出现“按键被吞且毫无反应”）。
-fn handle_wine_to_tab_request(target: HWND) {
-    let Some(state) = state_mut() else {
-        launch_native_explorer_window();
-        return;
-    };
-
+fn handle_wine_to_tab_request(state: &AppState, target: HWND) {
     let coordinator = state
         .tab_module
         .as_ref()
@@ -805,11 +829,7 @@ fn launch_native_explorer_window() {
     }
 }
 
-fn on_hotkey_triggered() {
-    let Some(state) = state_mut() else {
-        return;
-    };
-
+fn on_hotkey_triggered(state: &mut AppState) {
     let fg_hwnd = get_active_foreground_window();
     if let Some(dlg_info) = detect_file_dialog(fg_hwnd) {
         let candidates = state.tracker.get_all_candidates(&state.config);
@@ -828,23 +848,21 @@ fn on_hotkey_triggered() {
     }
 }
 
-fn open_settings() {
-    if let Some(state) = state_mut()
-        && let Some(settings) = &state.settings_window
-    {
-        settings.show();
+fn open_settings(state: &AppState) {
+    if let Some(settings) = &state.settings_window {
+        settings.show(state.config.clone());
     }
 }
 
 pub fn get_global_config() -> AppConfig {
-    if let Some(state) = state_mut() {
-        return state.config.clone();
+    if let Some(config) = with_state(|state| state.config.clone()) {
+        return config;
     }
     AppConfig::load()
 }
 
 pub fn update_global_config(new_config: AppConfig) {
-    if let Some(state) = state_mut() {
+    with_state(|state| {
         let old_hotkey = state.config.hotkey.clone();
         state.config = new_config.clone();
 
@@ -878,5 +896,81 @@ pub fn update_global_config(new_config: AppConfig) {
                 let _ = win32::hotkey::register_global_hotkey(h, HOTKEY_ID, &new_config.hotkey);
             }
         }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一个不含任何 Win32 资源的最小 `AppState`，仅用于验证 `with_state` 语义。
+    fn test_state() -> AppState {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        AppState {
+            config: AppConfig::default(),
+            tracker: WindowTracker::new(),
+            floating_bar: None,
+            settings_window: None,
+            monitor_manager: None,
+            tab_module: None,
+            last_switched_dialog: None,
+            last_switched_path: None,
+            retried_dialog: None,
+            manager_scan_generation: 0,
+            refreshed_dialog: None,
+            scan_rx: rx,
+        }
+    }
+
+    fn reset_state() {
+        APP_STATE.with(|cell| {
+            let _ = cell.borrow_mut().take();
+        });
+    }
+
+    fn install_state() {
+        APP_STATE.with(|cell| *cell.borrow_mut() = Some(test_state()));
+    }
+
+    #[test]
+    fn with_state_returns_none_when_empty() {
+        reset_state();
+        assert!(with_state(|state| state.manager_scan_generation).is_none());
+    }
+
+    #[test]
+    fn with_state_reads_and_persists_mutation_after_install() {
+        reset_state();
+        install_state();
+
+        assert_eq!(with_state(|state| state.manager_scan_generation), Some(0));
+
+        let new_gen = with_state(|state| {
+            state.manager_scan_generation = 42;
+            state.manager_scan_generation
+        });
+        assert_eq!(new_gen, Some(42));
+        // 修改跨调用持久：再次访问读到 42 而非初始 0
+        assert_eq!(with_state(|state| state.manager_scan_generation), Some(42));
+
+        reset_state();
+    }
+
+    #[test]
+    fn with_state_take_then_reinstall_is_idempotent() {
+        reset_state();
+        install_state();
+        assert!(with_state(|state| state.manager_scan_generation).is_some());
+
+        // take() 后回到空
+        let taken = APP_STATE.with(|cell| cell.borrow_mut().take());
+        assert!(taken.is_some());
+        assert!(with_state(|state| state.manager_scan_generation).is_none());
+
+        // 可再次安装并访问（幂等）
+        install_state();
+        assert!(with_state(|state| state.manager_scan_generation).is_some());
+
+        reset_state();
     }
 }

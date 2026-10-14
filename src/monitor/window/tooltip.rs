@@ -5,7 +5,6 @@
 
 use crate::monitor::metrics::MetricsSnapshot;
 use crate::rules::{I18n, Language};
-use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
@@ -21,17 +20,21 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect, HWND_TOPMOST,
-    IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SetCursor, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
+    GetWindowRect, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassW, SW_HIDE,
+    SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetCursor, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCDESTROY,
+    WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::w;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-static TOOLTIP_INSTANCE: AtomicPtr<TooltipInner> = AtomicPtr::new(std::ptr::null_mut());
+/// 读取看板实例的 `TooltipInner` 拥有值（存储在窗口私有存储 `GWLP_USERDATA`）。
+unsafe fn tooltip_inner(hwnd: HWND) -> *mut TooltipInner {
+    GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut TooltipInner
+}
 
 pub struct MonitorTooltip {
     hwnd: HWND,
@@ -369,7 +372,7 @@ impl MonitorTooltip {
                 data: None,
             });
 
-            TOOLTIP_INSTANCE.store(Box::into_raw(inner), Ordering::SeqCst);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(inner) as isize);
 
             Ok(Self { hwnd })
         }
@@ -389,7 +392,7 @@ impl MonitorTooltip {
     ) {
         let data = TooltipData::from_snapshot(snapshot, lang);
 
-        let ptr = TOOLTIP_INSTANCE.load(Ordering::SeqCst);
+        let ptr = unsafe { tooltip_inner(self.hwnd) };
         if ptr.is_null() {
             return;
         }
@@ -1102,7 +1105,17 @@ unsafe extern "system" fn tooltip_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let ptr = TOOLTIP_INSTANCE.load(Ordering::SeqCst);
+    // 窗口销毁即回收实例：这是 `Box::from_raw` 唯一允许出现的规范位置。
+    if msg == WM_NCDESTROY {
+        let ptr = tooltip_inner(hwnd);
+        if !ptr.is_null() {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            drop(Box::from_raw(ptr));
+        }
+        return DefWindowProcW(hwnd, msg, wparam, lparam);
+    }
+
+    let ptr = tooltip_inner(hwnd);
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wparam, lparam);
     }
@@ -1217,12 +1230,7 @@ unsafe extern "system" fn tooltip_wnd_proc(
 
 impl Drop for MonitorTooltip {
     fn drop(&mut self) {
-        let ptr = TOOLTIP_INSTANCE.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !ptr.is_null() {
-            unsafe {
-                let _ = Box::from_raw(ptr);
-            }
-        }
+        // 实例内存由窗口销毁路径（`WM_NCDESTROY`）回收，这里只负责销毁窗口。
         unsafe {
             let _ = DestroyWindow(self.hwnd);
         }

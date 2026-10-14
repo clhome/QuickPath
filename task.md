@@ -1516,7 +1516,7 @@
 - [x] t0 基线校验（见上）
 - [x] t1 S-02 `hinstance` 配对 + owner 创建集成测试
 - [x] t2 剪贴板混合格式往返 + 失败不上报成功测试
-- [ ] t3 移除 `AppState` 裸指针
+- [x] t3 移除 `AppState` 裸指针
 - [ ] t4 COM worker 重建上限/退避/降级
 - [ ] t5 owner 线程退出协议
 - [ ] t6 扫描遥测 + P-04
@@ -1526,6 +1526,7 @@
 - [ ] t10 收口（全量门禁 + 逐项对照 + 清理）
 - t1（S-02，父 agent 已独立复核）：owner 窗口注册/创建 `hinstance` 配对 + `GetModuleHandleW`/`RegisterClassW` 显式错误处理 + 集成回归测试（test 99→100）；门禁：fmt 干净 / clippy 0 告警 / test 100 通过 / build --release 通过。**父 agent 变异复核结论**：把 `CreateWindowExW` 实例参数改回 `None` 后 10 个剪贴板用例仍全绿（`GetLastError=0`、HWND 非空、`IsWindow=true`），即报告 S-02 声称的「创建失败」在本机 Win11 上**不可达**（进程本地窗口类的查找不依赖 `CreateWindowExW` 的 `hinstance`），该修复属与 MSDN 写法一致的健壮性/一致性修复，**不构成发布阻塞**。真实 commit hash 见 t10 对照表（此处不再内联 hash，避免 amend 后失效）
 - t2（测试(clipboard): 补齐混合格式往返与失败 fail-closed 断言）：新增 `test_mixed_formats_survive_temporary_text_injection`（Unicode/HTML/RTF/CF_HDROP/DIB/自定义注册格式六类同处一次剪贴板会话，真实临时文本注入+恢复后逐格式字节保真，DIB 按关键头字段+总大小+像素数据比对，非「存在即通过」）；强化 `test_restore_partial_failure_is_reported_and_retryable`（分配/加锁/设置三处故障逐个注入，restore 必返 Err、绝不置 restored、其它格式不被清掉、可重试）与 `test_temporary_clipboard_text_propagates_restore_failure`（同三处注入均不得假报 Ok）；新增 `test_owner_creation_failure_keeps_clipboard_unchanged`（§12：owner 创建失败时写路径 fail-closed 且原剪贴板保持不变）。未发现生产缺陷，仅新增 `#[cfg(test)]` 注入钩子 `TEST_FAIL_MODE` / `TEST_FORCE_NO_OWNER`。变异自证：把 `restore_attempt` 失败分支改为 `all_ok=true`、在 `restore_attempt` 中跳过 `CF_HDROP`、以及让 `open_clipboard_for_write` 在 owner 失败时回退 NULL，三处变异均使对应用例变红，恢复后全绿。门禁：fmt 干净 / clippy 0 告警 / test 100→102 通过 / build --release 通过。
+- t3（重构(R-05): 移除 AppState 裸指针所有权路径，收敛窗口实例全局静态指针）：把 `thread_local! { static APP_STATE: Cell<*mut AppState> }` + 返回 `&'static mut` 的 `state_mut()` 改为 `RefCell<Option<AppState>>` + 作用域化 `with_state(|&mut AppState| -> R) -> Option<R>`，14 处调用点全部改为闭包作用域访问并把下游函数（`on_foreground_window_changed_impl`/`handle_wine_to_tab_request`/`on_hotkey_triggered`/`open_settings`/`get_global_config`/`update_global_config`）改为显式 `&mut/&AppState`；退出路径改为 `APP_STATE.take()` 正常 drop，`main()` 内不再出现 `Box::into_raw`/`Box::from_raw`。后台扫描结果改走 `std::sync::mpsc`（`Sender` 入 `OnceLock`，`Receiver` 入 `AppState`），`send` 成功后 `PostMessageW` 唤醒，宿主 `try_iter()` 排空并按原「generation + 前台窗口一致性」规则采纳，宿主退出时 `send` 失败自然丢弃、零泄漏。同族 `BAR_INSTANCE`/`TOOLTIP_INSTANCE` 改为窗口私有存储 `GWLP_USERDATA`，`Box::from_raw` 仅保留在 `WM_NCDESTROY`，删除全局静态与 `Drop` 手动回收；`get_bar_hwnd()` 改按窗口类名 `FindWindowW` 实现（行为等价）。无重入：`WM_TRAY_CALLBACK` 右键菜单先取出配置再释放借用（`TrackPopupMenu` 会泵消息），`SettingsWindow::show` 改接收 `AppConfig` 参数以消除 `open_settings` 闭包内的二次 `with_state`。变异自证：把 `with_state` 改为恒返回 `None`，3 个新测试中 2 个变红（`with_state_reads_and_persists_mutation_after_install`、`with_state_take_then_reinstall_is_idempotent`），恢复后全绿。门禁：fmt 干净 / clippy 0 告警 / test 102→105 通过 / build --release 通过。
 
 
 
