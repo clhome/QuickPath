@@ -79,7 +79,12 @@ jobs:
       - name: 门禁：依赖安全审计
         shell: pwsh
         run: |
-          cargo install cargo-audit --locked
+          # 固定工具版本（审计报告 P1-3）：`--locked` 只锁定 cargo-audit 自身的依赖图，
+          # 不锁定 cargo-audit 本体；不写 `--version` 会随时间装到「今天的最新版」，
+          # 使同一提交在不同日期得到不可复现的门禁结果。0.22.2 为门禁证据档
+          # (cl_tasks/发布门禁证据_v1.2.3.md §2.4) 实际使用的版本；release.yml 与
+          # ci.yml 必须保持一致，否则「PR 绿、tag 红」会重新出现。
+          cargo install cargo-audit --locked --version 0.22.2
           cargo audit
 
       - name: 编译 Release 版本

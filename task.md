@@ -1578,6 +1578,34 @@
 
 **结论：本报告的“代码/元数据/本机可验证”部分已全部收口并留有证据；卡在发布前的只剩“真机人工验收 + 需联网/需 GitHub 管理权限 + 需证书或需用户决策”这四类外部依赖项。**
 
+
+
+
+
+
+
+
+# 审计评分报告 `1935800` 修复轮（`E:\下载\QuickPath_审计评分报告_1935800.md`）
+
+**报告结论**：B+ / 8.3，判定「暂缓稳定版」；唯一代码级阻塞项 **P0-04**（剪贴板事务仍有两处归属竞态），另有 R-07（owner 取消确认为锁序阻塞）、P-05（首面板超时仍探测第二面板）、P1-3（`cargo-audit` 版本未固定）。
+**执行环境**：Windows 11 + PowerShell 7，`cargo`/`rustc` 1.94.1（真实执行门禁；报告本身为 Linux 静态审计，未跑门禁）。
+**改动文件**：8 个（`.github/workflows/ci.yml`、`release.yml`、`src/win32/clipboard.rs`、`src/managers/clipboard_probe.rs`、`src/managers/ipc.rs`、`src/managers/totalcmd.rs`、`src/managers/xyplorer.rs`、`src/rules/version.rs`）。
+
+- [x] **P0-04 竞态 A（check-then-act TOCTOU）**：新增 `set_clipboard_text_checked()` —— 序列号复核、`EmptyClipboard`、`SetClipboardData`、读取写入后序列号位于**同一次 `OpenClipboard` 持锁期**内；`write_owned_text()` 改走该原语，任何不一致/不可读一律 fail-closed。踩坑：**`GetClipboardSequenceNumber` 在 `CloseClipboard` 之后才自增**（持锁期内读到的是写入前值），故写入后序列号必须关闭后再读，并追加 `GetClipboardOwner()` 复核本进程，避免把极窄窗口内的外部改写序列号误记成自己。
+- [x] **P0-04 竞态 B（只观察最终状态）**：owner 窗口注册 `AddClipboardFormatListener`，`WM_CLIPBOARDUPDATE` 把「序列号 + owner 进程」记入有界事件环（64 条）；`note_observed_owned_text_proven(marker, is_expected_source)` 要求事件链完整 + 请求窗口内每次更新可归因 + 最终 `GetClipboardOwner()` 同属目标来源，否则**不认领**（fail-closed）。管理器侧传入「目标窗口进程 id」比对闭包；本进程自身的延迟更新被显式放行（否则会误判为外部改写，已有回归用例钉住）。
+- [x] **R-07（锁序）**：`OWNER` 拆为「创建串行化锁 `OWNER_CREATE_LOCK`」+「状态锁 `OWNER`」，创建期所有 `recv_timeout` **都不持有 `OWNER`**，消除与 owner 线程退出清理的互锁。
+- [x] **P-05（双面板超时叠加）**：新增共享 `probe_two_panels()`，首面板 `delivered == false` 立即短路，TC/XY 均改用它。
+- [x] **P1-3（门禁可复现）**：两个 workflow 的 `cargo install cargo-audit` 固定为 `--locked --version 0.22.2`（与门禁证据档实际使用版本一致），并加编译期守卫保证两处一致。
+- [x] **P2-3（维护文档）**：P0-04 状态机模型写入 `cl_tasks/审计评分报告1935800_修复记录.md` §3；真机项写入 `Document/真机验收清单_竞态与生命周期_v1.2.3.md` §9（C-08~C-12，其中 C-10「目标管理器 owner 归属真实性」列为最高优先）。
+- [x] **其他（用户要求：测试不弹窗）**：跨进程剪贴板夹具 `clip_write_from_external_process` 补 `creation_flags(CREATE_NO_WINDOW)`（复用 `managers::ipc::CREATE_NO_WINDOW`），跑 `cargo test` 时不再在桌面闪出 pwsh / powershell 控制台窗口；新增源码扫描守卫 + 变异自证。
+- [x] **测试基线 176 → 185**：新增 9 个用例（竞态 A 注入、竞态 B 三类交错 + 自进程更新回归、P-05 短路、事件环溢出 fail-closed、cargo-audit 版本守卫、跨进程夹具无窗守卫）。
+- [x] **变异自证 5 处**（改坏必红/还原必绿）：① 去掉持锁复核 → 竞态 A 用例红；② 关闭来源核对 → 竞态 B 用例红并错误认领路径；③ 把 `OWNER` 持回 done 等待 → R-07 用例实测 **2.01s** 变红；④ 取消「本进程更新不算外部」放行 → 回归用例红；⑤ 删掉夹具 `CREATE_NO_WINDOW` → 无窗守卫红。
+- [x] **门禁（本机真实执行）**：fmt 干净 / clippy 0 告警 / `cargo test --all-targets` **185 通过 0 失败**（并行与 `--test-threads=1` 各一遍）/ `cargo build --release` 通过（`FileVersion`/`ProductVersion` = `1.2.3.0`）；8 文件 UTF-8 无 BOM + LF；release 二进制不含测试探针。
+- [ ] **真机人工验收（用户执行）**：TC/XY 双面板 1,000 轮高频复制零覆盖、目标管理器 owner 归属真实性（C-10，决定来源判定是否可用）、管理器挂起时 P-05 单次超时。
+- [ ] **已知残余（诚实登记）**：`WM_CLIPBOARDUPDATE` 是投递消息，系统可能合并两次快速更新 → 事件链中间那次来源不可区分（Windows 剪贴板协议层面限制，非 QuickPath 写回旧快照）；无法证明时一律 fail-closed。
+
+**结论**：报告点名的 P0-04 / R-07 / P-05 / P1-3 已在代码与自动化测试层关闭并留证；仍待闭合的是真机人工验收与联网/GitHub 侧项（沿用上一轮 O-02~O-04）。本轮不涉及版本号变更。
+
 - t8（**父 agent 亲自执行的补证轮**，触发原因：独立审计拒绝结项，指出§2.6 第 4 条与 §3.2 门禁未真正闭合；我不再以“环境所限”草草收尾，而是逐项找回可闭合的空间，并**推翻了自己先前的两个错误结论**）：**① 结论修正（重要）**：先前写的“`cargo audit` 本机不可执行”是**错的**——本机虽然连不上 github.com，但 `ghfast.top` 可作 GitHub 克隆代理，用 `git clone --depth 1 https://ghfast.top/https://github.com/RustSec/advisory-db.git` 取得**官方** advisory-db（commit `6aed846`，1310 条 advisory、957 个 crate 目录），置于 `~/.cargo/advisory-db`（cargo-audit 默认位置，从而**免 `--db` 参数、命令与 CI 逐字一致**）后：`cargo audit` → `Loaded 1310 security advisories` → `Scanning Cargo.lock for vulnerabilities (70 crate dependencies)` → **0 漏洞、退出码 0**。诚实边界：数据是真实 RustSec，但获取通道是镜像（可能滞后上游），正式发布建议 CI 直连复核一次。**② §3.2 第 6 项：不再只做“逻辑复现”，而是把 workflow 的 `run:` 步骤原文在本地端到端真跑**。新增取证工具 `cl_tasks/run_release_workflow_locally.py`（**读取 `release.yml` 本身**，用 PyYAML 取出每段 `run:` **原文**，按原顺序/原 tag 上下文/原 shell `pwsh` 执行；`uses:` 步骤显式跳过并列出；额外用 Python `hashlib` **独立复算** SHA-256 清单作为第二实现；日志写 UTF-8 无 BOM + LF）。正例 `--tag v1.2.3`：12 步中 **9 个 `run:` 步骤全部成功**（含版本门禁、fmt/clippy/test/audit/build、打包），耗时 49.4s，产物 `QuickPath-v1.2.3-x64.exe`(1567744B)/`QuickPath-v1.2.3-windows-x64.zip`(833239B)/`sha256sums.txt`(273B)，清单 3 行**全部与 Python 独立复算一致** → 退出码 0。**反例** `--tag v1.2.2`：第 2 步版本门禁 `exit=1` 并**立即中止后续步骤**，整体退出码 1 → 证明版本门禁确实阻塞（不是装饰）。完整日志：`cl_tasks/发布通道本地演练_20261014_v1.2.3.log`。仍未验证：3 个 `uses:` 步骤、windows-latest Runner 环境与缓存、Release 资产上传与 `GITHUB_TOKEN`（本机 origin 指向 github.com 而不可达，**无法** push tag 触发真跑）。**③ §5.1 可自动化子集：新增 5 个“跨进程真实运行时”测试**（回应“只能真机”的论断）：把「管理器写入」与「用户并发复制」都交给**独立 OS 进程**（`Set-Clipboard`，写入精确字符串；初期用 `cmd echo|clip` 被自已的夹具坑到——`echo` 会附加 CRLF，断言里能直接看到 `...user_b\r\n`，已改用 `Set-Clipboard` 并在测试注释里记下这个坑），进程内**不用任何 `TEST_FORCE_*` 注入**；忙态用例让**另一线程真实持有 `OpenClipboard`** 而非注入。5 例分别对应 C-06（写前拒绝二次清空）、C-07（恢复前跳过旧快照）、C-02（外部进程写入清空剪贴板后六类格式逐格式恢复）、C-01（真实 `GetClipboardOwner()` == owner 窗口）、C-03（真实忙且不覆盖）。**变异复核**：把 `refresh_ownership` 改成“序列号非 0 即持有”（等价旧 fail-open）→ `test_xproc_case1` 立即变红（断言原文：`第二次清空前检出外部改写必须拒绝写入: PanelProbe { delivered: true, path: Some("...quickpath_p003_probe_xproc_case1_trg") }`），还原后全绿。全量测试 **171 → 176**（并行与 `--test-threads=1` 各一遍均全绿）；fmt 干净 / `cargo clean -p quickpath` 后 clippy **0 告警** / `cargo build --release` 通过。**诚实边界**：这仍是自动化测试，**不能替代**报告 §2.6 第 4 条要求的“真机**手工**复现”（扮演管理器的是 `Set-Clipboard` 而非 `totalcmd.exe`/`xyplorer.exe`；无真实管理器卡顿/假死；无人工操作节奏）。**④ `.gitattributes`**：经用户批准新增 `* text=auto eol=lf`；新增前已核对索引中**无 CRLF/mixed blob**（83 个 `i/lf` + 17 个 `i/-text` + 1 个 `i/none`），故**零内容改动**（`git status` 无任何 `M`），`git check-attr` 确认 `text: auto` / `eol: lf` 生效 → CRLF 陷阱消除。**⑤ 用户决策**：真机验收仍由其本人在自有环境手工执行（**不授权本机安装 TC/XYplorer/WPS**）——因此 §2.6 第 4 条与 §5 保持未闭合，本阶段终态记为 **blocked**（阻塞源：需装有第三方管理器的机器 + 人工操作；另有 GitHub 侧项）。**⑥ 环境侦察结论（可复用）**：本机 github.com / static.crates.io 不可达，但清华、中科大、SJTU、gitee.com、**ghfast.top**、rsproxy.cn 可达；ros 官方站点 ghisler.com / xyplorer.com / wps.com 可达（理论上可装，但用户不授权）。
 
 

@@ -54,6 +54,42 @@ mod tests {
         }
     }
 
+    /// 审计报告 P1-3 守卫：CI 与发布通道必须把 `cargo-audit` 固定到同一版本。
+    ///
+    /// 背景：`cargo install cargo-audit --locked` 只锁定该工具**自身的依赖图**，
+    /// 不锁定工具本体；不写 `--version` 会在不同日期装到不同版本的 cargo-audit，
+    /// 使同一提交的门禁结果不可复现。这里在编译期把「必须写 `--version`」
+    /// 与「ci.yml / release.yml 两处一致」钉死。
+    #[test]
+    fn test_cargo_audit_version_is_pinned_and_consistent_across_workflows() {
+        const CI: &str = include_str!("../../.github/workflows/ci.yml");
+        const RELEASE: &str = include_str!("../../.github/workflows/release.yml");
+
+        fn pinned_version(name: &str, content: &str) -> String {
+            let line = content
+                .lines()
+                .map(str::trim)
+                .find(|line| line.starts_with("cargo install cargo-audit"))
+                .unwrap_or_else(|| panic!("{name} 必须安装 cargo-audit"));
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let idx = tokens
+                .iter()
+                .position(|token| *token == "--version")
+                .unwrap_or_else(|| panic!("{name} 必须用 --version 固定 cargo-audit 版本"));
+            tokens
+                .get(idx + 1)
+                .unwrap_or_else(|| panic!("{name} 的 --version 后必须有具体版本"))
+                .to_string()
+        }
+
+        let ci_version = pinned_version("ci.yml", CI);
+        let release_version = pinned_version("release.yml", RELEASE);
+        assert_eq!(
+            ci_version, release_version,
+            "ci.yml 与 release.yml 的 cargo-audit 版本必须一致，否则会出现「PR 绿、tag 红」"
+        );
+    }
+
     /// M-01 守卫：`app.manifest` 模板的 assemblyIdentity 版本号必须跟随单一版本源，
     /// 且必须是四段式（不足四位补 `0`，与 `build.rs` 写入 OUT_DIR 的规范化结果一致）。
     ///

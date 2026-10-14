@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -12,8 +13,9 @@ use windows::Win32::Foundation::{
     WPARAM,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-    GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
+    AddClipboardFormatListener, CloseClipboard, CountClipboardFormats, EmptyClipboard,
+    EnumClipboardFormats, GetClipboardData, GetClipboardOwner, GetClipboardSequenceNumber,
+    OpenClipboard, RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
@@ -22,8 +24,8 @@ use windows::Win32::System::Memory::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetWindowThreadProcessId, IsWindow, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
-    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT,
-    WNDCLASSW,
+    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_CLOSE,
+    WM_DESTROY, WM_QUIT, WNDCLASSW,
 };
 use windows::core::w;
 
@@ -120,6 +122,121 @@ fn clipboard_sequence_number() -> u32 {
     unsafe { GetClipboardSequenceNumber() }
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// 剪贴板更新事件链（审计报告 P0-04 竞态 B）
+//
+// 「请求前后各读一次序列号」只能证明两个采样点，无法证明两点之间没有第三方写入。
+// owner 窗口注册 `AddClipboardFormatListener` 后，每次剪贴板更新都会收到
+// `WM_CLIPBOARDUPDATE`；这里把「更新序号 + 当时序列号 + owner 进程」记入有界环，
+// 使 `ClipboardTransaction` 能对「请求窗口内的更新是否全部来自目标管理器」做来源链
+// 证明：一旦出现无法归因到目标管理器的更新，就必须判为外部改写并保守放弃认领。
+// ══════════════════════════════════════════════════════════════════════════
+
+/// 一次剪贴板更新事件（owner 线程在 `WM_CLIPBOARDUPDATE` 时登记）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClipboardUpdateEvent {
+    /// 全局单调递增的事件序号（用作「请求开始标记」）
+    index: u64,
+    /// 登记时读到的剪贴板序列号
+    sequence: u32,
+    /// 登记时的剪贴板 owner 进程 id（无法判定为 0）
+    owner_pid: u32,
+}
+
+/// 事件环容量：只需覆盖单次请求窗口（毫秒级到 500ms）内的更新，64 条足够。
+const CLIPBOARD_EVENT_CAPACITY: usize = 64;
+
+/// 等待事件链追上当前序列号的最大轮数（每轮 1ms，约 200ms 上限）。
+/// `WM_CLIPBOARDUPDATE` 是投递消息，登记可能落后于写入；机器繁忙 / CI runner 较慢时
+/// 需要比“几毫秒”更宽松的预算，否则会把正常的滞后误判为「来源链不可证明」。
+const CLIPBOARD_EVENT_COVER_POLLS: u32 = 200;
+
+static CLIPBOARD_EVENTS: Mutex<VecDeque<ClipboardUpdateEvent>> = Mutex::new(VecDeque::new());
+/// 已登记事件总数（即下一个事件的序号）；作为请求开始标记，避免依赖清空环。
+static CLIPBOARD_EVENT_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// 登记一次剪贴板更新（仅由 owner 线程的 `WM_CLIPBOARDUPDATE` 调用）。
+fn record_clipboard_update_event(owner_pid: u32) {
+    let index = CLIPBOARD_EVENT_TOTAL.fetch_add(1, Ordering::SeqCst);
+    let event = ClipboardUpdateEvent {
+        index,
+        sequence: clipboard_sequence_number(),
+        owner_pid,
+    };
+    let mut events = CLIPBOARD_EVENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if events.len() == CLIPBOARD_EVENT_CAPACITY {
+        events.pop_front();
+    }
+    events.push_back(event);
+}
+
+/// 测试注入：把一条「合成剪贴板更新」追加进事件环，用于确定性地驱动来源链判定。
+#[cfg(test)]
+pub(crate) fn inject_clipboard_update_event_for_test(owner_pid: u32) {
+    record_clipboard_update_event(owner_pid);
+}
+
+/// 取得「请求开始标记」：记录此刻的事件总数，之后登记的更新都属于本次请求窗口。
+fn clipboard_update_marker() -> u64 {
+    CLIPBOARD_EVENT_TOTAL.load(Ordering::SeqCst)
+}
+
+/// 取出标记之后的全部事件；若事件已溢出有界环则返回 `None`（来源链不可证明）。
+fn clipboard_updates_since(marker: u64) -> Option<Vec<ClipboardUpdateEvent>> {
+    let events = CLIPBOARD_EVENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let total = CLIPBOARD_EVENT_TOTAL.load(Ordering::SeqCst);
+    if total.saturating_sub(marker) > CLIPBOARD_EVENT_CAPACITY as u64 {
+        return None;
+    }
+    Some(
+        events
+            .iter()
+            .filter(|event| event.index >= marker)
+            .copied()
+            .collect(),
+    )
+}
+
+/// 当前剪贴板 owner 的进程 id（owner 为 NULL / 已失效时返回 0）。
+fn clipboard_owner_pid() -> u32 {
+    let Ok(owner) = (unsafe { GetClipboardOwner() }) else {
+        return 0;
+    };
+    if owner.0.is_null() {
+        return 0;
+    }
+    // 注意：`GetWindowThreadProcessId` 的返回值是**线程 id**，进程 id 写在出参里，
+    // 传 `None` 只能拿到线程 id，不能当进程 id 用。
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(owner, Some(&mut pid)) };
+    pid
+}
+
+/// 事件链是否已追平给定序列号（即最后一次更新已被 owner 线程登记）。
+///
+/// `WM_CLIPBOARDUPDATE` 是投递消息，登记可能略滞后于写入；这里做有界等待，
+/// 等待不到就返回 `false`，由调用方按「来源链不可证明」保守处理。
+fn clipboard_update_log_covers(sequence: u32) -> bool {
+    for _ in 0..CLIPBOARD_EVENT_COVER_POLLS {
+        {
+            let events = CLIPBOARD_EVENTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(last) = events.back()
+                && last.sequence == sequence
+            {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
 impl std::error::Error for ClipboardSafetyError {}
 
 /// 测试期强制「剪贴板被占用」注入（同进程内无法真实模拟跨进程独占）
@@ -137,6 +254,11 @@ static TEST_FORCE_SEQ_ZERO: std::sync::atomic::AtomicBool =
 #[cfg(test)]
 static TEST_FORCE_NO_OWNER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// 测试期写入竞态注入：在 `write_owned_text()` 的「写前校验」与「持锁复核」之间执行一次
+/// 注入动作，用于确定性地复现审计报告 P0-04 竞态 A（检查通过后、写入前的外部改写）。
+#[cfg(test)]
+static TEST_BEFORE_WRITE_RECHECK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
 
 /// 带指数退避的剪贴板独占打开函数
 fn open_clipboard_with_retry(hwnd: Option<HWND>, max_retries: u32) -> bool {
@@ -176,6 +298,13 @@ struct ClipboardOwnerHandle {
     /// 线程句柄；`join` 前由 `Option` 取出，超时则丢弃（detach）
     thread: Option<JoinHandle<()>>,
 }
+
+/// 创建串行化锁（审计报告 R-07）：与 owner 状态锁 `OWNER` 分离。
+///
+/// `create_clipboard_owner()` 需要串行化并发创建；但创建期的等待（`ready`/`done`）
+/// 绝不能持有 `OWNER`——owner 线程在取消检查点与退出清理时都要短暂获取 `OWNER`，
+/// 一旦创建方持锁等待就会与清理互相阻塞，让「超时后确认线程退出」结构性失效。
+static OWNER_CREATE_LOCK: Mutex<()> = Mutex::new(());
 
 static OWNER: Mutex<Option<ClipboardOwnerHandle>> = Mutex::new(None);
 static OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -255,11 +384,18 @@ unsafe extern "system" fn clipboard_owner_proc(
             }
             windows::Win32::Foundation::LRESULT(0)
         }
-        // `WM_DESTROY` 时投递 `WM_QUIT`，使 `GetMessageW` 返回 0、消息泵自然结束。
+        // `WM_DESTROY` 时注销剪贴板监听并投递 `WM_QUIT`，使 `GetMessageW` 返回 0、消息泵自然结束。
         WM_DESTROY => {
+            let _ = unsafe { RemoveClipboardFormatListener(hwnd) };
             unsafe {
                 PostQuitMessage(0);
             }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        // 审计报告 P0-04 竞态 B：登记每次剪贴板更新（序列号 + owner 进程），
+        // 供事务证明「请求窗口内的更新是否全部来自目标管理器」。
+        WM_CLIPBOARDUPDATE => {
+            record_clipboard_update_event(clipboard_owner_pid());
             windows::Win32::Foundation::LRESULT(0)
         }
         // owner 窗口永不可见、不需要处理任何业务消息（本模块不使用延迟渲染），
@@ -305,21 +441,28 @@ fn clipboard_owner() -> Option<HWND> {
 /// 创建期间持有 `OWNER` 锁以串行化并发创建（对齐原 `Once::call_once` 语义：其他调用方
 /// 在创建完成前等待）。owner 窗口过程不会回调本模块，因此持锁创建不存在重入死锁。
 fn create_clipboard_owner() -> Option<HWND> {
-    let mut guard = OWNER
+    // 审计报告 R-07：用独立的创建串行化锁；创建期的等待不持有 `OWNER`（详见
+    // `OWNER_CREATE_LOCK` 的说明）。
+    let _create_guard = OWNER_CREATE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // 双重检查：等待锁期间可能已由其他线程创建。
-    if let Some(existing) = guard.as_ref()
-        && existing.hwnd_raw != 0
+    // 双重检查：等待锁期间可能已由其他线程创建。仅持 `OWNER` 做短状态读写，立即释放。
     {
-        let hwnd = HWND(existing.hwnd_raw as *mut _);
-        if unsafe { IsWindow(Some(hwnd)).as_bool() } {
-            return Some(hwnd);
+        let mut guard = OWNER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = guard.as_ref()
+            && existing.hwnd_raw != 0
+        {
+            let hwnd = HWND(existing.hwnd_raw as *mut _);
+            if unsafe { IsWindow(Some(hwnd)).as_bool() } {
+                return Some(hwnd);
+            }
         }
+        // 陈旧句柄：清空后重建（正常退出路径已在 `shutdown_clipboard_owner` 中清空）。
+        *guard = None;
     }
-    // 陈旧句柄：清空后重建（正常退出路径已在 `shutdown_clipboard_owner` 中清空）。
-    *guard = None;
 
     let generation = OWNER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -416,6 +559,16 @@ fn create_clipboard_owner() -> Option<HWND> {
             match created {
                 Ok(hwnd) if !hwnd.0.is_null() => {
                     let hwnd_raw = hwnd.0 as usize;
+
+                    // 审计报告 P0-04 竞态 B：在窗口就绪前注册剪贴板监听，使事务能从
+                    // 「登记 ready → 任何写路径拿到 owner」之前就具备完整的更新事件链。
+                    if let Err(err) = AddClipboardFormatListener(hwnd) {
+                        crate::dialog::detector::log_debug(&format!(
+                            "CLIPBOARD_OWNER: AddClipboardFormatListener 失败，err={:?}，\
+                             剪贴板更新来源链无法证明（事务将保守放弃认领管理器写入）",
+                            err
+                        ));
+                    }
 
                     #[cfg(test)]
                     if let Some(hooks) = test_hooks.as_ref() {
@@ -570,13 +723,18 @@ fn create_clipboard_owner() -> Option<HWND> {
 
     let hwnd = HWND(hwnd_raw as *mut _);
     let thread_id = unsafe { GetWindowThreadProcessId(hwnd, None) };
-    *guard = Some(ClipboardOwnerHandle {
-        hwnd_raw,
-        thread_id,
-        generation,
-        done_rx,
-        thread: Some(thread),
-    });
+    {
+        let mut guard = OWNER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(ClipboardOwnerHandle {
+            hwnd_raw,
+            thread_id,
+            generation,
+            done_rx,
+            thread: Some(thread),
+        });
+    }
 
     Some(hwnd)
 }
@@ -1254,41 +1412,147 @@ impl ClipboardTransaction {
 
     /// 由 `QuickPath` 自己向剪贴板写入临时文本（如清空），并登记序列号与精确文本。
     ///
-    /// 若此前已有本事务认可的写入，先做归属校验；被外部改写则立即返回 `Err`，
-    /// 绝不覆盖用户刚复制的新内容。
+    /// 审计报告 P0-04 竞态 A：原实现是「先 `ensure_still_owned()`、后 `OpenClipboard`」
+    /// 的 check-then-act，两步之间用户复制会被随后的 `EmptyClipboard` 静默清掉。
+    /// 现在复核与写入收口到 `set_clipboard_text_checked()` 的**同一次剪贴板持锁期**内：
+    /// Windows 同一时刻只允许一个窗口打开剪贴板，因此持锁复核通过后到写入完成之间
+    /// 不可能再发生第三方写入。任何序列号不一致或不可读都 fail-closed（不写入）。
     pub fn write_owned_text(&mut self, text: &str) -> Result<(), ClipboardTransactionError> {
         self.ensure_still_owned()?;
 
-        let Some(seq) = set_raw_clipboard_text_tracked(text) else {
-            // 写入失败可能已清空剪贴板（归属未知），保守放弃恢复
+        // 审计报告 P0-04 竞态 A 的确定性测试注入点：在「写前校验」与「持锁复核」之间
+        // 制造一次外部改写，验证持锁复核会 fail-closed（仅测试构建存在）。
+        #[cfg(test)]
+        {
+            let hook = TEST_BEFORE_WRITE_RECHECK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
+        let Some(expected) = self.owned_seq else {
             self.ownership_unknown = true;
-            return Err(ClipboardTransactionError::WriteFailed);
+            return Err(ClipboardTransactionError::OwnershipUnknown);
         };
-        if seq == 0 {
-            // 写入成功但序列号不可读：无法建立归属基准，保守放弃恢复
+
+        match set_clipboard_text_checked(text, expected) {
+            Ok(seq) => {
+                self.owned_seq = Some(seq);
+                self.owned_text = Some(text.to_string());
+                Ok(())
+            }
+            Err(ClipboardTransactionError::NotOwned) => {
+                self.lost_ownership = true;
+                Err(ClipboardTransactionError::NotOwned)
+            }
+            Err(ClipboardTransactionError::OwnershipUnknown) => {
+                self.ownership_unknown = true;
+                Err(ClipboardTransactionError::OwnershipUnknown)
+            }
+            Err(err) => {
+                // 写入失败可能已清空剪贴板（归属未知），保守放弃恢复
+                self.ownership_unknown = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// 取得本次「管理器请求」的开始标记：之后登记的全部剪贴板更新都属于该请求窗口。
+    /// 调用方应在发起请求**之前**调用，并把返回值交给
+    /// [`Self::note_observed_owned_text_proven`]。
+    pub fn request_marker(&self) -> u64 {
+        clipboard_update_marker()
+    }
+
+    /// 请求管理器写入路径后调用：只有在**能证明**本次剪贴板更新来自目标管理器时，
+    /// 才读回文本并登记当时的序列号作为新的归属基准（审计报告 P0-04 竞态 B）。
+    ///
+    /// 证明规则（任一不满足即不认领）：
+    /// 1. 序列号未变 → 内容仍是本事务写入的临时文本，归属未变（返回 `Ok(None)`）；
+    /// 2. 序列号已变 → 事件链必须完整（未溢出环、已追平当前序列号），
+    ///    且 `marker` 之后的每一次更新都必须被 `is_expected_source` 认可，
+    ///    并且当前 `GetClipboardOwner()` 也属于目标来源。
+    ///
+    /// 一旦出现无法归因到目标管理器的更新，立即判为外部改写（`Err(NotOwned)`），
+    /// 绝不把最终状态无条件认领为本事务所有。
+    pub fn note_observed_owned_text_proven<A>(
+        &mut self,
+        marker: u64,
+        is_expected_source: A,
+    ) -> Result<Option<String>, ClipboardTransactionError>
+    where
+        A: Fn(u32) -> bool,
+    {
+        let before = self.owned_seq.unwrap_or(0);
+        let current = clipboard_sequence_number();
+        if current == 0 {
             self.ownership_unknown = true;
             return Err(ClipboardTransactionError::OwnershipUnknown);
         }
 
-        self.owned_seq = Some(seq);
-        self.owned_text = Some(text.to_string());
-        Ok(())
-    }
+        let own_pid = std::process::id();
+        // 本进程只会因本事务的临时写入（`write_owned_text`）而改动剪贴板，因此本进程来源
+        // 的更新永远不算「外部改写」。若不显式放行，本次事务自己那次清空所投递的**延迟**
+        // `WM_CLIPBOARDUPDATE` 就会在请求窗口内被误判为外部来源，导致合法扫描被拒。
+        let acceptable = |pid: u32| pid == own_pid || is_expected_source(pid);
 
-    /// 请求管理器写入路径后调用：读回文本并登记当时的序列号作为新的归属基准。
-    ///
-    /// 读回失败或序列号不可读时返回 `None` 并把归属标记为不可判定（后续绝不恢复）。
-    pub fn note_observed_owned_text(&mut self) -> Option<String> {
-        let seq = clipboard_sequence_number();
-        match get_clipboard_text() {
-            Some(text) if seq != 0 => {
-                self.owned_seq = Some(seq);
-                self.owned_text = Some(text.clone());
-                Some(text)
+        // 序列号未变：无写入发生，内容仍是本事务的临时文本，归属未变。
+        // （事件环仍做防御性核查：出现非目标来源的更新绝不能放过。）
+        if current == before {
+            if let Some(events) = clipboard_updates_since(marker) {
+                for event in &events {
+                    if !acceptable(event.owner_pid) {
+                        self.lost_ownership = true;
+                        return Err(ClipboardTransactionError::NotOwned);
+                    }
+                }
             }
-            _ => {
+        } else {
+            // 序列号已变：必须能完整归因到目标管理器。
+            // 先等事件链追平当前序列号（`WM_CLIPBOARDUPDATE` 是**投递**消息，登记可能滞后），
+            // 再取事件——否则会把「尚未登记」误判为「没有任何事件」。
+            if clipboard_updates_since(marker).is_none() {
                 self.ownership_unknown = true;
-                None
+                return Err(ClipboardTransactionError::OwnershipUnknown);
+            }
+            if !clipboard_update_log_covers(current) {
+                self.ownership_unknown = true;
+                return Err(ClipboardTransactionError::OwnershipUnknown);
+            }
+            let Some(events) = clipboard_updates_since(marker) else {
+                self.ownership_unknown = true;
+                return Err(ClipboardTransactionError::OwnershipUnknown);
+            };
+            if events.is_empty() {
+                // 序列号变了却没有任何可归因的更新：来源链不可证明
+                self.ownership_unknown = true;
+                return Err(ClipboardTransactionError::OwnershipUnknown);
+            }
+            for event in &events {
+                if !acceptable(event.owner_pid) {
+                    self.lost_ownership = true;
+                    return Err(ClipboardTransactionError::NotOwned);
+                }
+            }
+            let final_owner = clipboard_owner_pid();
+            if !acceptable(final_owner) {
+                self.lost_ownership = true;
+                return Err(ClipboardTransactionError::NotOwned);
+            }
+        }
+
+        match get_clipboard_text() {
+            Some(text) => {
+                self.owned_seq = Some(current);
+                self.owned_text = Some(text.clone());
+                Ok(Some(text))
+            }
+            None => {
+                self.ownership_unknown = true;
+                Err(ClipboardTransactionError::OwnershipUnknown)
             }
         }
     }
@@ -1397,6 +1661,86 @@ fn set_raw_clipboard_text(text: &str) -> bool {
     set_raw_clipboard_text_tracked(text).is_some()
 }
 
+/// 「持锁复核 + 写入」的原子写入原语（审计报告 P0-04 竞态 A）。
+///
+/// 与 `set_raw_clipboard_text_tracked` 的关键区别：复核序列号、`EmptyClipboard`、
+/// `SetClipboardData` 与读取写入后序列号全部位于**同一次 `OpenClipboard` 持锁期**内。
+/// Windows 同一时刻只允许一个窗口打开剪贴板，因此复核通过后到写入完成之间不可能再
+/// 发生第三方写入，check-then-act 的 TOCTOU 窗口被消除。
+///
+/// - `Ok(seq)`：写入成功，`seq` 是在仍持有剪贴板锁时读到的写入后序列号；
+/// - `Err(NotOwned)`：持锁复核时序列号已变（外部改写），未做任何修改；
+/// - `Err(OwnershipUnknown)`：序列号不可读（返回 0），保守失败；
+/// - `Err(WriteFailed)`：打开剪贴板 / `EmptyClipboard` / `SetClipboardData` 失败。
+fn set_clipboard_text_checked(
+    text: &str,
+    expected_sequence: u32,
+) -> Result<u32, ClipboardTransactionError> {
+    // 必须是“写路径”：以有效 owner 打开，否则 EmptyClipboard 会把 owner 置空
+    if !open_clipboard_for_write(4) {
+        return Err(ClipboardTransactionError::WriteFailed);
+    }
+
+    unsafe {
+        // 持锁复核：此刻其他进程无法打开剪贴板，复核结论在写入前保持有效。
+        let current = clipboard_sequence_number();
+        if current == 0 {
+            let _ = CloseClipboard();
+            return Err(ClipboardTransactionError::OwnershipUnknown);
+        }
+        if current != expected_sequence {
+            let _ = CloseClipboard();
+            return Err(ClipboardTransactionError::NotOwned);
+        }
+
+        if EmptyClipboard().is_err() {
+            let _ = CloseClipboard();
+            return Err(ClipboardTransactionError::WriteFailed);
+        }
+
+        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+        let bytes = wide.len() * 2;
+        let mut ok = false;
+
+        if let Ok(h) = GlobalAlloc(GHND, bytes)
+            && !h.0.is_null()
+        {
+            let ptr = GlobalLock(h);
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(h));
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
+                let _ = GlobalUnlock(h);
+                if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))).is_ok() {
+                    ok = true;
+                } else {
+                    let _ = GlobalFree(Some(h));
+                }
+            }
+        }
+
+        // 序列号在 `CloseClipboard` 之后才自增（实测：持锁期间读到的仍是写入前的值），
+        // 因此必须在关闭后读取；否则会把写入前的旧序列号登记成自己的，
+        // 导致后续归属校验误判为「外部改写」。
+        let _ = CloseClipboard();
+
+        if !ok {
+            return Err(ClipboardTransactionError::WriteFailed);
+        }
+        let after = clipboard_sequence_number();
+        if after == 0 {
+            return Err(ClipboardTransactionError::OwnershipUnknown);
+        }
+        // 归属复核：本次写入的 owner 必须是本进程的 owner 窗口。若在 `CloseClipboard` 与
+        // 此处之间的极窄窗口内被外部改写，owner 校验会立即发现（而不是把对方的序列号
+        // 误认成自己写的）；更晚的改写由后续 `refresh_ownership` 的序列号比对发现。
+        if clipboard_owner_pid() != std::process::id() {
+            return Err(ClipboardTransactionError::NotOwned);
+        }
+        Ok(after)
+    }
+}
+
 /// 清空剪贴板文本内容。
 ///
 /// 供第三方文件管理器探测使用：每次探测前先清空，
@@ -1473,7 +1817,7 @@ pub fn get_clipboard_text() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managers::clipboard_probe::probe_panel_path;
+    use crate::managers::clipboard_probe::{probe_panel_path, probe_two_panels};
     use std::sync::Mutex;
     use windows::Win32::System::DataExchange::GetClipboardOwner;
 
@@ -2465,9 +2809,22 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("就绪等待超时后必须请求取消");
 
+        // 审计报告 R-07：取消后的「确认线程退出」必须在有界超时内真正**确认**（而非
+        // 退化到超时/detach 分支）。若创建方持 `OWNER` 等待，owner 线程的退出清理会与之
+        // 互锁，这里会实测到接近 `OWNER_SHUTDOWN_TIMEOUT` 的耗时。
+        let cancel_observed = std::time::Instant::now();
         release_tx.send(()).expect("放行 owner 线程必须成功");
 
         let result = create_handle.join().expect("创建线程不得 panic");
+        let confirm_elapsed = cancel_observed.elapsed();
+        assert!(
+            confirm_elapsed < OWNER_SHUTDOWN_TIMEOUT,
+            "R-07：取消后必须在有界超时内确认线程退出，实测 {:?}（若创建方持 OWNER 等待，\
+             退出清理会与之互锁并退化到 {:?} 超时）",
+            confirm_elapsed,
+            OWNER_SHUTDOWN_TIMEOUT
+        );
+
         let created_hwnd = *hooks
             .created_hwnd
             .lock()
@@ -2612,10 +2969,14 @@ mod tests {
             assert!(set_raw_clipboard_text(&seed), "{label}: 播种剪贴板必须成功");
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
 
-            let first = probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(src_path);
-                Some(1)
-            })
+            let first = probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(src_path);
+                    Some(1)
+                },
+            )
             .expect("首次写入不应触发归属冲突");
             assert!(first.delivered, "{label}: 首次探测必须视为对端已应答");
 
@@ -2624,10 +2985,14 @@ mod tests {
             assert!(set_raw_clipboard_text(&user_new));
 
             // 第二次清空前的写前校验必须拒绝写入（且不得执行 request）
-            let err = probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(trg_path);
-                Some(1)
-            })
+            let err = probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(trg_path);
+                    Some(1)
+                },
+            )
             .expect_err("检出外部改写后必须拒绝后续写入");
             assert!(
                 matches!(err, ClipboardTransactionError::NotOwned),
@@ -2662,15 +3027,23 @@ mod tests {
             let seed = format!("qp_p003_{label}_seed2");
             assert!(set_raw_clipboard_text(&seed));
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-            probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(src_path);
-                Some(1)
-            })
+            probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(src_path);
+                    Some(1)
+                },
+            )
             .expect("首次探测必须成功");
-            probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(trg_path);
-                Some(1)
-            })
+            probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(trg_path);
+                    Some(1)
+                },
+            )
             .expect("第二次探测必须成功");
 
             let user_new = format!("qp_p003_{label}_user_new_2");
@@ -2698,10 +3071,14 @@ mod tests {
             let seed = format!("qp_p003_{label}_seed3");
             assert!(set_raw_clipboard_text(&seed));
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-            let probe = probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(src_path);
-                Some(1)
-            })
+            let probe = probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(src_path);
+                    Some(1)
+                },
+            )
             .expect("首次探测必须成功");
             assert!(probe.delivered);
 
@@ -2774,10 +3151,14 @@ mod tests {
             }
 
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-            let probe = probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(src_path);
-                Some(1)
-            })
+            let probe = probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(src_path);
+                    Some(1)
+                },
+            )
             .expect("无并发改写时探测必须成功");
             assert!(probe.delivered, "{label}");
 
@@ -2848,10 +3229,11 @@ mod tests {
             tx.write_owned_text("").expect("临时写入必须成功");
             {
                 let _busy = BusyInjection::enable();
-                assert_eq!(
-                    tx.note_observed_owned_text(),
-                    None,
-                    "{label}: 读回失败必须返回 None"
+                let marker = tx.request_marker();
+                assert!(
+                    tx.note_observed_owned_text_proven(marker, |_| true)
+                        .is_err(),
+                    "{label}: 读回失败必须按归属未知失败"
                 );
             }
             let current = format!("qp_p003_{label}_readfail_current");
@@ -2900,7 +3282,7 @@ mod tests {
             let seed = format!("qp_p003_{label}_timeout_seed");
             assert!(set_raw_clipboard_text(&seed));
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-            let probe = probe_panel_path(&mut tx, || None).expect("超时不应产生归属冲突");
+            let probe = probe_panel_path(&mut tx, |_| true, || None).expect("超时不应产生归属冲突");
             assert!(
                 !probe.delivered && probe.path.is_none(),
                 "{label}: 超时不得产生结果"
@@ -2928,15 +3310,23 @@ mod tests {
             assert!(set_raw_clipboard_text(&seed));
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
 
-            let src = probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(src_path);
-                Some(1)
-            })
+            let src = probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(src_path);
+                    Some(1)
+                },
+            )
             .expect("首次探测必须成功");
-            let trg = probe_panel_path(&mut tx, || {
-                let _ = set_raw_clipboard_text(trg_path);
-                Some(1)
-            })
+            let trg = probe_panel_path(
+                &mut tx,
+                |_| true,
+                || {
+                    let _ = set_raw_clipboard_text(trg_path);
+                    Some(1)
+                },
+            )
             .expect("第二次探测必须成功");
 
             assert_eq!(
@@ -3122,6 +3512,227 @@ mod tests {
         );
     }
 
+    /// 审计报告 P0-04 竞态 A：写前校验通过后、真正写入之前发生外部改写，
+    /// 持锁复核必须检出并拒绝写入（绝不 EmptyClipboard 用户刚复制的内容）。
+    #[test]
+    fn test_write_owned_text_rechecks_under_clipboard_lock_and_fails_closed() {
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_p004a_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+        tx.write_owned_text("qp_p004a_first")
+            .expect("首次写入必须成功");
+
+        // 在「写前校验」与「持锁复核」之间注入用户复制（等价竞态 A 的交错）
+        let user_text = "qp_p004a_user_copy".to_string();
+        *TEST_BEFORE_WRITE_RECHECK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+            assert!(set_raw_clipboard_text(&user_text));
+        }));
+
+        let err = tx
+            .write_owned_text("qp_p004a_second")
+            .expect_err("持锁复核必须检出竞态 A 的外部改写");
+        assert_eq!(
+            err,
+            ClipboardTransactionError::NotOwned,
+            "必须返回 NotOwned"
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p004a_user_copy"),
+            "用户刚复制的内容绝不能被 EmptyClipboard 清掉"
+        );
+
+        let _ = set_raw_clipboard_text("");
+    }
+
+    /// 审计报告 P-05：首个面板超时后必须短路，不再发起第二个面板请求。
+    #[test]
+    fn test_probe_two_panels_short_circuits_when_first_times_out() {
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_p005_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        let second_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = second_called.clone();
+        let (first, second) = probe_two_panels(
+            &mut tx,
+            |_| true,
+            || None, // 首个面板超时
+            move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(1)
+            },
+        )
+        .expect("超时不应产生归属冲突");
+
+        assert!(!first.delivered, "首个面板必须记为未投递");
+        assert!(second.is_none(), "首个面板超时后不得探测第二个面板");
+        assert!(
+            !second_called.load(std::sync::atomic::Ordering::SeqCst),
+            "第二个面板的 request 闭包绝不能被调用（否则会多付一次 500ms）"
+        );
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::Restored,
+            "归属未变时必须正常恢复"
+        );
+        assert_eq!(get_clipboard_text().as_deref(), Some("qp_p005_seed"));
+    }
+
+    /// 审计报告 P0-04 竞态 B：请求窗口内出现非目标来源的剪贴板更新
+    /// （用户在管理器写入前复制），绝不允许无条件认领最终状态。
+    #[test]
+    fn test_probe_rejects_foreign_update_before_manager_write() {
+        let _guard = clip_test_lock();
+        let dir = make_probe_dir("p004b_src");
+        let own_pid = std::process::id();
+        let foreign_pid = own_pid.wrapping_add(1);
+        assert!(set_raw_clipboard_text("qp_p004b_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        let probe_dir = dir.clone();
+        let err = probe_panel_path(
+            &mut tx,
+            move |pid| pid == own_pid,
+            move || {
+                // 用户复制（合成事件：同进程的真实写入无法与“管理器”区分 pid，
+                // 故用注入事件确定性地表达“非目标来源的一次更新”）
+                inject_clipboard_update_event_for_test(foreign_pid);
+                // 管理器随后写入路径
+                let _ = set_raw_clipboard_text(&probe_dir);
+                Some(1)
+            },
+        )
+        .expect_err("请求期间出现外部更新必须判为 NotOwned");
+        assert_eq!(err, ClipboardTransactionError::NotOwned);
+
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::SkippedForeignChange,
+            "检出外部更新后必须跳过旧快照恢复"
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some(dir.as_str()),
+            "不得写回旧快照覆盖当前内容"
+        );
+    }
+
+    /// 审计报告 P0-04 竞态 B 回归：本次事务自己的临时写入会投递**延迟**的
+    /// `WM_CLIPBOARDUPDATE`，其 owner 就是本进程；它绝不能被当成「外部改写」。
+    /// 这里用「永不匹配」的 `is_expected_source` 把「只接受目标管理器」推到极端，
+    /// 暴露该误判：若误判，管理器已正确写入时合法扫描仍会被拒。
+    #[test]
+    fn test_probe_does_not_treat_own_updates_as_foreign() {
+        let _guard = clip_test_lock();
+        let dir = make_probe_dir("p004b_own");
+        assert!(set_raw_clipboard_text("qp_p004b_own_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        let probe_dir = dir.clone();
+        let panel = probe_panel_path(
+            &mut tx,
+            |_| false, // 极端：目标管理器身份永不匹配
+            move || {
+                let _ = set_raw_clipboard_text(&probe_dir);
+                Some(1)
+            },
+        )
+        .expect("本进程自身的写入事件绝不能被判为外部改写");
+        assert_eq!(panel.path.as_deref(), Some(dir.trim_end_matches('\\')));
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::Restored
+        );
+        assert_eq!(get_clipboard_text().as_deref(), Some("qp_p004b_own_seed"));
+    }
+
+    /// 审计报告 P0-04 竞态 B（正面）：目标管理器写入且无第三方更新时，
+    /// 必须能正常认领并读回路径。
+    #[test]
+    fn test_probe_accepts_manager_write_when_provenance_is_clean() {
+        let _guard = clip_test_lock();
+        let dir = make_probe_dir("p004b_ok");
+        let own_pid = std::process::id();
+        assert!(set_raw_clipboard_text("qp_p004b_ok_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        let probe_dir = dir.clone();
+        let panel = probe_panel_path(
+            &mut tx,
+            move |pid| pid == own_pid,
+            move || {
+                let _ = set_raw_clipboard_text(&probe_dir);
+                Some(1)
+            },
+        )
+        .expect("无第三方更新时必须成功认领");
+        assert_eq!(panel.path.as_deref(), Some(dir.trim_end_matches('\\')));
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::Restored
+        );
+        assert_eq!(get_clipboard_text().as_deref(), Some("qp_p004b_ok_seed"));
+    }
+
+    /// 审计报告 P0-04 竞态 B：管理器写入后、回读前用户从**其他进程**复制，
+    /// 最终 owner 不再属于目标管理器 → 必须拒绝认领并保留用户内容。
+    #[test]
+    fn test_probe_rejects_foreign_final_owner_after_manager_write() {
+        let _guard = clip_test_lock();
+        let dir = make_probe_dir("p004b_late");
+        let own_pid = std::process::id();
+        assert!(set_raw_clipboard_text("qp_p004b_late_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        let probe_dir = dir.clone();
+        let err = probe_panel_path(
+            &mut tx,
+            move |pid| pid == own_pid,
+            move || {
+                // 管理器写入路径……
+                let _ = set_raw_clipboard_text(&probe_dir);
+                // ……用户在回读前从独立进程复制
+                let _ = clip_write_from_external_process("qp_p004b_late_user");
+                Some(1)
+            },
+        )
+        .expect_err("最终 owner 已非目标管理器时必须拒绝认领");
+        assert!(
+            matches!(
+                err,
+                ClipboardTransactionError::NotOwned | ClipboardTransactionError::OwnershipUnknown
+            ),
+            "必须是 NotOwned 或归属未知（均 fail-closed），实际 {:?}",
+            err
+        );
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::SkippedForeignChange
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p004b_late_user"),
+            "用户跨进程复制的内容必须原样保留"
+        );
+    }
+
+    /// 审计报告 P0-04 竞态 B：事件环溢出时来源链不可证明 → 必须保守拒绝。
+    #[test]
+    fn test_clipboard_update_ring_overflow_is_unprovable() {
+        let _guard = clip_test_lock();
+        let marker = clipboard_update_marker();
+        for _ in 0..=CLIPBOARD_EVENT_CAPACITY {
+            inject_clipboard_update_event_for_test(1234);
+        }
+        assert!(
+            clipboard_updates_since(marker).is_none(),
+            "事件溢出有界环后必须判定为来源链不可证明"
+        );
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
     // 真实运行时 / 跨进程证据（2026-10-14 补；对应整改报告 §5.1 可自动化子集）
     //
@@ -3144,16 +3755,20 @@ mod tests {
     /// （本文件第一版跨进程夹具就是这样被自已绊倒的，断言里能看到 `...user_b\r\n`）。
     /// `Set-Clipboard -Value` 写入的是精确字符串（已实测：14 字符写入读回 14 字符）。
     fn clip_write_from_external_process(text: &str) -> bool {
+        use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
         assert!(
             !text.contains(['\'', '"', '`', '\n', '\r']),
             "跨进程写入的探针文本受控，不得包含引号或换行"
         );
         let script = format!("Set-Clipboard -Value '{text}'");
-        // PS 5.1 起自带 Set-Clipboard；优先 pwsh，退化到系统自带 powershell
+        // PS 5.1 起自带 Set-Clipboard；优先 pwsh，退化到系统自带 powershell。
+        // `CREATE_NO_WINDOW`：必须在**后台**运行，否则每轮 `cargo test` 都会在桌面
+        // 闪出控制台窗口（用户明确要求「后台运行，不要弹出」）。
         for exe in ["pwsh", "powershell"] {
             let ok = Command::new(exe)
                 .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .creation_flags(crate::managers::ipc::CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -3167,6 +3782,28 @@ mod tests {
         false
     }
 
+    /// 回归守卫：跨进程剪贴板夹具必须以后台无窗方式运行，
+    /// 否则每次 `cargo test` 都会在桌面闪出 pwsh / powershell 控制台窗口。
+    #[test]
+    fn test_external_clipboard_fixture_never_pops_console_window() {
+        const SOURCE: &str = include_str!("clipboard.rs");
+        // 用 concat! 拆开字面量：一是避免守卫自身源码把断言命中，
+        // 二是只认「实际调用表达式」而不是夹具注释里提到的常量名。
+        let needle = concat!(
+            ".creation_flags(crate::managers::ipc::",
+            "CREATE_NO_WINDOW)"
+        );
+        let start = SOURCE
+            .find("fn clip_write_from_external_process")
+            .expect("跨进程剪贴板夹具必须存在");
+        let rest = &SOURCE[start..];
+        let end = rest.find("\n    /// ").expect("夹具后面应紧跟文档注释");
+        assert!(
+            rest[..end].contains(needle),
+            "跨进程剪贴板夹具必须用 CREATE_NO_WINDOW 后台运行，否则会在桌面闪控制台窗口"
+        );
+    }
+
     /// 报告 §5.1 用例 1（C-06）：跨进程真实复现「第一次管理器写入后、第二次清空前用户复制」——
     /// 第二次写入必须被拒绝，用户新内容原样保留，最终结局为 `SkippedForeignChange`。
     #[test]
@@ -3178,9 +3815,11 @@ mod tests {
         let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
 
         // 第一次探测：由独立进程扮演管理器写入真实目录路径
-        let p1 = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
-            clip_write_from_external_process(&d1).then_some(0)
-        })
+        let p1 = crate::managers::clipboard_probe::probe_panel_path(
+            &mut tx,
+            |_| true,
+            || clip_write_from_external_process(&d1).then_some(0),
+        )
         .expect("跨进程管理器写入后的读回必须成功");
         assert_eq!(
             p1.path.as_deref(),
@@ -3195,10 +3834,14 @@ mod tests {
         );
 
         // 第二次写入前必须检出外部改写并拒绝
-        let err = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
-            let _ = clip_write_from_external_process(&d2);
-            Some(0)
-        })
+        let err = crate::managers::clipboard_probe::probe_panel_path(
+            &mut tx,
+            |_| true,
+            || {
+                let _ = clip_write_from_external_process(&d2);
+                Some(0)
+            },
+        )
         .expect_err("第二次清空前检出外部改写必须拒绝写入");
         assert_eq!(err, ClipboardTransactionError::NotOwned, "必须是 NotOwned");
 
@@ -3227,9 +3870,11 @@ mod tests {
         );
 
         let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-        let p1 = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
-            clip_write_from_external_process(&d1).then_some(0)
-        })
+        let p1 = crate::managers::clipboard_probe::probe_panel_path(
+            &mut tx,
+            |_| true,
+            || clip_write_from_external_process(&d1).then_some(0),
+        )
         .expect("跨进程管理器写入后的读回必须成功");
         assert_eq!(p1.path.as_deref(), Some(d1.as_str()));
 
@@ -3292,9 +3937,11 @@ mod tests {
 
         let target = make_probe_dir("xproc_mixed");
         let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-        let panel = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
-            clip_write_from_external_process(&target).then_some(0)
-        })
+        let panel = crate::managers::clipboard_probe::probe_panel_path(
+            &mut tx,
+            |_| true,
+            || clip_write_from_external_process(&target).then_some(0),
+        )
         .expect("跨进程管理器写入后的读回必须成功");
         assert_eq!(
             panel.path.as_deref(),

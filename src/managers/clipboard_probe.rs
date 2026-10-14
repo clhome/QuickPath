@@ -28,16 +28,26 @@ pub struct PanelProbe {
 ///    调用方必须中止整轮扫描，绝不覆盖用户刚复制的新内容；
 /// 2. `QuickPath` 自己写入空文本以清空剪贴板（登记序列号与精确文本）；
 /// 3. 请求管理器把路径写入剪贴板；
-/// 4. 读回文本并登记当时的序列号，作为下一次归属校验的基准。
-pub fn probe_panel_path<F>(
+/// 4. 记下请求开始标记，并在请求返回后**证明更新来源**才登记序列号：请求期间一旦
+///    出现非 `is_expected_source` 认可的剪贴板更新，立即返回 `Err(NotOwned)`
+///    （审计报告 P0-04 竞态 B，绝不无条件认领最终状态）。
+///
+/// `is_expected_source` 接收剪贴板 owner 的进程 id，返回 `true` 表示该进程就是本次
+/// 请求的目标管理器。管理器实现应传入「目标窗口所属进程 id」的比对闭包。
+pub fn probe_panel_path<A, F>(
     tx: &mut ClipboardTransaction,
+    is_expected_source: A,
     request: F,
 ) -> Result<PanelProbe, ClipboardTransactionError>
 where
+    A: Fn(u32) -> bool,
     F: FnOnce() -> Option<usize>,
 {
     tx.ensure_still_owned()?;
     tx.write_owned_text("")?;
+
+    // 请求前记下事件标记：这之后登记的剪贴板更新都属于本次请求窗口
+    let marker = tx.request_marker();
 
     if request().is_none() {
         // 管理器超时 / 窗口已退出：剪贴板仍是本事务的临时写入，归属未变，
@@ -52,9 +62,35 @@ where
     Ok(PanelProbe {
         delivered: true,
         path: tx
-            .note_observed_owned_text()
+            .note_observed_owned_text_proven(marker, is_expected_source)?
             .and_then(|text| clean_dir_path(&text)),
     })
+}
+
+/// 在单个管理器窗口上依次探测两个面板。
+///
+/// 审计报告 P-05：首个面板未在超时内应答（`delivered == false`）时**立即短路**，
+/// 不再发起第二个面板请求 —— 一次失败已足以判定该管理器挂起并进入冷却，
+/// 继续请求只会让后台 worker 多等一个 `MESSAGE_TIMEOUT_MS`。
+///
+/// 返回值为 `(首个面板, 第二个面板)`；短路时第二个为 `None`。
+pub fn probe_two_panels<A, F1, F2>(
+    tx: &mut ClipboardTransaction,
+    is_expected_source: A,
+    first: F1,
+    second: F2,
+) -> Result<(PanelProbe, Option<PanelProbe>), ClipboardTransactionError>
+where
+    A: Fn(u32) -> bool,
+    F1: FnOnce() -> Option<usize>,
+    F2: FnOnce() -> Option<usize>,
+{
+    let first_panel = probe_panel_path(tx, &is_expected_source, first)?;
+    if !first_panel.delivered {
+        return Ok((first_panel, None));
+    }
+    let second_panel = probe_panel_path(tx, &is_expected_source, second)?;
+    Ok((first_panel, Some(second_panel)))
 }
 
 /// 与管理器既有行为完全一致的路径清洗（去首尾空白 + 去掉尾部反斜杠）与目录校验。
@@ -133,7 +169,7 @@ mod tests {
                 );
             }
 
-            for required in ["probe_panel_path", "ClipboardTransaction::begin"] {
+            for required in ["probe_two_panels", "ClipboardTransaction::begin"] {
                 assert!(
                     code.contains(required),
                     "{} 必须复用统一事务化探测路径（缺少 `{}`）",

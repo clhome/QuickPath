@@ -134,6 +134,15 @@ pub fn window_process_matches(hwnd: HWND, expected_exe_names: &[&str]) -> bool {
     process_name_matches(&name, expected_exe_names)
 }
 
+/// 取得窗口所属进程 id（审计报告 P0-04 竞态 B：用于校验剪贴板 owner 来源）。
+/// 无效窗口返回 0。复用 `detector` 的既有封装，避免重复实现 Win32 调用。
+pub fn window_process_id(hwnd: HWND) -> u32 {
+    if hwnd.0.is_null() {
+        return 0;
+    }
+    crate::dialog::detector::get_window_process_info(hwnd).0
+}
+
 fn process_name_matches(actual: &str, expected_exe_names: &[&str]) -> bool {
     if actual.is_empty() {
         return false;
@@ -232,7 +241,7 @@ mod tests {
                      只核对首个窗口会漏掉后续同类名伪装窗口"
                 );
             };
-            let Some(send_at) = body.find("probe_panel_path") else {
+            let Some(send_at) = body.find("probe_two_panels") else {
                 panic!("{name} 的枚举循环内必须通过共享探测函数投递协议消息");
             };
             assert!(

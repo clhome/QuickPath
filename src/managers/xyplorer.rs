@@ -5,7 +5,7 @@ use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, WM_COPYDATA};
 use windows::core::PCWSTR;
 
-use super::clipboard_probe::{log_probe_abort, log_restore_outcome, probe_panel_path};
+use super::clipboard_probe::{log_probe_abort, log_restore_outcome, probe_two_panels};
 use super::ipc::{self, Manager};
 use crate::win32::clipboard::ClipboardTransaction;
 
@@ -74,24 +74,49 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
                 continue;
             }
 
-            // 1. 获取活动窗格路径
-            //    事务内部会先清空剪贴板：XY 不响应时绝不会把上一次的陈旧路径当成结果读回来
-            match probe_panel_path(&mut tx, || {
-                send_xyplorer_script(hwnd, "::copytext get('path', a);")
-            }) {
-                Ok(panel) => {
-                    if panel.delivered {
+            // 目标来源校验（P0-04 竞态 B）：只认「与目标窗口同进程」的剪贴板更新。
+            // 该窗口的进程镜像已在上方逐窗核对，因此这里的 pid 可信。
+            let target_pid = ipc::window_process_id(hwnd);
+
+            // 1./2. 依次探测活动窗格与非活动窗格。
+            //    事务内部会先清空剪贴板：XY 不响应时绝不会把上一次的陈旧路径当成结果读回来。
+            //    P-05：首个面板超时即短路，不再付出第二次 500ms。
+            match probe_two_panels(
+                &mut tx,
+                |pid| pid != 0 && pid == target_pid,
+                || send_xyplorer_script(hwnd, "::copytext get('path', a);"),
+                || send_xyplorer_script(hwnd, "::copytext get('path', i);"),
+            ) {
+                Ok((first_panel, second_panel)) => {
+                    if first_panel.delivered {
                         any_delivered = true;
                     } else {
                         any_timeout = true;
                     }
-                    if let Some(path) = panel.path {
+                    if let Some(path) = first_panel.path {
                         results.push(XYplorerFolder {
                             path,
                             title: "XYplorer (活动窗格)".to_string(),
                             is_active: true,
                             hwnd,
                         });
+                    }
+                    if let Some(panel) = second_panel {
+                        if panel.delivered {
+                            any_delivered = true;
+                        } else {
+                            any_timeout = true;
+                        }
+                        if let Some(path) = panel.path
+                            && !results.iter().any(|r| r.path == path)
+                        {
+                            results.push(XYplorerFolder {
+                                path,
+                                title: "XYplorer (副窗格)".to_string(),
+                                is_active: false,
+                                hwnd,
+                            });
+                        }
                     }
                 }
                 Err(err) => {
@@ -101,34 +126,7 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
                 }
             }
 
-            // 2. 获取非活动窗格路径
-            match probe_panel_path(&mut tx, || {
-                send_xyplorer_script(hwnd, "::copytext get('path', i);")
-            }) {
-                Ok(panel) => {
-                    if panel.delivered {
-                        any_delivered = true;
-                    } else {
-                        any_timeout = true;
-                    }
-                    if let Some(path) = panel.path
-                        && !results.iter().any(|r| r.path == path)
-                    {
-                        results.push(XYplorerFolder {
-                            path,
-                            title: "XYplorer (副窗格)".to_string(),
-                            is_active: false,
-                            hwnd,
-                        });
-                    }
-                }
-                Err(err) => {
-                    log_probe_abort("xyplorer", &err);
-                    break;
-                }
-            }
-
-            // 第一次超时即视为该管理器已挂起：立即中止整轮扫描并进入冷却
+            // 任一面板超时即视为该管理器已挂起：立即中止整轮扫描并进入冷却
             if any_timeout {
                 break;
             }
