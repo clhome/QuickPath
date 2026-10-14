@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 
-use std::path::Path;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, WM_COMMAND};
 use windows::core::PCWSTR;
 
+use super::clipboard_probe::{log_probe_abort, log_restore_outcome, probe_panel_path};
 use super::ipc::{self, Manager};
+use crate::win32::clipboard::ClipboardTransaction;
 
 const CM_COPY_SRC_PATH_TO_CLIP: usize = 2029;
 const CM_COPY_TRG_PATH_TO_CLIP: usize = 2030;
@@ -49,67 +50,77 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
             return results;
         }
 
-        // P0 安全守卫：在枚举前完整快照剪贴板（含文件列表 CF_HDROP、截图位图等）
+        // P0 安全守卫：在枚举前开启剪贴板事务（完整快照，含文件列表 CF_HDROP、截图位图等）。
         // 若剪贴板被占用或关键格式无法保真备份，宁可放弃扫描，绝不破坏用户剪贴板！
-        let snapshot = match crate::win32::clipboard::ClipboardSnapshot::capture() {
-            Ok(s) => s,
+        let mut tx = match ClipboardTransaction::begin() {
+            Ok(tx) => tx,
             Err(_) => return results,
         };
-        let mut guard = crate::win32::clipboard::ClipboardRestoreGuard::new(snapshot);
 
         let mut any_delivered = false;
         let mut any_timeout = false;
 
         while !hwnd.0.is_null() {
             // 1. 获取源/当前活动面板路径
-            //    先清空文本：TM 不响应时绝不会把上一次的陈旧路径当成结果读回来
-            let _ = crate::win32::clipboard::clear_clipboard_text();
-            match ipc::send_message_timeout(
-                hwnd,
-                WM_COMMAND,
-                WPARAM(CM_COPY_SRC_PATH_TO_CLIP),
-                LPARAM(0),
-            ) {
-                Some(_) => {
-                    any_delivered = true;
-                    if let Some(src_path) = crate::win32::clipboard::get_clipboard_text() {
-                        let clean_path = src_path.trim().trim_end_matches('\\').to_string();
-                        if !clean_path.is_empty() && Path::new(&clean_path).is_dir() {
-                            results.push(TotalCmdFolder {
-                                path: clean_path,
-                                title: "Total Commander (活动窗格)".to_string(),
-                                is_active: true,
-                                hwnd,
-                            });
-                        }
+            //    事务内部会先清空剪贴板：TM 不响应时绝不会把上一次的陈旧路径当成结果读回来
+            match probe_panel_path(&mut tx, || {
+                ipc::send_message_timeout(
+                    hwnd,
+                    WM_COMMAND,
+                    WPARAM(CM_COPY_SRC_PATH_TO_CLIP),
+                    LPARAM(0),
+                )
+            }) {
+                Ok(panel) => {
+                    if panel.delivered {
+                        any_delivered = true;
+                    } else {
+                        any_timeout = true;
+                    }
+                    if let Some(path) = panel.path {
+                        results.push(TotalCmdFolder {
+                            path,
+                            title: "Total Commander (活动窗格)".to_string(),
+                            is_active: true,
+                            hwnd,
+                        });
                     }
                 }
-                None => any_timeout = true,
+                Err(err) => {
+                    // 检出外部改写：立即中止整轮扫描，绝不覆盖用户新复制的内容
+                    log_probe_abort("totalcmd", &err);
+                    break;
+                }
             }
 
             // 2. 获取目标/副面板路径
-            let _ = crate::win32::clipboard::clear_clipboard_text();
-            match ipc::send_message_timeout(
-                hwnd,
-                WM_COMMAND,
-                WPARAM(CM_COPY_TRG_PATH_TO_CLIP),
-                LPARAM(0),
-            ) {
-                Some(_) => {
-                    any_delivered = true;
-                    if let Some(trg_path) = crate::win32::clipboard::get_clipboard_text() {
-                        let clean_path = trg_path.trim().trim_end_matches('\\').to_string();
-                        if !clean_path.is_empty() && Path::new(&clean_path).is_dir() {
-                            results.push(TotalCmdFolder {
-                                path: clean_path,
-                                title: "Total Commander (副窗格)".to_string(),
-                                is_active: false,
-                                hwnd,
-                            });
-                        }
+            match probe_panel_path(&mut tx, || {
+                ipc::send_message_timeout(
+                    hwnd,
+                    WM_COMMAND,
+                    WPARAM(CM_COPY_TRG_PATH_TO_CLIP),
+                    LPARAM(0),
+                )
+            }) {
+                Ok(panel) => {
+                    if panel.delivered {
+                        any_delivered = true;
+                    } else {
+                        any_timeout = true;
+                    }
+                    if let Some(path) = panel.path {
+                        results.push(TotalCmdFolder {
+                            path,
+                            title: "Total Commander (副窗格)".to_string(),
+                            is_active: false,
+                            hwnd,
+                        });
                     }
                 }
-                None => any_timeout = true,
+                Err(err) => {
+                    log_probe_abort("totalcmd", &err);
+                    break;
+                }
             }
 
             // 第一次超时即视为该管理器已挂起：立即中止整轮扫描并进入冷却，
@@ -122,13 +133,9 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
                 FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
         }
 
-        // 扫描完成，立即恢复用户原始剪贴板（恢复失败仅记录，不影响扫描结果）
-        if let Err(err) = guard.restore_now() {
-            crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_RESTORE_FAILED(totalcmd): {:?}",
-                err
-            ));
-        }
+        // 扫描完成（含提前中止），按同一套严格归属校验恢复用户原始剪贴板
+        let outcome = tx.restore_if_still_owned();
+        log_restore_outcome("totalcmd", &outcome);
 
         if any_timeout {
             crate::dialog::detector::log_debug("IPC: Total Commander 响应超时，进入冷却");

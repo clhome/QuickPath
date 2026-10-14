@@ -1,3 +1,4 @@
+pub mod clipboard_probe;
 pub mod dopus;
 pub mod explorer;
 pub mod ipc;
