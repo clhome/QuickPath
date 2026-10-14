@@ -33,7 +33,10 @@ pub struct TabKeyboardGuard {
 
 impl TabKeyboardGuard {
     pub fn new(coordinator: Arc<TabCoordinator>, notify_hwnd: HWND) -> Result<Self, String> {
-        COORDINATOR_SLOT.install(&coordinator);
+        // 槽位被占用意味着前一个钩子尚未卸载：必须显式失败，而不是静默复用
+        if !COORDINATOR_SLOT.install(&coordinator) {
+            return Err("Win+E 键盘钩子槽位已被占用（前一个钩子尚未卸载）".to_string());
+        }
         NOTIFY_HWND.store(notify_hwnd.0 as *mut _, Ordering::SeqCst);
 
         let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_ll_proc), None, 0) };
@@ -138,4 +141,38 @@ unsafe fn keyboard_ll_should_swallow(lparam: LPARAM) -> bool {
     }
     // 排除 Ctrl / Alt / Shift 复合修饰键干扰
     !pressed(VK_CONTROL.0 as i32) && !pressed(VK_MENU.0 as i32) && !pressed(VK_SHIFT.0 as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tab::ShellComManager;
+
+    /// P2-01：键盘钩子槽位被占时构造必须失败，且不得改写 NOTIFY_HWND；
+    /// 失败路径与卸载路径共用的 `release_static_refs()` 必须摘清槽位。
+    /// （本文件内两个断言合并在一个用例里，因为它们共享同一份静态槽位，
+    ///  拆成两个并发用例会互相扰动。）
+    #[test]
+    fn test_keyboard_guard_slot_ownership_and_release() {
+        let coordinator = Arc::new(TabCoordinator::new(Arc::new(ShellComManager::new())));
+
+        assert!(COORDINATOR_SLOT.install(&coordinator), "首次安装必须成功");
+        let rejected =
+            TabKeyboardGuard::new(coordinator.clone(), HWND(std::ptr::null_mut()));
+        assert!(rejected.is_err(), "槽位被占用时构造必须返回 Err");
+        assert!(
+            NOTIFY_HWND.load(Ordering::SeqCst).is_null(),
+            "被拒的构造不得改写 NOTIFY_HWND"
+        );
+
+        // 失败/卸载共用路径：必须同时摘清 NOTIFY_HWND 与槽位
+        NOTIFY_HWND.store(0x1234 as *mut _, Ordering::SeqCst);
+        TabKeyboardGuard::release_static_refs();
+        assert!(NOTIFY_HWND.load(Ordering::SeqCst).is_null());
+        assert!(COORDINATOR_SLOT.borrow().is_none(), "释放后借用必须失败");
+
+        // 释放后重新安装/释放必须成功
+        assert!(COORDINATOR_SLOT.install(&coordinator));
+        assert!(COORDINATOR_SLOT.release(UNLOAD_DRAIN_TIMEOUT));
+    }
 }

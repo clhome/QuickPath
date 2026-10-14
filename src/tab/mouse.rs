@@ -37,24 +37,38 @@ pub struct TabMouseGuard {
 
 impl TabMouseGuard {
     pub fn new(coordinator: Arc<TabCoordinator>) -> Result<Self, String> {
-        MOUSE_SLOT.install(&coordinator);
+        // 槽位被占用意味着前一个钩子尚未卸载：必须显式失败，而不是静默复用同一个槽
+        if !MOUSE_SLOT.install(&coordinator) {
+            return Err("鼠标双击 LowLevel 钩子槽位已被占用（前一个钩子尚未卸载）".to_string());
+        }
 
         unsafe {
-            let hook = SetWindowsHookExW(
-                WH_MOUSE_LL,
-                Some(mouse_ll_proc),
-                None,
-                0,
-            ).map_err(|e| format!("注册多标签页鼠标双击 LowLevel 钩子失败: {}", e))?;
-
-            if hook.is_invalid() {
-                return Err("注册多标签页鼠标双击 LowLevel 钩子失败: 句柄无效".to_string());
-            }
+            // 注意：这里绝不能用 `?` 提前返回——它会在注册失败时跳过 release_slot()
+            let hook = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_ll_proc), None, 0) {
+                Ok(installed) if !installed.is_invalid() => installed,
+                Ok(_) => {
+                    Self::release_slot();
+                    return Err("注册多标签页鼠标双击 LowLevel 钩子失败: 句柄无效".to_string());
+                }
+                Err(err) => {
+                    Self::release_slot();
+                    return Err(format!("注册多标签页鼠标双击 LowLevel 钩子失败: {}", err));
+                }
+            };
 
             Ok(Self {
                 hook,
                 _coordinator: coordinator,
             })
+        }
+    }
+
+    /// 归还静态槽位（构造失败与正常卸载共用同一条路径）
+    fn release_slot() {
+        if !MOUSE_SLOT.release(UNLOAD_DRAIN_TIMEOUT) {
+            crate::dialog::detector::log_debug(
+                "TAB_MOUSE: 卸载时有回调仍在执行，已按安全优先故意保留引用",
+            );
         }
     }
 }
@@ -67,11 +81,7 @@ impl Drop for TabMouseGuard {
             }
         }
         // 先摘指针再等在途回调归零，最后才释放唯一那份所有权（报告 R-04）
-        if !MOUSE_SLOT.release(UNLOAD_DRAIN_TIMEOUT) {
-            crate::dialog::detector::log_debug(
-                "TAB_MOUSE: 卸载时有回调仍在执行，已按安全优先故意保留引用",
-            );
-        }
+        Self::release_slot();
     }
 }
 
@@ -240,4 +250,26 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tab::ShellComManager;
+
+    /// P2-01：鼠标钩子槽位被占用时构造必须显式失败，
+    /// 且失败不得破坏占用者；释放后仍可重新安装。
+    #[test]
+    fn test_mouse_guard_rejects_occupied_slot_without_disturbing_owner() {
+        let coordinator = Arc::new(TabCoordinator::new(Arc::new(ShellComManager::new())));
+
+        assert!(MOUSE_SLOT.install(&coordinator), "首次安装必须成功");
+        let rejected = TabMouseGuard::new(coordinator.clone());
+        assert!(rejected.is_err(), "槽位被占用时构造必须返回 Err");
+        assert_eq!(MOUSE_SLOT.in_flight(), 0);
+        assert!(MOUSE_SLOT.release(UNLOAD_DRAIN_TIMEOUT));
+
+        assert!(MOUSE_SLOT.install(&coordinator));
+        assert!(MOUSE_SLOT.release(UNLOAD_DRAIN_TIMEOUT));
+    }
 }

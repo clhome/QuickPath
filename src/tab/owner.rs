@@ -115,7 +115,7 @@ impl CoordinatorSlot {
     }
 
     #[cfg(test)]
-    fn in_flight(&self) -> usize {
+    pub(crate) fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::SeqCst)
     }
 }

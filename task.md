@@ -1364,6 +1364,45 @@
 2. `coordinator.rs` 合并链路（非 Win+E）仍使用旧 `get_tabs_count_for_hwnd()`（失败按 0），与本轮 Win+E 的严格口径不一致，属下一步统一项。
 3. `build.rs` 改写源码树、Actions 未 pin SHA、无 fmt/clippy/audit 门禁、无 Authenticode——仍属第三批发布工程。
 
+---
+
+## 阶段七十：审计报告 v1.2.2 第二批三项修复（P2-01 / 自启有界等待 / P2-04）
+
+> **范围（用户确认）**：第二批 = 钩子构造全有或全无回滚 + 自启命令有界等待 + 调试日志治理。
+> AppState 所有权重构与 COM worker 重建上限监控本轮未做（属架构性遗留）。
+
+- [x] **70.1 P2-01 钩子构造全有或全无回滚（`src/tab/hook.rs` / `mouse.rs` / `keyboard.rs` / `mod.rs`）**
+  - [x] 三个钩子（WinEvent / 鼠标 LowLevel / 键盘 LowLevel）构造时均检查 `CoordinatorSlot::install()` 返回值；槽位被占用（前一个钩子未卸载）时显式返回 Err，不再静默复用
+  - [x] 注册失败路径全部先 `release_slot()` 再返回 Err；`mouse.rs` 去掉会跳过回收的 `?` 早退，改为 match
+  - [x] `hook.rs` / `mouse.rs` 抽出与 Drop 共用的 `release_slot()`，失败与卸载走同一条归还路径
+  - [x] `TabModule::start()` 改为全有或全无：先 `stop()` 清残留 → 依次新建三个 guard → 任一步失败即 drop 已建 guard（归还槽位）并返回 Err；已全部就绪时幂等返回
+  - [x] 3 个单测：三个槽位各自“被占用 → 构造必失败 → 不破坏占用者 → 释放后可重装”
+- [x] **70.2 自启命令有界等待（`src/win32/autostart.rs`）**
+  - [x] 新增 `run_bounded_status(cmd, args, timeout)`：`spawn + try_wait + kill`，超时/异常一律返回 None，绝不使用无截止时间的 `status()` / `output()`
+  - [x] `schtasks /create`、`/delete`、`/query` 三处调用全部改走有界等待（上限 1.5s），宿主消息线程不再被异常系统服务无限拖住
+  - [x] 2 个单测：退出码成功/失败可区分；挂起子进程（`ping -n 30`）必须在超时附近被 kill
+- [x] **70.3 P2-04 调试日志治理（`src/dialog/detector.rs`）**
+  - [x] **单一日志文件**：删除“exe 目录 + `%TEMP%` 双写”，改为按 exe 同级 → `%LOCALAPPDATA%\QuickPath\logs` → `%TEMP%\QuickPath\logs` 顺序解析出的**唯一**可写路径
+  - [x] **大小上限 + 轮换**：单文件 > 2 MB 轮换为 `.1`（覆盖旧备份），磁盘占用上限约 4 MB
+  - [x] **保留期**：轮换备份超过 7 天自动删除
+  - [x] **默认脱敏**：写入前把 `USERPROFILE` 与 `USERNAME` 替换为 `%USERPROFILE%` / `<user>`（大小写不敏感、保留字节边界）
+  - [x] 多线程写入用 `Mutex` 串行化“检查大小 → 轮换 → 追加”
+  - [x] 3 个单测：大小写不敏感替换、脱敏覆盖个人目录与用户名、轮换只留一份备份
+  - [x] 说明：报告要求的“导出诊断信息前允许用户预览”当前不适用——产品尚无日志导出/诊断包入口；如后续新增导出功能，需附带预览步骤
+
+### 门禁与自证（本轮）
+
+- `cargo test --all-targets`：**96 项全绿**（第一批后 88 → 96，新增 8 项）
+- `cargo clippy --all-targets`：**181 条**（对比已提交的第一批基线 182，净减 1 条 collapsible_if，零新增）
+- `cargo build --release`：通过
+- 自证：`log_debug` 仅在调试开关打开时写文件；单测临时目录自建自清，无残留
+
+### 本轮遗留
+
+1. **AppState 所有权**（报告第二批列项）：仍是 `AtomicPtr<AppState>`，需改为“仅宿主消息线程所有 + 其他线程只投递不可变 command”。
+2. **COM worker 重建上限监控**：`worker_rebuilds` 有埋点但无上限/告警阈值；被放弃的 STA 线程不可取消。
+3. 沿用阶段六十九遗留：对话框链路有界同步兜底、`coordinator.rs` 计数口径、发布工程第三批、真机验收矩阵。
+
 
 
 

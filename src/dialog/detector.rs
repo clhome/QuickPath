@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
@@ -38,38 +40,187 @@ pub fn set_debug_mode_enabled(enabled: bool) {
     }
 }
 
-pub fn log_debug(msg: &str) {
-    if !is_debug_mode_enabled() {
-        return;
+/// 单一日志文件名（审计报告 P2-04：不再同时写 exe 目录与 `%TEMP%` 两份）
+const DEBUG_LOG_FILE_NAME: &str = "quickpath_debug.log";
+/// 单个日志文件的最大字节数（超过即轮换，只保留一份备份 → 磁盘占用上限约 4 MB）
+const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+/// 轮换备份的保留期（超过即删除）
+const DEBUG_LOG_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// 选定的唯一日志文件路径（懒解析：优先 exe 同级便携模式，其次 `%LOCALAPPDATA%`，最后 `%TEMP%`）
+static DEBUG_LOG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// 串行化“检查大小 → 轮换 → 追加”，避免多线程同时轮换产生竞态
+static DEBUG_LOG_LOCK: Mutex<()> = Mutex::new(());
+
+/// 解析并缓存唯一日志文件路径；首次解析时顺带做一次容量/保留期治理。
+fn debug_log_path() -> Option<&'static PathBuf> {
+    DEBUG_LOG_PATH
+        .get_or_init(|| {
+            let path = resolve_debug_log_path()?;
+            enforce_log_retention(&path);
+            Some(path)
+        })
+        .as_ref()
+}
+
+fn resolve_debug_log_path() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        candidates.push(dir);
     }
-    use std::io::Write;
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("QuickPath").join("logs"));
+    }
+    candidates.push(std::env::temp_dir().join("QuickPath").join("logs"));
+
+    for dir in candidates {
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let path = dir.join(DEBUG_LOG_FILE_NAME);
+        // 真正尝试一次 append 打开：成功才算这个目录可写
+        if std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .is_ok()
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn log_backup_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".1");
+    path.with_file_name(name)
+}
+
+/// 轮换：把当前文件改名为 `.1`（覆盖旧备份），磁盘占用因此有上限。
+fn rotate_log(path: &Path) {
+    let backup = log_backup_path(path);
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::rename(path, &backup);
+}
+
+/// 容量与保留期治理：当前文件超限先轮换；过期备份删除。
+fn enforce_log_retention(path: &Path) {
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() >= DEBUG_LOG_MAX_BYTES
+    {
+        rotate_log(path);
+    }
+    let backup = log_backup_path(path);
+    if let Ok(meta) = std::fs::metadata(&backup) {
+        let expired = meta
+            .modified()
+            .map(|m| m.elapsed().map(|e| e > DEBUG_LOG_RETENTION).unwrap_or(false))
+            .unwrap_or(false);
+        if expired {
+            let _ = std::fs::remove_file(&backup);
+        }
+    }
+}
+
+fn debug_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = dur.as_secs() % 86400;
     let hours = (secs / 3600 + 8) % 24; // UTC+8
     let mins = (secs % 3600) / 60;
     let s = secs % 60;
-    let ms = dur.subsec_millis();
-    let line = format!("[{:02}:{:02}:{:02}.{:03}] {}\n", hours, mins, s, ms, msg);
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        hours,
+        mins,
+        s,
+        dur.subsec_millis()
+    )
+}
 
-    // 1. 优先写入 exe 同级目录
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let log_file = exe_dir.join("quickpath_debug.log");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_file)
-                .and_then(|mut f| f.write_all(line.as_bytes()));
-        }
+/// 大小写不敏感的 ASCII 子串替换（保留原始大小写与字节边界）
+fn replace_ascii_case_insensitive(haystack: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return haystack.to_string();
+    }
+    let hay = haystack.to_ascii_lowercase();
+    let nee = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut start = 0usize;
+    while let Some(pos) = hay[start..].find(&nee) {
+        let abs = start + pos;
+        out.push_str(&haystack[start..abs]);
+        out.push_str(replacement);
+        start = abs + needle.len();
+    }
+    out.push_str(&haystack[start..]);
+    out
+}
+
+/// 默认脱敏：把用户个人目录与用户名替换为占位符，保留其余可诊断结构。
+fn sanitize_with(msg: &str, profile: Option<&str>, username: Option<&str>) -> String {
+    let mut out = msg.to_string();
+    if let Some(profile) = profile.filter(|p| !p.is_empty()) {
+        out = replace_ascii_case_insensitive(&out, profile, "%USERPROFILE%");
+    }
+    if let Some(username) = username.filter(|u| !u.is_empty()) {
+        out = replace_ascii_case_insensitive(&out, username, "<user>");
+    }
+    out
+}
+
+/// 读取环境变量后脱敏（生产路径）
+fn sanitize_debug_message(msg: &str) -> String {
+    let profile = std::env::var_os("USERPROFILE").map(|v| v.to_string_lossy().to_string());
+    let username = std::env::var_os("USERNAME").map(|v| v.to_string_lossy().to_string());
+    sanitize_with(msg, profile.as_deref(), username.as_deref())
+}
+
+/// 写入调试日志。
+///
+/// 治理约束（审计报告 P2-04）：
+/// 1. **单一目录**：只写一个文件，不再同时写 exe 目录与 `%TEMP%`；
+/// 2. **大小上限 + 轮换**：超过 2 MB 轮换为 `.1`，只保留一份备份；
+/// 3. **保留期**：轮换备份超过 7 天自动删除；
+/// 4. **默认脱敏**：用户个人目录与用户名写入前替换为占位符。
+pub fn log_debug(msg: &str) {
+    if !is_debug_mode_enabled() {
+        return;
+    }
+    let Some(path) = debug_log_path() else {
+        return;
+    };
+
+    let line = format!(
+        "[{}] {}\n",
+        debug_timestamp(),
+        sanitize_debug_message(msg)
+    );
+
+    let _guard = DEBUG_LOG_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() >= DEBUG_LOG_MAX_BYTES
+    {
+        rotate_log(path);
     }
 
-    // 2. 写入系统临时目录 %TEMP%（确保无写入权限限制）
-    let temp_log = std::env::temp_dir().join("quickpath_debug.log");
+    use std::io::Write;
     let _ = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(temp_log)
+        .open(path)
         .and_then(|mut f| f.write_all(line.as_bytes()));
 }
 
@@ -940,5 +1091,56 @@ mod tests {
                 title
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod debug_log_tests {
+    use super::*;
+
+    #[test]
+    fn test_replace_ascii_case_insensitive_keeps_bytes() {
+        assert_eq!(
+            replace_ascii_case_insensitive(r"C:\Users\BOB\x", r"c:\users\bob", "<p>"),
+            r"<p>\x"
+        );
+        assert_eq!(replace_ascii_case_insensitive("aBaB", "ab", "-"), "--");
+        assert_eq!(replace_ascii_case_insensitive("abc", "", "X"), "abc");
+        assert_eq!(replace_ascii_case_insensitive("abc", "zz", "X"), "abc");
+    }
+
+    #[test]
+    fn test_sanitize_masks_profile_and_username() {
+        let msg = r"UIA_INJECT_START: target='C:\Users\Bob\Docs' user=Bob";
+        let masked = sanitize_with(msg, Some(r"C:\Users\Bob"), Some("Bob"));
+        assert!(
+            !masked.contains(r"C:\Users\Bob"),
+            "个人目录不得原样出现: {masked}"
+        );
+        assert!(!masked.contains("Bob"), "用户名不得原样出现: {masked}");
+        assert!(masked.contains("%USERPROFILE%"), "必须带上目录占位符: {masked}");
+        assert!(masked.contains("<user>"), "必须带上用户名占位符: {masked}");
+    }
+
+    /// 轮换：当前文件改名为 `.1` 并覆盖旧备份 → 磁盘占用有上限
+    #[test]
+    fn test_rotate_log_keeps_single_backup_and_caps_disk_use() {
+        let dir = std::env::temp_dir().join(format!("quickpath_log_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let path = dir.join(DEBUG_LOG_FILE_NAME);
+        std::fs::write(&path, b"current-content").expect("写入当前日志");
+        std::fs::write(log_backup_path(&path), b"stale-backup").expect("写入旧备份");
+
+        rotate_log(&path);
+
+        assert!(!path.exists(), "轮换后当前文件必须已移走");
+        assert_eq!(
+            std::fs::read(log_backup_path(&path)).expect("备份必须存在"),
+            b"current-content",
+            "备份必须是刚轮换下来的内容（旧备份被覆盖）"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
