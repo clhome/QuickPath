@@ -1,7 +1,3 @@
-use super::dopus::get_dopus_folders;
-use super::explorer::get_explorer_folders;
-use super::totalcmd::get_totalcmd_folders;
-use super::xyplorer::get_xyplorer_folders;
 use crate::rules::AppConfig;
 use std::collections::HashSet;
 use std::path::Path;
@@ -59,13 +55,10 @@ impl WindowTracker {
             }
         }
 
-        // 3. 其他第三方文件管理器（DOpus / TotalCmd / XYplorer）。
-        //
-        // 报告 P1-02：优先取后台 scanner 已扫描的缓存（零预算、绝不阻塞）；
-        // 仅在缓存完全未命中时才做一次有界的同步探测（且受 ipc 失败冷却保护，
-        // 挂起的管理器不会每次都被重新白等）。调用方（对话框链路）在此前已调用过
-        // `get_all_candidates`，它刚触发过一轮后台扫描，因此缓存未命中是少数情况。
+        // 3. 资源管理器（含 Win11 标签页）与第三方管理器：读取后台 scanner 的
+        //    零预算快照（绝不阻塞）。宿主消息线程不再做任何跨进程同步探测。
         for candidate in super::scanner::scan_within(
+            config.enable_win11_tabs,
             config.enable_dopus,
             config.enable_totalcmd,
             config.enable_xyplorer,
@@ -76,12 +69,6 @@ impl WindowTracker {
                 self.last_manager_time = Some(Instant::now());
                 return Some(candidate.path);
             }
-        }
-
-        if let Some(folder) = probe_active_folder(config) {
-            self.last_manager_path = Some(folder.clone());
-            self.last_manager_time = Some(Instant::now());
-            return Some(folder);
         }
 
         // 4. 回退策略：使用最后一次访问的历史记录路径 (Last Used Folder)
@@ -101,60 +88,33 @@ impl WindowTracker {
         None
     }
 
-    /// 收集所有候选路径（包含所有打开的窗口/Tab、历史记录、收藏夹与系统常用，带 1500ms 短期防抖缓存）
+    /// 收集所有候选路径（包括资源管理器与第三方管理器的窗口/Tab、历史记录、收藏夹与系统常用）。
+    ///
+    /// **P1-02 关键约束**：本函数运行在宿主消息线程上，因此**只做零等待读取**——
+    /// 资源管理器与第三方管理器候选全部来自后台 `scanner` 的最近一次快照
+    /// （`scan_within(..., Duration::ZERO)` 会顺带请求下一轮后台扫描，但绝不等待）。
     pub fn get_all_candidates(&mut self, config: &AppConfig) -> Vec<FolderCandidate> {
-        // 短期防抖：1500ms 内且缓存非空，直接极速返回缓存，杜绝主线程重复并发跨进程枚举
-        if let Some(last_time) = self.last_candidates_time {
-            if last_time.elapsed().as_millis() < 1500 && !self.cached_candidates.is_empty() {
-                return self.cached_candidates.clone();
-            }
-        }
-
         let mut list = Vec::new();
         let mut seen = HashSet::new();
 
-        // 1. 扫描 Windows 资源管理器 (含 Win11 标签页)
-        if config.enable_win11_tabs {
-            for f in get_explorer_folders() {
-                let norm = normalize_path(&f.path);
-                if seen.insert(norm.to_lowercase()) {
-                    list.push(FolderCandidate {
-                        path: norm,
-                        title: f.title,
-                        source: "资源管理器".to_string(),
-                        is_active: f.is_active,
-                    });
-                }
-            }
-        }
-
-        // 2~4. Directory Opus / Total Commander / XYplorer：
-        // 跨进程扫描移到后台 worker（有界 IPC + 失败冷却 + 结果缓存），
-        // 宿主消息线程只做“有预算的等待”：正常情况拿到最新结果，
-        // 管理器挂起时最多等一个预算就用缓存继续（报告 P-03）。
-        if config.enable_dopus || config.enable_totalcmd || config.enable_xyplorer {
-            let budget = if super::scanner::has_cached_result() {
-                super::scanner::DEFAULT_BUDGET
-            } else {
-                super::scanner::FIRST_SCAN_BUDGET
+        // 1~4. 资源管理器（含 Win11 标签页）与第三方管理器：一次性读取后台快照。
+        //      缓存可能来自上一次扫描，因此当前配置已关闭的来源一律过滤掉。
+        for candidate in super::scanner::scan_within(
+            config.enable_win11_tabs,
+            config.enable_dopus,
+            config.enable_totalcmd,
+            config.enable_xyplorer,
+            std::time::Duration::ZERO,
+        ) {
+            let enabled = match candidate.source.as_str() {
+                "资源管理器" => config.enable_win11_tabs,
+                "Directory Opus" => config.enable_dopus,
+                "Total Commander" => config.enable_totalcmd,
+                "XYplorer" => config.enable_xyplorer,
+                _ => true,
             };
-
-            for candidate in super::scanner::scan_within(
-                config.enable_dopus,
-                config.enable_totalcmd,
-                config.enable_xyplorer,
-                budget,
-            ) {
-                // 缓存可能来自上一次扫描：当前配置已关闭的管理器一律不再展示
-                let enabled = match candidate.source.as_str() {
-                    "Directory Opus" => config.enable_dopus,
-                    "Total Commander" => config.enable_totalcmd,
-                    "XYplorer" => config.enable_xyplorer,
-                    _ => true,
-                };
-                if enabled && seen.insert(candidate.path.to_lowercase()) {
-                    list.push(candidate);
-                }
+            if enabled && seen.insert(candidate.path.to_lowercase()) {
+                list.push(candidate);
             }
         }
 
@@ -243,62 +203,6 @@ pub fn is_file_manager_class(class_name: &str) -> bool {
     )
 }
 
-/// 实时扫描当前活跃的第三方/资源管理器目录（需要“新鲜度”，故保持同步但全程有界）。
-///
-/// **调用约束（报告 P1-02）**：本函数含跨进程调用，**绝不能在宿主消息线程上前台事件里直接调**，
-/// 必须丢到后台线程执行，结果再经 `note_manager_folder` 写回。
-///
-/// **全局预算**：三个管理器共享 `SCAN_BUDGET`，
-/// 避免“多个管理器同时挂起时把等待时间串行叠加成秒级”的卡顿。
-pub fn probe_active_folder(config: &AppConfig) -> Option<String> {
-    const SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(900);
-    let started = Instant::now();
-    let over_budget = |started: &Instant| started.elapsed() > SCAN_BUDGET;
-
-    // 遍历顺序：DOpus -> TotalCmd -> XYplorer -> 资源管理器
-    if config.enable_dopus {
-        for f in get_dopus_folders() {
-            if f.is_active && is_fast_valid_folder(&f.path) {
-                return Some(normalize_path(&f.path));
-            }
-        }
-    }
-
-    if config.enable_totalcmd && !over_budget(&started) {
-        for f in get_totalcmd_folders() {
-            if f.is_active && is_fast_valid_folder(&f.path) {
-                return Some(normalize_path(&f.path));
-            }
-        }
-    }
-
-    if config.enable_xyplorer && !over_budget(&started) {
-        for f in get_xyplorer_folders() {
-            if f.is_active && is_fast_valid_folder(&f.path) {
-                return Some(normalize_path(&f.path));
-            }
-        }
-    }
-
-    if config.enable_win11_tabs {
-        let expls = get_explorer_folders();
-        // 1. 查找明确标记为 active 的
-        for f in &expls {
-            if f.is_active && is_fast_valid_folder(&f.path) {
-                return Some(normalize_path(&f.path));
-            }
-        }
-        // 2. 否则直接取第一个打开的资源管理器
-        if let Some(first) = expls.first() {
-            if is_fast_valid_folder(&first.path) {
-                return Some(normalize_path(&first.path));
-            }
-        }
-    }
-
-    None
-}
-
 /// 快速校验目录路径有效性（网络 UNC 路径零 I/O 阻塞，本地盘符免除热路径阻塞）
 pub fn is_fast_valid_folder(path: &str) -> bool {
     let trimmed = path.trim();
@@ -330,4 +234,57 @@ fn get_folder_name(path: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// P1-02：即使来源已开启，宿主消息线程侧收集候选也必须零等待返回
+    /// （首轮扫描在后台 worker 里进行，绝不阻塞调用线程）。
+    ///
+    /// 只开启资源管理器来源：第三方来源会触发真实 IPC / 剪贴板操作，
+    /// 不宜在并发单测中引入额外副作用。
+    #[test]
+    fn test_get_all_candidates_is_zero_wait_even_when_source_enabled() {
+        let mut tracker = WindowTracker::new();
+        let config = AppConfig {
+            enable_win11_tabs: true,
+            enable_dopus: false,
+            enable_totalcmd: false,
+            enable_xyplorer: false,
+            ..AppConfig::default()
+        };
+
+        let start = Instant::now();
+        let _ = tracker.get_all_candidates(&config);
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "候选收集必须在宿主线程零等待返回，实际 {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// P1-02：自动秒切目标解析同样不得在宿主线程做同步跨进程等待。
+    #[test]
+    fn test_get_auto_switch_target_is_zero_wait() {
+        let mut tracker = WindowTracker::new();
+        // 只开启资源管理器：关闭极速直连路径，强制走“读取后台快照”的分支
+        let config = AppConfig {
+            enable_win11_tabs: true,
+            enable_dopus: false,
+            enable_totalcmd: false,
+            enable_xyplorer: false,
+            ..AppConfig::default()
+        };
+
+        let start = Instant::now();
+        let _ = tracker.get_auto_switch_target(&config);
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "目标解析不得阻塞宿主线程，实际 {:?}",
+            start.elapsed()
+        );
+    }
 }

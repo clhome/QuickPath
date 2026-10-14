@@ -1403,6 +1403,58 @@
 2. **COM worker 重建上限监控**：`worker_rebuilds` 有埋点但无上限/告警阈值；被放弃的 STA 线程不可取消。
 3. 沿用阶段六十九遗留：对话框链路有界同步兜底、`coordinator.rs` 计数口径、发布工程第三批、真机验收矩阵。
 
+---
+
+## 阶段七十一：审计报告 v1.2.2 剩余项收口（AppState / COM 重建上限 / 对话框链路后台化 / 发布工程）
+
+> **范围**：一次性推进剩余全部可代码化项。真机验收矩阵与 Authenticode 签名因需真机/证书，仅做可自动化的部分并标注。
+
+- [x] **71.1 标签计数口径统一（P1-01 同族）**
+  - [x] `com.rs` 删除“失败按 0”的 `get_tabs_count_for_hwnd`，只保留 `get_tabs_count_for_hwnd_checked -> Option<usize>`（超时=None，绝不折算 0）
+  - [x] `coordinator.rs` 合并链路的 2 处基线查询（`duplicate_tab`、Tab 合并）改用 checked 版本；未知基线用 `usize::MAX` 禁用“计数增长即成功”，交给内建 `navigate_latest` 兜底——修掉了“基线未知时把宿主机有标签当新标签导航”的真实缺陷
+- [x] **71.2 COM worker 重建上限监控（报告第二批）**
+  - [x] 新增 `MAX_REBUILDS_ALERT`，累计重建达到阈值倍数输出 `COM_WORKER_ALERT`（含 rebuild 总数、超时率、P50/P95/P99）
+  - [x] `COM_CIRCUIT_BREAKER` 日志补上 `rebuild_total`
+  - [x] 新增单测：重建计数必须严格递增累计（阈值判断才成立）
+- [x] **71.3 AppState 收窄为宿主消息线程独占（报告第二批）**
+  - [x] 删除 `static MAIN_APP_STATE: AtomicPtr<AppState>`，改为 `thread_local! { APP_STATE: Cell<*mut AppState> }` + `state_mut()`
+  - [x] 非宿主线程读到的恒为 null（返回 None），从运行时层面阻止跨线程误用；其余线程只能 `PostMessageW` 投递不可变数据
+  - [x] 13 处访问点全部收拢到 `state_mut()`，`unsafe` 裸解引用从散落 13 处收敛为 1 处（带 SAFETY 注释）
+- [x] **71.4 对话框链路整体后台化（P1-02 硬指标）**
+  - [x] `scanner` 扩展为同时扫描资源管理器候选（新增 `enable_explorer`），与第三方共用同一后台 worker
+  - [x] `WindowTracker::get_all_candidates` 改为**零等待**：只读后台快照 + 历史/收藏/系统目录；删除 1500ms 防抖与 120/400ms 有界等待
+  - [x] `get_auto_switch_target` 的第三方分支同样改为零等待快照读取；**删除** `probe_active_folder`（宿主线程不再有任何跨进程同步探测）
+  - [x] 新增 `WM_QUICKPATH_CANDIDATES_REFRESH`：冷启动首轮扫描未就绪时先展示历史/收藏/系统目录，扫描完成后由后台线程投递一次重绘（每对话框仅一次）
+  - [x] `main.rs` 前台事件的后台 worker 改为统一调用 `scanner::scan_within`（一次扫描同时刷新候选快照与 tracker），消除重复跨进程探测
+  - [x] 新增 2 个单测：开启来源时 `get_all_candidates` / `get_auto_switch_target` 必须 < 200ms 返回（证明宿主线程零等待）
+- [x] **71.5 `build.rs` 生成物全部移入 `OUT_DIR`（P2-03）**
+  - [x] 删除对 `app.manifest` / `quickpath.rc` 的源码树写入；模板只读，生成物（补版本号的 manifest、rc、logo.ico 副本）全部写 `OUT_DIR`，rc 内引用全部为同目录相对路径
+  - [x] 资源编译失败/无可用编译器时 **panic 终止构建**（不再 `let _ =` 静默产出无版本信息/无图标的 exe）
+  - [x] 删除已无用的源文件 `quickpath.rc`（完全由构建生成）
+  - [x] 实测：`cargo build --release` 后 `git status` 不再出现 `app.manifest` 改动；exe 版本信息仍为 `1.2.2.0` + 公司名（资源嵌入正常）
+- [x] **71.6 发布链加固（P2-02）**
+  - [x] 所有第三方 Action 锁定完整 commit SHA（已多方核实）：`actions/checkout@11bd719…`(v4.2.2)、`Swatinem/rust-cache@f0deed1…`(v2.7.7)、`softprops/action-gh-release@c95fe14…`(v2.2.1)
+  - [x] 删除跟随 `stable` 浮动的工具链 Action，改为 `rustup toolchain install 1.94.1 --component clippy,rustfmt` 显式锁版本
+  - [x] 新增“发布通道判定”：标签含 `-rc/-alpha/-beta/-pre` 自动标为 prerelease，不再无条件发稳定版
+  - [x] Job 级 `environment: release`（稳定发布可配审批/保护规则）
+  - [x] 新增 fmt / clippy / cargo-audit 三步门禁，当前为 `continue-on-error: true` 并在 YAML 中写明“完成全仓格式化与告警治理后必须去掉 continue-on-error”（见下“遗留”）
+  - [x] Authenticode 签名以注释形式给出完整可启用片段（需 `WINDOWS_CERT_PFX_BASE64` / `WINDOWS_CERT_PASSWORD` secrets）
+
+### 门禁与自证（本轮）
+
+- `cargo test --all-targets`：**99 项全绿**（第二批后 96 → 99，新增 3 项）
+- `cargo clippy --all-targets`：**179 条**；对比已提交基线（`4769bd3`）**零新增且净减 2 条**（新引入的 3 处告警已逐一修掉：`% 2 == 0` → `is_multiple_of`、多余 `as usize`、测试字段赋值 → 结构体初始化）
+- `cargo build --release`：通过；exe 资源版本 `1.2.2.0` 与公司名正常嵌入
+- `git diff --check`：干净；构建后源码树无生成物污染
+- 基线比对改用单向只读 `git worktree`（不再用 `git stash`，避免旧 `build.rs` 重新生成 `quickpath.rc` 污染工作区）
+
+### 本轮遗留
+
+1. **fmt / clippy / audit 门禁尚未阻塞化**：仓库仍有历史 rustfmt 漂移与 179 条 clippy 告警，需先做“全仓 `cargo fmt` + 告警治理”，才能去掉 `continue-on-error` 并上 `-D warnings`。
+2. **Authenticode 签名未启用**：需代码签名证书与 secrets，YAML 中已备好可直接取消注释的步骤。
+3. **报告 §11 Windows 11 真机验收矩阵未执行**：WPS 各阶段 Alt+Tab 零全局输入、Win+E 连按 100 次、挂起 DOpus/TotalCMD/XYplorer 时宿主消息 P99 < 50ms、钩子构造回滚、启停标签模块 1000 次。
+4. 已在代码注释/文档中标注：`state_mut()` 返回 `&'static mut`（与旧实现同为单线程独占，但重入仍非类型安全）；COM 被放弃的 STA 线程不可取消。
+
 
 
 

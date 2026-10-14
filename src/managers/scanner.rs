@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::dopus::get_dopus_folders;
+use super::explorer::get_explorer_folders;
 use super::totalcmd::get_totalcmd_folders;
 use super::tracker::{normalize_path, FolderCandidate};
 use super::xyplorer::get_xyplorer_folders;
@@ -28,6 +29,7 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_millis(120);
 pub const FIRST_SCAN_BUDGET: Duration = Duration::from_millis(400);
 
 struct ScanRequest {
+    enable_explorer: bool,
     enable_dopus: bool,
     enable_totalcmd: bool,
     enable_xyplorer: bool,
@@ -80,7 +82,7 @@ fn worker_loop(scanner: &'static Scanner) -> ! {    loop {
             guard.take().expect("循环条件保证非空")
         };
 
-        let candidates = scan_third_party(&request);
+        let candidates = scan_sources(&request);
 
         {
             let mut result = lock(&scanner.result);
@@ -102,12 +104,13 @@ pub fn has_cached_result() -> bool {
 ///
 /// 超预算则退回上一次成功结果（可能为空列表）——这正是“绝不阻塞调用线程”的保证。
 pub fn scan_within(
+    enable_explorer: bool,
     enable_dopus: bool,
     enable_totalcmd: bool,
     enable_xyplorer: bool,
     budget: Duration,
 ) -> Vec<FolderCandidate> {
-    if !(enable_dopus || enable_totalcmd || enable_xyplorer) {
+    if !(enable_explorer || enable_dopus || enable_totalcmd || enable_xyplorer) {
         return Vec::new();
     }
 
@@ -117,6 +120,7 @@ pub fn scan_within(
     {
         let mut request = lock(&scanner.request);
         *request = Some(ScanRequest {
+            enable_explorer,
             enable_dopus,
             enable_totalcmd,
             enable_xyplorer,
@@ -155,9 +159,25 @@ pub fn scan_within(
         .unwrap_or_default()
 }
 
-fn scan_third_party(request: &ScanRequest) -> Vec<FolderCandidate> {
+fn scan_sources(request: &ScanRequest) -> Vec<FolderCandidate> {
     let mut list = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+
+    // 资源管理器（含 Win11 标签页）：与第三方共用同一个后台 worker，
+    // 这样宿主消息线程读取候选时永远不需要做任何跨进程/COM 等待。
+    if request.enable_explorer {
+        for folder in get_explorer_folders() {
+            let normalized = normalize_path(&folder.path);
+            if seen.insert(normalized.to_lowercase()) {
+                list.push(FolderCandidate {
+                    path: normalized,
+                    title: folder.title,
+                    source: "资源管理器".to_string(),
+                    is_active: folder.is_active,
+                });
+            }
+        }
+    }
 
     if request.enable_dopus {
         for folder in get_dopus_folders() {
@@ -211,7 +231,7 @@ mod tests {
     #[test]
     fn test_disabled_managers_never_scan() {
         let start = Instant::now();
-        let list = scan_within(false, false, false, Duration::from_millis(500));
+        let list = scan_within(false, false, false, false, Duration::from_millis(500));
         assert!(list.is_empty());
         assert!(
             start.elapsed() < Duration::from_millis(50),
@@ -223,7 +243,7 @@ mod tests {
     fn test_zero_budget_returns_without_blocking() {
         // 预算为 0：无论 worker 是否完成，都必须在毫秒级返回（绝不阻塞调用线程）
         let start = Instant::now();
-        let _ = scan_within(true, true, true, Duration::ZERO);
+        let _ = scan_within(true, true, true, true, Duration::ZERO);
         assert!(
             start.elapsed() < Duration::from_millis(60),
             "零预算必须立即返回，实际 {:?}",

@@ -1,11 +1,15 @@
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
-    println!("cargo:rerun-if-changed=quickpath.rc");
     println!("cargo:rerun-if-changed=app.manifest");
     println!("cargo:rerun-if-changed=assets/logo.ico");
+
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("缺少 OUT_DIR 环境变量"));
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("缺少 CARGO_MANIFEST_DIR 环境变量"));
 
     // 1. 动态获取 Cargo.toml 中的版本号并规范为四段式
     let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.0.0".to_string());
@@ -16,37 +20,44 @@ fn main() {
     let comma_version = parts[..4].join(",");
     let dot_version = parts[..4].join(".");
 
-    // 2. 同步 app.manifest 中的 assemblyIdentity 版本号
-    if let Ok(manifest_content) = fs::read_to_string("app.manifest") {
-        let mut new_lines = Vec::new();
-        let mut modified = false;
-        for line in manifest_content.lines() {
+    // 2. 把清单模板中的 assemblyIdentity 版本号改为当前版本，输出到 OUT_DIR。
+    //
+    // 审计报告 P2-03：构建过程**绝不改写源码树**——旧实现直接 `fs::write("app.manifest")`
+    // 会弄脏工作区、在只读源码 / 并行工作树 / 打包环境下失败，并可能把旧资源编进产物。
+    // 现在源目录只保留模板，所有生成物一律写入 OUT_DIR。
+    let manifest_template = fs::read_to_string(manifest_dir.join("app.manifest"))
+        .expect("读取 app.manifest 模板失败");
+    let patched_manifest: String = manifest_template
+        .lines()
+        .map(|line| {
             if line.trim_start().starts_with("version=") {
-                let leading_spaces: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-                let target_line = format!("{}version=\"{}\"", leading_spaces, dot_version);
-                if line != target_line {
-                    new_lines.push(target_line);
-                    modified = true;
-                } else {
-                    new_lines.push(line.to_string());
-                }
+                let leading_spaces: String =
+                    line.chars().take_while(|c| c.is_whitespace()).collect();
+                format!("{}version=\"{}\"", leading_spaces, dot_version)
             } else {
-                new_lines.push(line.to_string());
+                line.to_string()
             }
-        }
-        if modified {
-            let new_content = new_lines.join("\n") + "\n";
-            let _ = fs::write("app.manifest", new_content);
-        }
-    }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(out_dir.join("app.manifest"), patched_manifest).expect("写出清单到 OUT_DIR 失败");
 
-    // 3. 动态生成包含中英双语与完整软件元数据的 quickpath.rc
+    // 3. 图标也复制到 OUT_DIR，使资源脚本里的所有引用都是“同目录相对路径”，
+    //    避免在 RC 字符串里写含反斜杠的 Windows 绝对路径（转义易错、跨环境不可移植）。
+    fs::copy(
+        manifest_dir.join("assets/logo.ico"),
+        out_dir.join("logo.ico"),
+    )
+    .expect("复制 logo.ico 到 OUT_DIR 失败");
+
+    // 4. 动态生成包含中英双语与完整软件元数据的资源脚本（写入 OUT_DIR）
     let rc_content = format!(
 r#"#pragma code_page(65001)
 
 #define RT_MANIFEST 24
 1 RT_MANIFEST "app.manifest"
-1 ICON "assets/logo.ico"
+1 ICON "logo.ico"
 
 1 VERSIONINFO
 FILEVERSION {comma_version}
@@ -96,16 +107,18 @@ END
 "#
     );
 
-    // 比对现有内容，避免无谓覆写触发构建循环
-    let should_update_rc = match fs::read_to_string("quickpath.rc") {
-        Ok(existing) => existing != rc_content,
-        Err(_) => true,
-    };
+    let rc_path = out_dir.join("quickpath.rc");
+    fs::write(&rc_path, rc_content).expect("写出资源脚本到 OUT_DIR 失败");
 
-    if should_update_rc {
-        let _ = fs::write("quickpath.rc", &rc_content);
+    // 5. 编译资源。失败必须让构建失败，绝不静默忽略（旧实现 `let _ =` 会产出无版本信息/无图标的 exe）。
+    use embed_resource::CompilationResult;
+    match embed_resource::compile(&rc_path, embed_resource::NONE) {
+        CompilationResult::Ok | CompilationResult::NotWindows => {}
+        CompilationResult::NotAttempted(msg) | CompilationResult::Failed(msg) => {
+            panic!(
+                "编译 Windows 资源失败（版本信息/图标将缺失），请检查资源编译器: {}",
+                msg
+            );
+        }
     }
-
-    let _ = embed_resource::compile("quickpath.rc", embed_resource::NONE);
 }
-

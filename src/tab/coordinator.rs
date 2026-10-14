@@ -113,8 +113,17 @@ impl TabCoordinator {
         // 2. 启动 Bypass 去重保护，绝不被去重机制误吞
         self.bypass_deduplication.store(true, Ordering::SeqCst);
 
-        // 3. 统计当前窗口既有 Tab 数量
-        let initial_count = self.com_manager.get_tabs_count_for_hwnd(explorer_hwnd);
+        // 3. 统计当前窗口既有 Tab 数量。
+        //
+        // 基线必须“确实读到”：`get_all_tabs` 在 STA 超时时退化为空列表，
+        // 若按 0 处理，`try_navigate_new_tab` 的 `count_before == 0` 分支会
+        // 把宿主机有标签误认为“新标签已出现”并导航错误对象（报告 P1-01 同族）。
+        // 未知基线用 `usize::MAX` 表示“永不能用计数增长确认”，
+        // 交给 `wait_and_navigate_new_tab` 内建的 `navigate_latest` 兜底。
+        let initial_count = self
+            .com_manager
+            .get_tabs_count_for_hwnd_checked(explorer_hwnd)
+            .unwrap_or(usize::MAX);
 
         // 4. 激活宿主窗口并触发新建 Tab
         unsafe {
@@ -434,8 +443,12 @@ impl TabCoordinator {
                         merged_success =
                             Self::activate_tab_in_host(&com, host_h, folder_path, tab_idx);
                     } else if is_physical_dir_path(folder_path) {
-                        // 宿主没有该 Tab 或未开启去重，在宿主中新建 Tab 并精准导航
-                        let count_before = com.get_tabs_count_for_hwnd(host_h);
+                        // 宿主没有该 Tab 或未开启去重，在宿主中新建 Tab 并精准导航。
+                        // 基线未知（查询超时）时用 `usize::MAX` 禁用“计数增长即成功”的判据，
+                        // 避免把宿主原有标签当成新标签导航（报告 P1-01 同族）。
+                        let count_before = com
+                            .get_tabs_count_for_hwnd_checked(host_h)
+                            .unwrap_or(usize::MAX);
                         if trigger_new_tab(host_h) {
                             merged_success = com.wait_and_navigate_new_tab(host_h, count_before, folder_path);
                         }

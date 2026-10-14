@@ -103,6 +103,8 @@ struct StaWorker {
 
 /// 连续超时阈值：达到即认定该 STA worker 已卡死并重建
 const MAX_CONSECUTIVE_TIMEOUTS: u64 = 2;
+/// 累计重建告警阈值：每到达这个倍数就输出一条显式告警（报告第二批“重建上限监控”）
+const MAX_REBUILDS_ALERT: u64 = 5;
 /// 耗时样本环大小
 const LATENCY_SAMPLES: usize = 256;
 /// 每处理多少次请求输出一次埋点汇总
@@ -285,12 +287,26 @@ impl ShellComManager {
 
         self.stats.worker_rebuilds.fetch_add(1, Ordering::SeqCst);
         self.stats.consecutive_timeouts.store(0, Ordering::SeqCst);
+        let rebuilds = self.stats.worker_rebuilds.load(Ordering::SeqCst);
         crate::dialog::detector::log_debug(&format!(
-            "COM_CIRCUIT_BREAKER: 连续超时 {} 次，已重建 STA worker (gen={}) | {}",
+            "COM_CIRCUIT_BREAKER: 连续超时 {} 次，已重建 STA worker (gen={}, rebuild_total={}) | {}",
             MAX_CONSECUTIVE_TIMEOUTS,
             generation,
+            rebuilds,
             self.stats.snapshot().describe()
         ));
+
+        // 重建上限监控（报告第二批）：重建只是“恢复手段”，已开始的 COM 调用无法取消，
+        // 被放弃的 STA 线程可能永久泄漏。因此累计重建达到阈值时给出显式告警，
+        // 便于现场区分“偶发卡顿”与“某次调用已把线程钉死”。
+        if rebuilds >= MAX_REBUILDS_ALERT && rebuilds.is_multiple_of(MAX_REBUILDS_ALERT) {
+            crate::dialog::detector::log_debug(&format!(
+                "COM_WORKER_ALERT: STA worker 累计重建 {} 次（每 {} 次告警一次），可能存在不可取消的 COM 调用，被放弃的线程会泄漏 | {}",
+                rebuilds,
+                MAX_REBUILDS_ALERT,
+                self.stats.snapshot().describe()
+            ));
+        }
         guard.tx.clone()
     }
 
@@ -466,11 +482,6 @@ impl ShellComManager {
         )?;
         let raw = hwnd.0 as usize;
         Some(tabs.into_iter().filter(|t| t.hwnd_raw == raw).count())
-    }
-
-    /// 获取指定窗口下当前有效 Tab 的数量（兼容旧调用：查询失败时按 0 处理）
-    pub fn get_tabs_count_for_hwnd(&self, hwnd: HWND) -> usize {
-        self.get_tabs_count_for_hwnd_checked(hwnd).unwrap_or(0)
     }
 
     /// 轮询等待新 Tab 在宿主窗口中就绪并执行重定向导航。
@@ -1083,6 +1094,22 @@ mod tests {
         assert_eq!(snapshot.queue_depth, 0, "请求结束后队列深度必须归零");
         // 重建后连续超时计数已清零
         assert_eq!(manager.stats().timeouts, MAX_CONSECUTIVE_TIMEOUTS);
+    }
+
+    /// 重建计数必须持续累计，COM_WORKER_ALERT 阈值才有意义（报告第二批）
+    #[test]
+    fn test_worker_rebuild_counter_accumulates_for_alerting() {
+        let (worker, _rx) = silent_worker();
+        let manager = ShellComManager::new_with_worker(worker);
+
+        let mut last = 0u64;
+        for _ in 0..MAX_REBUILDS_ALERT {
+            let _ = manager.rebuild_worker();
+            let now = manager.stats().worker_rebuilds;
+            assert_eq!(now, last + 1, "每次重建必须使计数严格递增");
+            last = now;
+        }
+        assert_eq!(manager.stats().worker_rebuilds, MAX_REBUILDS_ALERT);
     }
 
     #[test]

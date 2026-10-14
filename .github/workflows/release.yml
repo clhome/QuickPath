@@ -12,50 +12,102 @@ jobs:
   build-and-release:
     name: Build & Release for Windows
     runs-on: windows-latest
+    # 稳定版发布需在仓库 Settings → Environments 中为 release 配置审批人/保护规则；
+    # 预发布（-rc/-alpha/-beta）不发放稳定产物。
+    environment: release
 
     steps:
+      # 所有第三方 Action 一律锁定到完整 commit SHA（报告 P2-02），
+      # 避免上游 tag 被移动/劫持后 CI 执行到非预期代码。
       - name: 检出代码
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - name: 安装固定版本 Rust 工具链
+        shell: pwsh
+        # 不使用跟随 stable 浮动的工具链 Action：显式锁死 Rust 版本与组件，
+        # 保证同一 tag 在任何时间重跑都得到一致工具链。
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.94.1
+          rustc -V
+          cargo -V
 
       - name: 启用 Rust 编译缓存
-        uses: Swatinem/rust-cache@v2.7.7
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
 
       - name: 质量门禁：执行单元与集成测试
         run: cargo test --all-targets
 
+      # ── 以下三条门禁当前为“非阻塞”（continue-on-error）─────────────────────────
+      # 原因（报告 §10 第三批第 2 条）：仓库仍有历史 rustfmt 漂移与 181 条 clippy 告警，
+      # 直接 `-D warnings` 会让所有发布失败。待完成“全仓格式化 + 告警治理”后，
+      # 必须删除 continue-on-error 使其成为真正的阻塞门禁。
+      - name: 门禁（待强化）：格式检查
+        continue-on-error: true
+        run: cargo fmt --check
+
+      - name: 门禁（待强化）：Clippy
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: 门禁（待强化）：依赖安全审计
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
       - name: 编译 Release 版本
         run: cargo build --release
+
+      - name: 判定发布通道（含 -rc/-alpha/-beta/-pre 的标签为预发布）
+        id: channel
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -match '(?i)(-rc|-alpha|-beta|-pre)') {
+            "prerelease=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "prerelease=false" >> $env:GITHUB_OUTPUT
+          }
 
       - name: 整理打包产物与生成 SHA-256 清单
         shell: pwsh
         run: |
           $TAG_NAME = "${{ github.ref_name }}"
           New-Item -ItemType Directory -Force -Path "dist"
-          
+
           # 复制并生成规范命名的独立 exe
           Copy-Item "target/release/quickpath.exe" "dist/QuickPath-$TAG_NAME-x64.exe"
           Copy-Item "target/release/quickpath.exe" "dist/QuickPath.exe"
-          
+
           # 生成便携压缩包
           Compress-Archive -Path "dist/QuickPath.exe" -DestinationPath "dist/QuickPath-$TAG_NAME-windows-x64.zip"
-          
+
           # 生成严谨的 SHA-256 校验和清单
           Get-ChildItem -Path "dist" -File -Include "*.exe", "*.zip" | ForEach-Object {
               $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
               "$hash  $($_.Name)"
           } | Out-File -FilePath "dist/sha256sums.txt" -Encoding ascii
 
+      # ── Authenticode 代码签名（未启用）──────────────────────────────────────
+      # 报告 P2-02：同一工作流自生成的 sha256 清单只能证明“产物未被改动”，
+      # 不能证明发布者身份。启用前需准备代码签名证书并把口令放入
+      # secrets（如 WINDOWS_CERT_PFX_BASE64 / WINDOWS_CERT_PASSWORD），然后取消注释：
+      #
+      # - name: 对可执行文件签名
+      #   shell: pwsh
+      #   run: |
+      #     $pfx = "$env:RUNNER_TEMP\qp.pfx"
+      #     [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_PFX_BASE64 }}"))
+      #     & signtool.exe sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" dist\QuickPath.exe
+
       - name: 自动创建 GitHub Release 并上传产物
-        uses: softprops/action-gh-release@v2.2.1
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           name: "QuickPath ${{ github.ref_name }}"
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.channel.outputs.prerelease == 'true' }}
           generate_release_notes: true
           files: |
             dist/QuickPath-*.exe
