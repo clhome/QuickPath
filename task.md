@@ -1545,5 +1545,14 @@
 
 
 
+# 整改报告 `522488b`（`E:\下载\QuickPath_整改项报告_522488b.md`）修复轮（2026-10-14 起）
+
+**范围与纪律**：按报告 §2 P0-03、§3 P1（M-01 版本元数据 + 发布门禁）、§4.1 P2（owner ready 取消握手）逐项修复，并一并修复过程中发现的同族/共性问题。每项修复**严格一个 subagent + 一个独立 commit**；父 agent 对每项独立复跑门禁、grep 复核、变异复核，不采信 subagent 汇报。用户已确认的四项边界：① P2 只做 4.1，4.2/4.3 仅登记为后续事项；② 版本统一升到 **1.2.3** 并加 CI tag↔版本一致性检查；③ §5 真机清单由用户执行，本轮只交付自动化测试 + 可勾选清单；④ `cargo audit` 本机因 GitHub 不可达改用 OSV 兜底，**不得声称本机 audit 通过**。
+
+- t1（修复(P0-03): 剪贴板临时占用收口为统一事务 API，杜绝覆盖用户新复制内容）→ commit `18fb934`（5 文件 +1078/-99）。**根因**：`totalcmd.rs`/`xyplorer.rs` 手工拼装「快照 → 清空 → 请管理器写入 → 读回 → 恢复」，且**从未** `note_temporary_write`，`owned_seq/owned_text` 恒 `None` → `still_owned()` 直接放行恢复，用户在扫描期间复制的新内容被旧快照静默覆盖（数据完整性，唯一发布阻塞项）。**改动**：`src/win32/clipboard.rs` 新增统一事务 `ClipboardTransaction`（`begin` 快照 / `ensure_still_owned` 写前校验 / `write_owned_text` 登记自身写入的 sequence+精确文本 / `note_observed_owned_text` 登记管理器写入后的归属基准 / `restore_if_still_owned` 恢复前再校验 / `Drop` 兜底同源校验），结局恰好四态 `Restored`/`SkippedForeignChange`/`ReadFailed`/`RestoreFailed`；**归属判定严格按 `GetClipboardSequenceNumber`**（序列号变化即外部改写，不用「文本相等仍视为持有」的 fail-open 回退）；归属不可判定（序列号不可读/读回失败/剪贴板忙）一律**不恢复**；管理器**超时**时剪贴板仍是本事务临时写入 → 归属未变 → 照常归还用户原内容（不算覆盖）。为不漂移既有已验收语义，`ClipboardSnapshot` 用**独立字段** `strict_ownership`（默认 `false`）+ 独立方法 `note_temporary_write_strict` 承载严格模式，`ClipboardRestoreGuard`/`with_temporary_clipboard_text`/`uia.rs` 两处调用点行为零改动。两个 manager 迁移到**共享**事务化探测 `managers/clipboard_probe.rs::probe_panel_path`（生产代码；文件内 `#[cfg(test)]` 仅含源码扫描守卫），不再直接引用快照/守卫/清空/恢复中的任何一个。**新增 16 个测试**（145→161）：§2.5 六条用例 × TC/XY 两条链（12 个，经可注入 `request` 闭包驱动，无 sleep、不启动真实管理器）；事务单元 3 个（恢复失败结局、Drop 兜底恢复、Drop 检出外部改写不恢复）；守卫 1 个。**父 agent 独立复核**：fmt 干净；`cargo clean -p quickpath` 后 clippy `-D warnings` **0 告警**；`cargo test --all-targets` **161 通过 0 失败**；`cargo build --release` 通过；自跑 grep 确认无绕开事务 API 的调用点（manager 侧对 `win32::clipboard` 的唯一引用是 `ClipboardTransaction`）；逐行核验事务语义与两 manager 行为等价（消息/参数 2029/2030、`WM_COPYDATA` flag 4194305、500ms 超时、`any_timeout` break 时机、进程镜像核对、冷却、XY 去重、title 文案全未变）；**自查发现关键洞并确认已被正确处理**——若管理器超时路径仍无条件登记归属，则「超时 + 用户此刻复制」会把用户内容登记为「自己写的」从而在恢复时覆盖，实测 `probe_panel_path` 正确提前返回且不登记。**父 agent 变异复核**（比 subagent 更细）：只改事务层 `refresh_ownership` 恒 `Owned` → 仅 case1 红（2 失败）；再叠加禁用快照严格层 → **7 个用例红**（两链 case1/2/3 + `test_transaction_drop_skips_restore_after_foreign_change`），证明测试非空洞且为**双层防护**（事务层 + 快照严格层）。**诚实标注**：报告称变异 (a) 让 case1/2/3/5 红（其同时改两层），实测单点变异只钉住 case1/case5 → case2/case3 实际由第二层兜住，事务自身「恢复期 Lost 分支」未被单测单独钉住；因任意一层判 `Lost` 的结局都收敛到 `SkippedForeignChange`（保守安全），覆盖充分性不受影响，故不返工，仅记录。**环境陷阱（父 agent 踩到并修复）**：`core.autocrlf=true` 且仓库**无 `.gitattributes`**，导致 `git checkout -- <file>` 会把文件转成 CRLF（与仓库其余文件 `w/lf` 不一致，违反项目 LF 约定）；已用 `rm` + `git -c core.autocrlf=false checkout` 还原，md5 与变异前**逐字节一致**，5 个改动文件均为 `i/lf w/lf` + 无 BOM。**建议（未擅自改）**：新增 `* text=auto eol=lf` 的 `.gitattributes` 以永久消除该陷阱，因涉及全员仓库策略，留待用户裁决。
+
+
+
+
 
 
