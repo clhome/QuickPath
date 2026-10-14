@@ -268,6 +268,11 @@ fn main() {
         // 会失败并自然丢弃，不产生泄漏；退出路径不再依赖裸指针手动回收。
         drop(APP_STATE.with(|cell| cell.borrow_mut().take()));
 
+        // 审计报告 R-06：常驻程序退出时显式收尾剪贴板 owner 线程（
+        // `WM_CLOSE` → `WM_DESTROY` → `PostQuitMessage`，附有界 join），
+        // 不再依赖进程结束时的系统回收。
+        win32::clipboard::shutdown_clipboard_owner();
+
         CoUninitialize();
     }
 }

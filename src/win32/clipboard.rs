@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
-use std::sync::Once;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use windows::Win32::Foundation::{
-    ERROR_CLASS_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND,
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM,
+    WPARAM,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
@@ -16,8 +19,10 @@ use windows::Win32::System::Memory::{
     GHND, GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, MSG, RegisterClassW,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    GetWindowThreadProcessId, IsWindow, MSG, PostMessageW, PostQuitMessage, PostThreadMessageW,
+    RegisterClassW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT,
+    WNDCLASSW,
 };
 use windows::core::w;
 
@@ -140,22 +145,62 @@ fn open_clipboard_with_retry(hwnd: Option<HWND>, max_retries: u32) -> bool {
     false
 }
 
-/// 进程级剪贴板 owner 窗口句柄（懒创建，跨线程可用）
-static CLIPBOARD_OWNER: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
-static OWNER_INIT: Once = Once::new();
+/// 进程级剪贴板 owner 的拥有式状态：可关闭、可重建。
+///
+/// 审计报告 R-06：此前用 `Once` 一次性创建、`JoinHandle` 直接丢弃，owner 线程没有
+/// 显式退出协议，进程内无法「启动 → 停止 → 再启动」，只能依赖进程结束回收。
+/// 这里保存窗口句柄、线程 ID、世代号，以及退出确认通道与线程句柄。
+///
+/// `HWND` 本身不是 `Send`，无法直接放进跨线程共享的静态量；因此以 `usize` 保存原始
+/// 句柄值，使用前重建 `HWND`（`HWND` 只是不透明指针包装，重建无额外成本）。
+struct ClipboardOwnerHandle {
+    /// owner 窗口原始句柄值（`HWND` 的 `*mut c_void` 地址）
+    hwnd_raw: usize,
+    /// 创建该窗口的线程 ID，用于 `PostThreadMessageW(WM_QUIT)` 兜底
+    thread_id: u32,
+    /// 每次重建递增的世代号，仅用于诊断日志
+    generation: u64,
+    /// 线程退出确认通道：线程体返回前 `send(())`
+    done_rx: mpsc::Receiver<()>,
+    /// 线程句柄；`join` 前由 `Option` 取出，超时则丢弃（detach）
+    thread: Option<JoinHandle<()>>,
+}
+
+static OWNER: Mutex<Option<ClipboardOwnerHandle>> = Mutex::new(None);
+static OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// owner 线程退出确认的有界等待时长；超时即放弃 `join`（detach），绝不永久阻塞宿主线程。
+const OWNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 unsafe extern "system" fn clipboard_owner_proc(
     hwnd: HWND,
     msg: u32,
-    wparam: windows::Win32::Foundation::WPARAM,
-    lparam: windows::Win32::Foundation::LPARAM,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    // owner 窗口永不可见、不需要处理任何业务消息（本模块不使用延迟渲染），
-    // 仅作为 `OpenClipboard` 的合法 owner 存在，交由默认窗口过程处理即可。
-    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    match msg {
+        // 审计报告 R-06：显式退出协议。收到 `WM_CLOSE` 时销毁窗口，`DestroyWindow`
+        // 会在同一线程上同步派发 `WM_DESTROY`。
+        WM_CLOSE => {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        // `WM_DESTROY` 时投递 `WM_QUIT`，使 `GetMessageW` 返回 0、消息泵自然结束。
+        WM_DESTROY => {
+            unsafe {
+                PostQuitMessage(0);
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        // owner 窗口永不可见、不需要处理任何业务消息（本模块不使用延迟渲染），
+        // 其余消息交由默认窗口过程处理。
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
 }
 
-/// 懒创建并返回进程唯一的隐藏 owner 窗口句柄。
+/// 懒创建并返回进程唯一的隐藏 owner 窗口句柄；已有存活 owner 时复用。
 ///
 /// **审计报告 P0-01**：Win32 明确约定「以 `NULL` 打开剪贴板后 `EmptyClipboard` 会把
 /// owner 置为 `NULL`，从而导致 `SetClipboardData` 失败」。因此所有会调用
@@ -167,97 +212,253 @@ fn clipboard_owner() -> Option<HWND> {
         return None;
     }
 
-    OWNER_INIT.call_once(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<usize>();
-        let spawned = thread::Builder::new()
-            .name("QuickPath-ClipboardOwner".to_string())
-            .spawn(move || unsafe {
-                let class_name = w!("QuickPath_ClipboardOwner_Class");
+    // 快路径：已有 owner 时复用。仅在锁内读取原始句柄值，`IsWindow` 校验放到锁外，
+    // 避免在使用 owner 期间长时间持有 `Mutex`。
+    let existing_raw = {
+        let guard = OWNER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.as_ref().map(|owner| owner.hwnd_raw)
+    };
+    if let Some(raw) = existing_raw
+        && raw != 0
+    {
+        let hwnd = HWND(raw as *mut _);
+        if unsafe { IsWindow(Some(hwnd)).as_bool() } {
+            return Some(hwnd);
+        }
+    }
 
-                // 审计报告 S-02：`GetModuleHandleW(None)` 失败时绝不能静默退化为 NULL 实例。
-                // 拿不到模块实例就无法正确注册/查找窗口类，此处显式判定失败并让
-                // `clipboard_owner()` 返回 None（保持写路径 fail-closed），同时留下诊断日志。
-                let Ok(module) = GetModuleHandleW(None) else {
+    create_clipboard_owner()
+}
+
+/// 创建 owner 线程与隐藏窗口，并把拥有式状态写入 `OWNER`。
+///
+/// 创建期间持有 `OWNER` 锁以串行化并发创建（对齐原 `Once::call_once` 语义：其他调用方
+/// 在创建完成前等待）。owner 窗口过程不会回调本模块，因此持锁创建不存在重入死锁。
+fn create_clipboard_owner() -> Option<HWND> {
+    let mut guard = OWNER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // 双重检查：等待锁期间可能已由其他线程创建。
+    if let Some(existing) = guard.as_ref()
+        && existing.hwnd_raw != 0
+    {
+        let hwnd = HWND(existing.hwnd_raw as *mut _);
+        if unsafe { IsWindow(Some(hwnd)).as_bool() } {
+            return Some(hwnd);
+        }
+    }
+    // 陈旧句柄：清空后重建（正常退出路径已在 `shutdown_clipboard_owner` 中清空）。
+    *guard = None;
+
+    let generation = OWNER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
+    let (ready_tx, ready_rx) = mpsc::channel::<usize>();
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+
+    let spawned = thread::Builder::new()
+        .name("QuickPath-ClipboardOwner".to_string())
+        .spawn(move || unsafe {
+            let class_name = w!("QuickPath_ClipboardOwner_Class");
+
+            // 审计报告 S-02：`GetModuleHandleW(None)` 失败时绝不能静默退化为 NULL 实例。
+            // 拿不到模块实例就无法正确注册/查找窗口类，此处显式判定失败并让
+            // `clipboard_owner()` 返回 None（保持写路径 fail-closed），同时留下诊断日志。
+            let Ok(module) = GetModuleHandleW(None) else {
+                crate::dialog::detector::log_debug(&format!(
+                    "CLIPBOARD_OWNER: GetModuleHandleW 失败，err={}，无法注册 owner 窗口类",
+                    GetLastError().0
+                ));
+                let _ = ready_tx.send(0);
+                let _ = done_tx.send(());
+                return;
+            };
+            // 注册与创建必须使用同一个 hinstance（审计报告 S-02）。
+            let hinstance = HINSTANCE(module.0);
+
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(clipboard_owner_proc),
+                hInstance: hinstance,
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+
+            // 审计报告 S-02：显式处理 `RegisterClassW` 返回值（0 表示失败）。
+            // 本函数可能被重复调用，仅当 `GetLastError == ERROR_CLASS_ALREADY_EXISTS`
+            // 时才算「已有可用类」；其他错误一律视为失败并中止，不得继续 CreateWindowExW。
+            if RegisterClassW(&wc) == 0 {
+                let err = GetLastError();
+                if err != ERROR_CLASS_ALREADY_EXISTS {
                     crate::dialog::detector::log_debug(&format!(
-                        "CLIPBOARD_OWNER: GetModuleHandleW 失败，err={}，无法注册 owner 窗口类",
-                        GetLastError().0
+                        "CLIPBOARD_OWNER: RegisterClassW 失败，err={}，owner 创建中止",
+                        err.0
                     ));
-                    let _ = tx.send(0);
+                    let _ = ready_tx.send(0);
+                    let _ = done_tx.send(());
                     return;
-                };
-                // 注册与创建必须使用同一个 hinstance（审计报告 S-02）。
-                let hinstance = HINSTANCE(module.0);
-
-                let wc = WNDCLASSW {
-                    lpfnWndProc: Some(clipboard_owner_proc),
-                    hInstance: hinstance,
-                    lpszClassName: class_name,
-                    ..Default::default()
-                };
-
-                // 审计报告 S-02：显式处理 `RegisterClassW` 返回值（0 表示失败）。
-                // 本函数可能被重复调用，仅当 `GetLastError == ERROR_CLASS_ALREADY_EXISTS`
-                // 时才算「已有可用类」；其他错误一律视为失败并中止，不得继续 CreateWindowExW。
-                if RegisterClassW(&wc) == 0 {
-                    let err = GetLastError();
-                    if err != ERROR_CLASS_ALREADY_EXISTS {
-                        crate::dialog::detector::log_debug(&format!(
-                            "CLIPBOARD_OWNER: RegisterClassW 失败，err={}，owner 创建中止",
-                            err.0
-                        ));
-                        let _ = tx.send(0);
-                        return;
-                    }
                 }
+            }
 
-                let created = CreateWindowExW(
-                    WINDOW_EX_STYLE::default(),
-                    class_name,
-                    w!("QuickPath Clipboard Owner"),
-                    WINDOW_STYLE::default(),
-                    0,
-                    0,
-                    0,
-                    0,
-                    None,
-                    None,
-                    // 审计报告 S-02：必须与 RegisterClassW 写入 WNDCLASSW.hInstance
-                    // 的实例句柄完全一致，否则进程本地窗口类查找可能失败。
-                    Some(hinstance),
-                    None,
-                );
+            let created = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                w!("QuickPath Clipboard Owner"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                // 审计报告 S-02：必须与 RegisterClassW 写入 WNDCLASSW.hInstance
+                // 的实例句柄完全一致，否则进程本地窗口类查找可能失败。
+                Some(hinstance),
+                None,
+            );
 
-                match created {
-                    Ok(hwnd) if !hwnd.0.is_null() => {
-                        let _ = tx.send(hwnd.0 as usize);
-                        let mut msg = MSG::default();
-                        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                            let _ = TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
+            match created {
+                Ok(hwnd) if !hwnd.0.is_null() => {
+                    let hwnd_raw = hwnd.0 as usize;
+                    let _ = ready_tx.send(hwnd_raw);
+
+                    // 审计报告 R-06：显式退出协议的消息泵。`GetMessageW` 返回 0
+                    // （收到 `WM_QUIT`）或 -1（错误）都必须退出循环，绝不因 -1 被
+                    // `as_bool()` 当作 true 而死循环。
+                    let mut msg = MSG::default();
+                    loop {
+                        let ret = GetMessageW(&mut msg, None, 0, 0);
+                        if ret.0 == 0 || ret.0 == -1 {
+                            if ret.0 == -1 {
+                                crate::dialog::detector::log_debug(&format!(
+                                    "CLIPBOARD_OWNER: GetMessageW 返回 -1（err={}），消息泵退出",
+                                    GetLastError().0
+                                ));
+                            }
+                            break;
+                        }
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+
+                    // 线程退出前清空全局状态，杜绝「窗口已销毁但句柄仍被当作有效 owner」
+                    // 的窗口期（正常关闭路径中 `shutdown_clipboard_owner` 已先取出状态）。
+                    {
+                        let mut guard = OWNER
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        if guard.as_ref().map(|owner| owner.hwnd_raw) == Some(hwnd_raw) {
+                            *guard = None;
                         }
                     }
-                    _ => {
-                        let _ = tx.send(0);
-                    }
+                    let _ = done_tx.send(());
                 }
-            });
+                _ => {
+                    let _ = ready_tx.send(0);
+                    let _ = done_tx.send(());
+                }
+            }
+        });
 
-        if spawned.is_err() {
-            return;
+    let thread = match spawned {
+        Ok(handle) => handle,
+        Err(err) => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_OWNER: 线程创建失败，err={}，owner 不可用",
+                err
+            ));
+            return None;
         }
-        if let Ok(raw) = rx.recv_timeout(Duration::from_secs(3))
-            && raw != 0
-        {
-            CLIPBOARD_OWNER.store(raw as *mut _, Ordering::SeqCst);
-        }
-    });
+    };
 
-    let raw = CLIPBOARD_OWNER.load(Ordering::SeqCst);
-    if raw.is_null() {
+    let hwnd_raw = match ready_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(raw) => raw,
+        Err(err) => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_OWNER: 等待 owner 窗口就绪超时（{}），owner 不可用",
+                err
+            ));
+            return None;
+        }
+    };
+
+    if hwnd_raw == 0 {
         return None;
     }
-    let hwnd = HWND(raw);
-    unsafe { IsWindow(Some(hwnd)).as_bool().then_some(hwnd) }
+
+    let hwnd = HWND(hwnd_raw as *mut _);
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, None) };
+    *guard = Some(ClipboardOwnerHandle {
+        hwnd_raw,
+        thread_id,
+        generation,
+        done_rx,
+        thread: Some(thread),
+    });
+
+    Some(hwnd)
+}
+
+/// 显式关闭进程级剪贴板 owner：投递退出消息 → 有界确认线程退出 → `join`。
+///
+/// 幂等：没有 owner 时直接返回 `true`（no-op 成功）。返回值 `true` 表示 owner 线程已在
+/// 有界超时内确认退出（或本就无 owner），`false` 表示确认超时、已放弃 `join`（detach），
+/// 宿主线程绝不被永久阻塞。
+pub(crate) fn shutdown_clipboard_owner() -> bool {
+    // 先把拥有式状态取出锁外，避免在 `join` 期间长时间持有 `Mutex`。
+    let handle = {
+        let mut guard = OWNER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.take()
+    };
+
+    let Some(mut handle) = handle else {
+        return true;
+    };
+
+    // 1. 首选 `WM_CLOSE` → 窗口过程内 `DestroyWindow` → `WM_DESTROY` → `PostQuitMessage`。
+    if handle.hwnd_raw != 0 {
+        let hwnd = HWND(handle.hwnd_raw as *mut _);
+        if let Err(err) = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) } {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_OWNER_SHUTDOWN: PostMessageW(WM_CLOSE) 投递失败，err={:?}，继续走兜底",
+                err
+            ));
+        }
+    }
+
+    // 2. `WM_QUIT` 兜底：即便窗口过程未按预期销毁窗口，消息泵也能直接退出。
+    if handle.thread_id != 0
+        && let Err(err) =
+            unsafe { PostThreadMessageW(handle.thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) }
+    {
+        crate::dialog::detector::log_debug(&format!(
+            "CLIPBOARD_OWNER_SHUTDOWN: PostThreadMessageW(WM_QUIT) 投递失败，err={:?}",
+            err
+        ));
+    }
+
+    // 3. 有界确认：`JoinHandle` 没有超时 join，先用确认通道确认线程已退出，再 `join`。
+    match handle.done_rx.recv_timeout(OWNER_SHUTDOWN_TIMEOUT) {
+        // `Disconnected` 表示线程已结束但发送端先被丢弃，同样视为已退出。
+        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            if let Some(thread) = handle.thread.take() {
+                let _ = thread.join();
+            }
+            true
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_OWNER_SHUTDOWN_TIMEOUT: owner 线程（generation={}）未在 {:?} 内退出，放弃 join（detach）",
+                handle.generation, OWNER_SHUTDOWN_TIMEOUT
+            ));
+            // 丢弃 `JoinHandle` 即 detach：宿主线程继续运行，绝不永久阻塞。
+            handle.thread.take();
+            false
+        }
+    }
 }
 
 /// 以合法 owner 打开剪贴板（**所有写路径必须先经过这里**）。
@@ -1676,5 +1877,88 @@ mod tests {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
         }
+    }
+
+    /// 审计报告 R-06：owner 线程退出协议 —— 启动 → 停止 → 再启动。
+    ///
+    /// 断言：（1）初始 owner 存活；（2）`shutdown_clipboard_owner()` 通过确认通道
+    /// 确认线程在超时内退出并销毁窗口；（3）关闭后可重建出**新的**有效窗口；
+    /// （4）重建后临时文本注入/恢复语义仍然可用。
+    #[test]
+    fn test_owner_shutdown_and_recreate_cycle() {
+        let _guard = clip_test_lock();
+
+        let first = clipboard_owner().expect("必须能够创建进程级剪贴板 owner 窗口");
+        assert!(
+            unsafe { IsWindow(Some(first)).as_bool() },
+            "初始 owner 必须是存活窗口"
+        );
+
+        // 退出协议必须确认线程在超时内退出（确认通道收到退出信号），并销毁窗口。
+        assert!(
+            shutdown_clipboard_owner(),
+            "shutdown 必须确认 owner 线程在有界超时内退出"
+        );
+        assert!(
+            !unsafe { IsWindow(Some(first)).as_bool() },
+            "退出协议必须销毁原 owner 窗口"
+        );
+
+        // 再启动：必须重建出新的、有效的 owner 窗口。
+        let second = clipboard_owner().expect("关闭后必须能够重建 owner 窗口");
+        assert!(
+            unsafe { IsWindow(Some(second)).as_bool() },
+            "重建的 owner 必须是存活窗口"
+        );
+        assert_ne!(
+            first.0 as usize, second.0 as usize,
+            "重建必须得到新的窗口句柄（旧句柄已销毁）"
+        );
+
+        // 重建后临时文本注入/恢复语义必须仍然可用。
+        let initial_text =
+            get_clipboard_text().unwrap_or_else(|| "initial_qp_owner_cycle".to_string());
+        let _ = set_raw_clipboard_text(&initial_text);
+        let temp = "C:\\Windows\\System32";
+        let result = with_temporary_clipboard_text(temp, || {
+            assert_eq!(
+                get_clipboard_text().unwrap_or_default(),
+                temp,
+                "重建后临时注入必须生效"
+            );
+            7
+        });
+        assert_eq!(result, Ok(7));
+        assert_eq!(
+            get_clipboard_text().unwrap_or_default(),
+            initial_text,
+            "重建后恢复语义必须仍然有效"
+        );
+    }
+
+    /// 审计报告 R-06：重复 `shutdown_clipboard_owner()` 必须幂等、不 panic、不阻塞。
+    #[test]
+    fn test_owner_shutdown_is_idempotent_when_absent() {
+        let _guard = clip_test_lock();
+
+        let owner = clipboard_owner().expect("必须能够创建进程级剪贴板 owner 窗口");
+        assert!(unsafe { IsWindow(Some(owner)).as_bool() });
+
+        let started = std::time::Instant::now();
+        assert!(shutdown_clipboard_owner(), "首次关闭必须成功确认线程退出");
+        assert!(
+            shutdown_clipboard_owner(),
+            "无 owner 时再次关闭必须是 no-op 成功"
+        );
+        assert!(shutdown_clipboard_owner(), "第三次关闭同样必须幂等成功");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "重复关闭必须立即返回，不得阻塞；实际耗时 {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !unsafe { IsWindow(Some(owner)).as_bool() },
+            "关闭后原 owner 窗口不得存活"
+        );
     }
 }
