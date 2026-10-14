@@ -38,20 +38,16 @@ jobs:
       - name: 质量门禁：执行单元与集成测试
         run: cargo test --all-targets
 
-      # ── 以下三条门禁当前为“非阻塞”（continue-on-error）─────────────────────────
-      # 原因（报告 §10 第三批第 2 条）：仓库仍有历史 rustfmt 漂移与 181 条 clippy 告警，
-      # 直接 `-D warnings` 会让所有发布失败。待完成“全仓格式化 + 告警治理”后，
-      # 必须删除 continue-on-error 使其成为真正的阻塞门禁。
-      - name: 门禁（待强化）：格式检查
-        continue-on-error: true
-        run: cargo fmt --check
+      # ── 阻塞式质量门禁 ────────────────────────────────────────────────────
+      # 仓库已完成全仓 `cargo fmt` 与 clippy 告警治理(0 告警),因此这三条门禁
+      # 现在必须阻塞发布:任一失败即中止,不允许带格式/告警/漏洞的产物上线。
+      - name: 门禁：格式检查
+        run: cargo fmt --all -- --check
 
-      - name: 门禁（待强化）：Clippy
-        continue-on-error: true
+      - name: 门禁：Clippy（0 告警）
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: 门禁（待强化）：依赖安全审计
-        continue-on-error: true
+      - name: 门禁：依赖安全审计
         shell: pwsh
         run: |
           cargo install cargo-audit --locked

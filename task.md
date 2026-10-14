@@ -1455,6 +1455,45 @@
 3. **报告 §11 Windows 11 真机验收矩阵未执行**：WPS 各阶段 Alt+Tab 零全局输入、Win+E 连按 100 次、挂起 DOpus/TotalCMD/XYplorer 时宿主消息 P99 < 50ms、钩子构造回滚、启停标签模块 1000 次。
 4. 已在代码注释/文档中标注：`state_mut()` 返回 `&'static mut`（与旧实现同为单线程独占，但重入仍非类型安全）；COM 被放弃的 STA 线程不可取消。
 
+---
+
+## 阶段七十二：全仓格式化 + clippy 告警治理，发布门禁阻塞化
+
+> **目标**：消除“fmt/clippy/audit 门禁只能 `continue-on-error`”这一剩余项（报告 §10 第三批第 2 条的前置条件）。
+> **安全前提**：本阶段为**语义保持**改动（纯格式化 + 惯用写法），逐项回归验证；工作区干净、上批已提交，便于回滚。
+
+- [x] **72.1 全仓格式化（`cargo fmt --all`）**
+  - [x] 46 个文件、+3036/-1098 行，纯 rustfmt 重排（换行、导入排序、缩进），无语义变化
+  - [x] 格式化后 `cargo test --all-targets` 99 项全绿
+- [x] **72.2 clippy 可自动修复项（`cargo clippy --fix --all-targets`）**
+  - [x] 179 → 30 条（去重后剩 21 处 distinct），均为 MachineApplicable 建议：导入合并排序、`&mut`→`&`、多余 `as` 转换、`manual_is_multiple_of` 等
+  - [x] 修复后重跑 `cargo fmt`（`--fix` 输出不保证 fmt 规范）
+- [x] **72.3 剩余 21 处人工处理（逐项，全部语义等价）**
+  - [x] `manual_strip`（3 处）：`starts_with` + 切片 → `strip_prefix`（**严格保留原有长度判定**，未放宽 UNC 合法性；已旧值为 `rest.len() >= 3 && rest.contains('\\')`）
+  - [x] `unnecessary_unwrap`（1）：`is_some()` + `unwrap()` → `if let Some(..)` let-chain
+  - [x] `field_reassign_with_default`（2，测试内）：改为结构体更新语法 `AppConfig { .., ..Default::default() }`
+  - [x] `doc_lazy_continuation`（1）：修复模块文档缩进
+  - [x] `upper_case_acronyms`（1）：`OSVERSIONINFOEXW` 属 Win32 原名，加**定点 allow + 理由**（保留原名便于与系统文档对照）
+  - [x] `too_many_arguments`（21，去重后 17 处）：全为自绘/几何/监控绘制辅助函数与 `FloatingBar::show`，拆参数结构体只会把样板搬到调用端。**未用 crate 级 blanket allow**，而是按文件加 `#![allow(clippy::too_many_arguments)]` + 逐文件写明理由（settings/render/tooltip/floating_bar）
+- [x] **72.4 发布门禁阻塞化（`.github/workflows/release.yml`）**
+  - [x] 删除 fmt / clippy / audit 三步的 `continue-on-error: true`
+  - [x] `cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、`cargo audit` 现为**阻塞门禁**
+  - [x] 本地实测三条命令均通过（与 CI 同模型）
+
+### 门禁与自证（本轮）
+
+- `cargo fmt --all -- --check`：**干净**
+- `cargo clippy --all-targets -- -D warnings`：**0 告警**（治理前 179）
+- `cargo test --all-targets`：**99 项全绿**（与治理前完全一致）
+- `cargo build --release`：通过
+- 等价性自证：`#[test]` 数量仍为 99；`pub` 导出符号无增删；`Cargo.lock` 未被改动
+
+### 本轮遗留
+
+1. **Authenticode 签名未启用**：需代码签名证书与 secrets，YAML 中已备可直接取消注释的步骤。
+2. **报告 §11 Windows 11 真机验收矩阵未执行**（同上批）。
+3. `state_mut()` 重入非类型安全；COM 被放弃的 STA 线程不可取消。
+
 
 
 

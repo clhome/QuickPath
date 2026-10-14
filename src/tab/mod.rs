@@ -9,13 +9,13 @@ pub mod owner;
 pub mod select;
 pub mod uia;
 
-use std::sync::Arc;
-use windows::Win32::Foundation::HWND;
 pub use com::ShellComManager;
 pub use coordinator::{TabConfig, TabCoordinator};
 pub use hook::TabHookGuard;
 pub use keyboard::TabKeyboardGuard;
 pub use mouse::TabMouseGuard;
+use std::sync::Arc;
+use windows::Win32::Foundation::HWND;
 
 /// QuickPath 资源管理器多标签页增强模块核心服务封装
 pub struct TabModule {
@@ -46,7 +46,8 @@ impl TabModule {
     /// 自身不做任何 COM/UIA 重活，保证钩子回调在微秒级返回。
     pub fn start(&mut self, notify_hwnd: HWND) -> Result<(), String> {
         // 已全部就绪则幂等返回，不再重复安装
-        if self.hook_guard.is_some() && self.mouse_guard.is_some() && self.keyboard_guard.is_some() {
+        if self.hook_guard.is_some() && self.mouse_guard.is_some() && self.keyboard_guard.is_some()
+        {
             return Ok(());
         }
 

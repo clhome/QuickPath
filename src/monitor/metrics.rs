@@ -1,6 +1,4 @@
-use crate::monitor::collector::{
-    CpuMetrics, DetailMetrics, DiskMetrics, GpuMetrics, NetworkSpeed,
-};
+use crate::monitor::collector::{CpuMetrics, DetailMetrics, DiskMetrics, GpuMetrics, NetworkSpeed};
 use std::collections::VecDeque;
 
 /// 历史波形环形缓冲区（15~20 秒采样历史）

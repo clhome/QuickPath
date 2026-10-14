@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT,
+    CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
     WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
@@ -131,9 +131,7 @@ unsafe fn keyboard_ll_should_swallow(lparam: LPARAM) -> bool {
         return false;
     }
 
-    let pressed = |vk: i32| -> bool {
-        (unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000) != 0
-    };
+    let pressed = |vk: i32| -> bool { (unsafe { GetAsyncKeyState(vk) } as u16 & 0x8000) != 0 };
 
     let win = pressed(VK_LWIN.0 as i32) || pressed(VK_RWIN.0 as i32);
     if !win {
@@ -157,8 +155,7 @@ mod tests {
         let coordinator = Arc::new(TabCoordinator::new(Arc::new(ShellComManager::new())));
 
         assert!(COORDINATOR_SLOT.install(&coordinator), "首次安装必须成功");
-        let rejected =
-            TabKeyboardGuard::new(coordinator.clone(), HWND(std::ptr::null_mut()));
+        let rejected = TabKeyboardGuard::new(coordinator.clone(), HWND(std::ptr::null_mut()));
         assert!(rejected.is_err(), "槽位被占用时构造必须返回 Err");
         assert!(
             NOTIFY_HWND.load(Ordering::SeqCst).is_null(),

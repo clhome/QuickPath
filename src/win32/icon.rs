@@ -1,22 +1,21 @@
 #![allow(dead_code)]
 
 use std::sync::OnceLock;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::HINSTANCE;
 use windows::Win32::Graphics::Gdi::HDC;
 use windows::Win32::Graphics::GdiPlus::{
-    GdiplusStartup, GdiplusStartupInput, GdipCreateBitmapFromFile,
-    GdipCreateBitmapFromStream, GdipCreateFromHDC, GdipDeleteGraphics,
-    GdipDrawImageRectI, GdipSetInterpolationMode, GpBitmap, GpGraphics,
-    GpImage, InterpolationModeHighQualityBicubic, Status,
+    GdipCreateBitmapFromFile, GdipCreateBitmapFromStream, GdipCreateFromHDC, GdipDeleteGraphics,
+    GdipDrawImageRectI, GdipSetInterpolationMode, GdiplusStartup, GdiplusStartupInput, GpBitmap,
+    GpGraphics, GpImage, InterpolationModeHighQualityBicubic, Status,
 };
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, LoadIconW, LoadImageW, HICON, IDI_APPLICATION, IMAGE_ICON,
-    LR_DEFAULTCOLOR, LR_SHARED, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
+    GetSystemMetrics, HICON, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, LoadIconW,
+    LoadImageW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
 };
+use windows::core::PCWSTR;
 
 /// 智能获取应用专属 Logo 图标
 /// small = true: 小图标（系统托盘、窗口左上角徽标，自适应 16x16 / 32x32）
@@ -32,15 +31,14 @@ pub fn get_app_icon(small: bool) -> HICON {
 
         if let Ok(handle) = LoadImageW(
             Some(HINSTANCE(hinstance.0)),
-            PCWSTR(1 as *const u16),
+            PCWSTR(std::ptr::dangling::<u16>()),
             IMAGE_ICON,
             cx,
             cy,
             LR_DEFAULTCOLOR | LR_SHARED,
-        ) {
-            if !handle.0.is_null() {
-                return HICON(handle.0);
-            }
+        ) && !handle.0.is_null()
+        {
+            return HICON(handle.0);
         }
 
         // 回退备选为系统默认应用图标
@@ -81,7 +79,9 @@ pub fn get_logo_png_image() -> Option<*mut GpImage> {
             for p in paths {
                 if std::path::Path::new(p).exists() {
                     let wide: Vec<u16> = p.encode_utf16().chain(Some(0)).collect();
-                    if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &mut bitmap) == Status(0) && !bitmap.is_null() {
+                    if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &mut bitmap) == Status(0)
+                        && !bitmap.is_null()
+                    {
                         return bitmap as usize;
                     }
                 }
@@ -89,17 +89,18 @@ pub fn get_logo_png_image() -> Option<*mut GpImage> {
 
             // 2. 备用：从编译嵌入的 logo.png 二进制流解码加载
             let bytes = include_bytes!("../../assets/logo.png");
-            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
-                if !hglobal.0.is_null() {
-                    let dest = GlobalLock(hglobal);
-                    if !dest.is_null() {
-                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest as *mut u8, bytes.len());
-                        let _ = GlobalUnlock(hglobal);
-                        if let Ok(stream) = CreateStreamOnHGlobal(hglobal, true) {
-                            if GdipCreateBitmapFromStream(&stream, &mut bitmap) == Status(0) && !bitmap.is_null() {
-                                return bitmap as usize;
-                            }
-                        }
+            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, bytes.len())
+                && !hglobal.0.is_null()
+            {
+                let dest = GlobalLock(hglobal);
+                if !dest.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest as *mut u8, bytes.len());
+                    let _ = GlobalUnlock(hglobal);
+                    if let Ok(stream) = CreateStreamOnHGlobal(hglobal, true)
+                        && GdipCreateBitmapFromStream(&stream, &mut bitmap) == Status(0)
+                        && !bitmap.is_null()
+                    {
+                        return bitmap as usize;
                     }
                 }
             }
@@ -117,13 +118,7 @@ pub fn get_logo_png_image() -> Option<*mut GpImage> {
 
 /// 高质量平滑绘制 logo.png 原图
 /// 支持自动以双三次平滑采样（Bicubic）缩放至指定尺寸
-pub unsafe fn draw_logo_png(
-    hdc: HDC,
-    dest_x: i32,
-    dest_y: i32,
-    dest_w: i32,
-    dest_h: i32,
-) -> bool {
+pub unsafe fn draw_logo_png(hdc: HDC, dest_x: i32, dest_y: i32, dest_w: i32, dest_h: i32) -> bool {
     if let Some(img) = get_logo_png_image() {
         unsafe {
             let mut graphics: *mut GpGraphics = std::ptr::null_mut();
@@ -153,7 +148,9 @@ pub fn get_github_png_image() -> Option<*mut GpImage> {
             for p in paths {
                 if std::path::Path::new(p).exists() {
                     let wide: Vec<u16> = p.encode_utf16().chain(Some(0)).collect();
-                    if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &mut bitmap) == Status(0) && !bitmap.is_null() {
+                    if GdipCreateBitmapFromFile(PCWSTR(wide.as_ptr()), &mut bitmap) == Status(0)
+                        && !bitmap.is_null()
+                    {
                         return bitmap as usize;
                     }
                 }
@@ -161,17 +158,18 @@ pub fn get_github_png_image() -> Option<*mut GpImage> {
 
             // 2. 备用：从编译嵌入的 github.png 二进制流解码加载
             let bytes = include_bytes!("../../assets/github.png");
-            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) {
-                if !hglobal.0.is_null() {
-                    let dest = GlobalLock(hglobal);
-                    if !dest.is_null() {
-                        std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest as *mut u8, bytes.len());
-                        let _ = GlobalUnlock(hglobal);
-                        if let Ok(stream) = CreateStreamOnHGlobal(hglobal, true) {
-                            if GdipCreateBitmapFromStream(&stream, &mut bitmap) == Status(0) && !bitmap.is_null() {
-                                return bitmap as usize;
-                            }
-                        }
+            if let Ok(hglobal) = GlobalAlloc(GMEM_MOVEABLE, bytes.len())
+                && !hglobal.0.is_null()
+            {
+                let dest = GlobalLock(hglobal);
+                if !dest.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), dest as *mut u8, bytes.len());
+                    let _ = GlobalUnlock(hglobal);
+                    if let Ok(stream) = CreateStreamOnHGlobal(hglobal, true)
+                        && GdipCreateBitmapFromStream(&stream, &mut bitmap) == Status(0)
+                        && !bitmap.is_null()
+                    {
+                        return bitmap as usize;
                     }
                 }
             }

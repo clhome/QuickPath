@@ -10,13 +10,13 @@
 //! 本模块用两条不变式把这件事说清楚：
 //! 1. **借用不接管所有权**：回调期间只 `Arc::increment_strong_count` + `from_raw` 借一份强引用，
 //!    作用域结束即归还，静态指针始终只持有一份所有权；
-//! 2. **卸载先摘指针再等在途归零**：`release()` 先把指针置空（新回调立刻失败），
-//!    再等待在途计数归零，最后才释放那份所有权；超时则**故意泄漏**该 `Arc`
-//!   （宁可泄漏一个协调器，也绝不 UAF），并返回 false 供上层记录。
+//! 2. **卸载先摘指针再等在途归零**:`release()` 先把指针置空(新回调立刻失败),
+//!    再等待在途计数归零,最后才释放那份所有权;超时则**故意泄漏**该 `Arc`
+//!    (宁可泄漏一个协调器,也绝不 UAF),并返回 false 供上层记录。
 
 use std::ops::Deref;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::coordinator::TabCoordinator;
@@ -49,14 +49,12 @@ impl CoordinatorSlot {
     /// 安装所有权（同一时刻只允许一份）。返回 false 表示槽位已被占用。
     pub fn install(&self, coordinator: &Arc<TabCoordinator>) -> bool {
         let raw = Arc::into_raw(coordinator.clone()) as *mut core::ffi::c_void;
-        match self
-            .owner
-            .compare_exchange(
-                std::ptr::null_mut(),
-                raw,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
+        match self.owner.compare_exchange(
+            std::ptr::null_mut(),
+            raw,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
             Ok(_) => true,
             Err(_) => {
                 // 槽位已被占用：归还本次多余的强引用，绝不泄漏
@@ -150,7 +148,10 @@ mod tests {
     fn test_borrow_after_release_fails_and_owner_is_released_once() {
         let slot = CoordinatorSlot::new();
         assert!(slot.borrow().is_none(), "未安装时应借用失败");
-        assert!(slot.release(Duration::from_millis(50)), "空槽位释放应为成功");
+        assert!(
+            slot.release(Duration::from_millis(50)),
+            "空槽位释放应为成功"
+        );
 
         let coordinator = Arc::new(TabCoordinator::new(Arc::new(
             super::super::com::ShellComManager::new(),

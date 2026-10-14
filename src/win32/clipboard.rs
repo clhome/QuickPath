@@ -1,23 +1,23 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::thread;
 use std::time::Duration;
-use windows::core::w;
-use windows::Win32::Foundation::{GlobalFree, HINSTANCE, HANDLE, HGLOBAL, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
     GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GHND, GMEM_MOVEABLE,
+    GHND, GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, RegisterClassW,
-    TranslateMessage, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, MSG, RegisterClassW,
+    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
 };
+use windows::core::w;
 
 /// 剪贴板标准格式常量定义
 pub const CF_TEXT: u32 = 1;
@@ -96,8 +96,7 @@ const RESTORE_ATTEMPTS: u32 = 3;
 
 /// 无注入测试钩子：值为 u32::MAX 表示不注入失败
 #[cfg(test)]
-static TEST_FAIL_FORMAT: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(u32::MAX);
+static TEST_FAIL_FORMAT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
 
 /// 读取系统剪贴板序列号（每次剪贴板内容变化都会自增）
 fn clipboard_sequence_number() -> u32 {
@@ -294,27 +293,27 @@ impl ClipboardSnapshot {
 
             // 1. 若剪贴板包含位图 (CF_BITMAP 或 CF_DIB)，Windows 会自动合成 CF_DIB (HGLOBAL 格式)。
             // 优先通过标准内存格式 CF_DIB 捕获完整位图数据，绝不要对 CF_BITMAP 的 HBITMAP 句柄调用 GlobalLock！
-            if (has_bitmap || has_dib) && !items.iter().any(|(f, _)| *f == CF_DIB) {
-                if let Ok(h) = GetClipboardData(CF_DIB) {
-                    if !h.0.is_null() {
-                        let size = GlobalSize(HGLOBAL(h.0));
-                        if size > 0 {
-                            if size > MAX_ITEM_BYTES || total_bytes + size > MAX_TOTAL_BYTES {
-                                let _ = CloseClipboard();
-                                return Err(ClipboardSafetyError::BackupIncomplete(
-                                    "剪贴板位图内容过大，超过安全保护上限".to_string(),
-                                ));
-                            }
-                            let ptr = GlobalLock(HGLOBAL(h.0));
-                            if !ptr.is_null() {
-                                let mut data = vec![0u8; size];
-                                std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size);
-                                let _ = GlobalUnlock(HGLOBAL(h.0));
-                                total_bytes += size;
-                                items.push((CF_DIB, data));
-                                dib_captured = true;
-                            }
-                        }
+            if (has_bitmap || has_dib)
+                && !items.iter().any(|(f, _)| *f == CF_DIB)
+                && let Ok(h) = GetClipboardData(CF_DIB)
+                && !h.0.is_null()
+            {
+                let size = GlobalSize(HGLOBAL(h.0));
+                if size > 0 {
+                    if size > MAX_ITEM_BYTES || total_bytes + size > MAX_TOTAL_BYTES {
+                        let _ = CloseClipboard();
+                        return Err(ClipboardSafetyError::BackupIncomplete(
+                            "剪贴板位图内容过大，超过安全保护上限".to_string(),
+                        ));
+                    }
+                    let ptr = GlobalLock(HGLOBAL(h.0));
+                    if !ptr.is_null() {
+                        let mut data = vec![0u8; size];
+                        std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size);
+                        let _ = GlobalUnlock(HGLOBAL(h.0));
+                        total_bytes += size;
+                        items.push((CF_DIB, data));
+                        dib_captured = true;
                     }
                 }
             }
@@ -337,41 +336,46 @@ impl ClipboardSnapshot {
 
                 // 读取当前格式的数据句柄 (保证均为 HGLOBAL 格式)
                 let mut captured_this_format = false;
-                if let Ok(h) = GetClipboardData(f) {
-                    if !h.0.is_null() {
-                        let size = GlobalSize(HGLOBAL(h.0));
-                        if size > 0 {
-                            if size > MAX_ITEM_BYTES || total_bytes + size > MAX_TOTAL_BYTES {
-                                let _ = CloseClipboard();
-                                return Err(ClipboardSafetyError::BackupIncomplete(
-                                    "剪贴板内容过大，超过安全保护上限".to_string(),
-                                ));
+                if let Ok(h) = GetClipboardData(f)
+                    && !h.0.is_null()
+                {
+                    let size = GlobalSize(HGLOBAL(h.0));
+                    if size > 0 {
+                        if size > MAX_ITEM_BYTES || total_bytes + size > MAX_TOTAL_BYTES {
+                            let _ = CloseClipboard();
+                            return Err(ClipboardSafetyError::BackupIncomplete(
+                                "剪贴板内容过大，超过安全保护上限".to_string(),
+                            ));
+                        }
+
+                        let ptr = GlobalLock(HGLOBAL(h.0));
+                        if !ptr.is_null() {
+                            let mut data = vec![0u8; size];
+                            std::ptr::copy_nonoverlapping(
+                                ptr as *const u8,
+                                data.as_mut_ptr(),
+                                size,
+                            );
+                            let _ = GlobalUnlock(HGLOBAL(h.0));
+
+                            if f == CF_HDROP {
+                                hdrop_captured = true;
+                            }
+                            if f == CF_UNICODETEXT {
+                                unicode_captured = true;
                             }
 
-                            let ptr = GlobalLock(HGLOBAL(h.0));
-                            if !ptr.is_null() {
-                                let mut data = vec![0u8; size];
-                                std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size);
-                                let _ = GlobalUnlock(HGLOBAL(h.0));
-
-                                if f == CF_HDROP {
-                                    hdrop_captured = true;
-                                }
-                                if f == CF_UNICODETEXT {
-                                    unicode_captured = true;
-                                }
-
-                                total_bytes += size;
-                                items.push((f, data));
-                                captured_this_format = true;
-                            }
+                            total_bytes += size;
+                            items.push((f, data));
+                            captured_this_format = true;
                         }
                     }
                 }
 
                 // 3. 【Fail-Closed 核心防御】：如果当前格式未成功捕获，检查是否为已被源格式覆盖的系统合成格式
                 if !captured_this_format {
-                    let is_synthesized_covered = (unicode_captured && (f == CF_TEXT || f == CF_OEMTEXT))
+                    let is_synthesized_covered = (unicode_captured
+                        && (f == CF_TEXT || f == CF_OEMTEXT))
                         || (dib_captured && (f == CF_BITMAP || f == CF_DIBV5));
 
                     if !is_synthesized_covered {
@@ -486,7 +490,9 @@ impl ClipboardSnapshot {
                     return Ok(RestoreStatus::Restored);
                 }
                 Ok(false) => {
-                    last_error = Some(ClipboardRestoreError::PartialRestore(self.pending_formats()));
+                    last_error = Some(ClipboardRestoreError::PartialRestore(
+                        self.pending_formats(),
+                    ));
                 }
                 Err(err) => last_error = Some(err),
             }
@@ -743,10 +749,7 @@ where
             );
         }
         Err(err) => {
-            crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_RESTORE_FAILED: {:?}",
-                err
-            ));
+            crate::dialog::detector::log_debug(&format!("CLIPBOARD_RESTORE_FAILED: {:?}", err));
             return Err(ClipboardSafetyError::RestoreFailed(err));
         }
     }
@@ -761,19 +764,19 @@ pub fn get_clipboard_text() -> Option<String> {
     }
     unsafe {
         let mut result = None;
-        if let Ok(h) = GetClipboardData(CF_UNICODETEXT) {
-            if !h.0.is_null() {
-                let ptr = GlobalLock(HGLOBAL(h.0));
-                if !ptr.is_null() {
-                    let u16_ptr = ptr as *const u16;
-                    let mut len = 0;
-                    while *u16_ptr.add(len) != 0 {
-                        len += 1;
-                    }
-                    let slice = std::slice::from_raw_parts(u16_ptr, len);
-                    result = Some(String::from_utf16_lossy(slice));
-                    let _ = GlobalUnlock(HGLOBAL(h.0));
+        if let Ok(h) = GetClipboardData(CF_UNICODETEXT)
+            && !h.0.is_null()
+        {
+            let ptr = GlobalLock(HGLOBAL(h.0));
+            if !ptr.is_null() {
+                let u16_ptr = ptr as *const u16;
+                let mut len = 0;
+                while *u16_ptr.add(len) != 0 {
+                    len += 1;
                 }
+                let slice = std::slice::from_raw_parts(u16_ptr, len);
+                result = Some(String::from_utf16_lossy(slice));
+                let _ = GlobalUnlock(HGLOBAL(h.0));
             }
         }
         let _ = CloseClipboard();
@@ -799,7 +802,8 @@ mod tests {
     #[test]
     fn test_clipboard_safety_temporary_text_and_restore() {
         let _guard = clip_test_lock();
-        let initial_text = get_clipboard_text().unwrap_or_else(|| "initial_qp_test_data".to_string());
+        let initial_text =
+            get_clipboard_text().unwrap_or_else(|| "initial_qp_test_data".to_string());
         let _ = set_raw_clipboard_text(&initial_text);
 
         let temp_injected = "C:\\Windows\\System32";
@@ -811,7 +815,10 @@ mod tests {
 
         assert_eq!(execution_result, Ok(42));
         let after_restore = get_clipboard_text().unwrap_or_default();
-        assert_eq!(after_restore, initial_text, "闭包执行结束后必须还原原有剪贴板内容");
+        assert_eq!(
+            after_restore, initial_text,
+            "闭包执行结束后必须还原原有剪贴板内容"
+        );
     }
 
     #[test]
@@ -820,7 +827,7 @@ mod tests {
         // 构造合法的最简 1x1 24-bit DIB 内存块
         let mut dib_data = [0u8; 40 + 4];
         dib_data[0..4].copy_from_slice(&40u32.to_le_bytes()); // biSize = 40
-        dib_data[4..8].copy_from_slice(&1i32.to_le_bytes());  // biWidth = 1
+        dib_data[4..8].copy_from_slice(&1i32.to_le_bytes()); // biWidth = 1
         dib_data[8..12].copy_from_slice(&1i32.to_le_bytes()); // biHeight = 1
         dib_data[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes = 1
         dib_data[14..16].copy_from_slice(&24u16.to_le_bytes()); // biBitCount = 24
@@ -832,13 +839,20 @@ mod tests {
 
         let original_text = get_clipboard_text();
 
-        assert!(open_clipboard_for_write(10), "测试初始化必须以合法 owner 打开剪贴板");
+        assert!(
+            open_clipboard_for_write(10),
+            "测试初始化必须以合法 owner 打开剪贴板"
+        );
         unsafe {
             let _ = EmptyClipboard();
             if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, dib_data.len()) {
                 let ptr = GlobalLock(h);
                 if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(dib_data.as_ptr(), ptr as *mut u8, dib_data.len());
+                    std::ptr::copy_nonoverlapping(
+                        dib_data.as_ptr(),
+                        ptr as *mut u8,
+                        dib_data.len(),
+                    );
                     let _ = GlobalUnlock(h);
                     let _ = SetClipboardData(CF_DIB, Some(HANDLE(h.0)));
                 }
@@ -847,9 +861,18 @@ mod tests {
         }
 
         let snap_res = ClipboardSnapshot::capture();
-        assert!(snap_res.is_ok(), "含 DIB 的剪贴板必须能被成功安全捕获: {:?}", snap_res.as_ref().err());
+        assert!(
+            snap_res.is_ok(),
+            "含 DIB 的剪贴板必须能被成功安全捕获: {:?}",
+            snap_res.as_ref().err()
+        );
         let snap = snap_res.unwrap();
-        assert!(snap.items.iter().any(|(f, d)| *f == CF_DIB && d.len() == dib_data.len()), "快照中必须含有 CF_DIB 数据");
+        assert!(
+            snap.items
+                .iter()
+                .any(|(f, d)| *f == CF_DIB && d.len() == dib_data.len()),
+            "快照中必须含有 CF_DIB 数据"
+        );
 
         let res = with_temporary_clipboard_text("C:\\TestPath", || {
             let t = get_clipboard_text().unwrap_or_default();
@@ -911,21 +934,31 @@ mod tests {
     fn seed_dib_clipboard() {
         let mut dib_data = [0u8; 44];
         dib_data[0..4].copy_from_slice(&40u32.to_le_bytes()); // biSize = 40
-        dib_data[4..8].copy_from_slice(&1i32.to_le_bytes());  // biWidth = 1
+        dib_data[4..8].copy_from_slice(&1i32.to_le_bytes()); // biWidth = 1
         dib_data[8..12].copy_from_slice(&1i32.to_le_bytes()); // biHeight = 1
         dib_data[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes = 1
         dib_data[14..16].copy_from_slice(&24u16.to_le_bytes()); // biBitCount = 24
         dib_data[20..24].copy_from_slice(&4u32.to_le_bytes()); // biSizeImage = 4
 
-        assert!(open_clipboard_for_write(10), "测试初始化必须以合法 owner 打开剪贴板");
+        assert!(
+            open_clipboard_for_write(10),
+            "测试初始化必须以合法 owner 打开剪贴板"
+        );
         unsafe {
             let _ = EmptyClipboard();
             if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, dib_data.len()) {
                 let ptr = GlobalLock(h);
                 if !ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(dib_data.as_ptr(), ptr as *mut u8, dib_data.len());
+                    std::ptr::copy_nonoverlapping(
+                        dib_data.as_ptr(),
+                        ptr as *mut u8,
+                        dib_data.len(),
+                    );
                     let _ = GlobalUnlock(h);
-                    assert!(SetClipboardData(CF_DIB, Some(HANDLE(h.0))).is_ok(), "种入 CF_DIB 必须成功");
+                    assert!(
+                        SetClipboardData(CF_DIB, Some(HANDLE(h.0))).is_ok(),
+                        "种入 CF_DIB 必须成功"
+                    );
                 }
             }
             let _ = CloseClipboard();
@@ -949,7 +982,11 @@ mod tests {
             let err = snap.restore().expect_err("单格式恢复失败时不得返回成功");
             match err {
                 ClipboardRestoreError::PartialRestore(ref failed) => {
-                    assert!(failed.contains(&CF_DIB), "失败列表必须包含 CF_DIB，实际 {:?}", failed);
+                    assert!(
+                        failed.contains(&CF_DIB),
+                        "失败列表必须包含 CF_DIB，实际 {:?}",
+                        failed
+                    );
                 }
                 other => panic!("期望 PartialRestore，实际 {:?}", other),
             }
@@ -977,8 +1014,8 @@ mod tests {
         assert!(set_raw_clipboard_text("qp_snapshot_seed"));
 
         let mut snap = ClipboardSnapshot::capture().expect("文本剪贴板必须可被安全捕获");
-        let seq = set_raw_clipboard_text_tracked("C:\\TemporaryInjection")
-            .expect("写入临时文本必须成功");
+        let seq =
+            set_raw_clipboard_text_tracked("C:\\TemporaryInjection").expect("写入临时文本必须成功");
         snap.note_temporary_write("C:\\TemporaryInjection", seq);
 
         // 模拟用户/第三方在恢复前复制了全新内容
@@ -1016,7 +1053,9 @@ mod tests {
                     err
                 );
                 // 内容未恢复也不能假报成功：调用方拿不到闭包结果
-                assert!(matches!(err, ClipboardRestoreError::PartialRestore(ref v) if v.contains(&CF_UNICODETEXT)));
+                assert!(
+                    matches!(err, ClipboardRestoreError::PartialRestore(ref v) if v.contains(&CF_UNICODETEXT))
+                );
             }
             other => panic!("期望 RestoreFailed 错误，实际 {:?}", other),
         }
@@ -1096,7 +1135,10 @@ mod tests {
 
     /// 用指定字节块占用多个剪贴板格式，并顺带写入一段 Unicode 文本
     fn seed_clipboard_formats(entries: &[(u32, &[u8])]) {
-        assert!(open_clipboard_for_write(10), "测试必须以合法 owner 打开剪贴板");
+        assert!(
+            open_clipboard_for_write(10),
+            "测试必须以合法 owner 打开剪贴板"
+        );
         unsafe {
             let _ = EmptyClipboard();
             for (format, bytes) in entries {
@@ -1107,7 +1149,10 @@ mod tests {
                 prod_unlock(handle);
                 assert!(prod_set(*format, handle), "格式 {} 必须写回成功", format);
             }
-            let wide: Vec<u16> = "qp_multiformat_seed".encode_utf16().chain(Some(0)).collect();
+            let wide: Vec<u16> = "qp_multiformat_seed"
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
             let bytes = wide.len() * 2;
             let handle = prod_alloc(bytes).expect("分配必须成功");
             let ptr = prod_lock(handle);
@@ -1123,8 +1168,18 @@ mod tests {
         let after = ClipboardSnapshot::capture()
             .unwrap_or_else(|err| panic!("{}: 恢复后应能再次安全捕获: {:?}", label, err));
         for (format, data) in &original.items {
-            let got = after.items.iter().find(|(f, _)| f == format).map(|(_, d)| d);
-            assert_eq!(got, Some(data), "{}: 格式 {} 必须在恢复后字节完全一致", label, format);
+            let got = after
+                .items
+                .iter()
+                .find(|(f, _)| f == format)
+                .map(|(_, d)| d);
+            assert_eq!(
+                got,
+                Some(data),
+                "{}: 格式 {} 必须在恢复后字节完全一致",
+                label,
+                format
+            );
         }
     }
 
@@ -1135,18 +1190,21 @@ mod tests {
 
         let hdrop = hdrop_blob(&[r"C:\QuickPath\a.txt", r"D:\QuickPath\b.txt"]);
         let registered = unsafe {
-            windows::Win32::System::DataExchange::RegisterClipboardFormatW(
-                windows::core::w!("QuickPathProbeFormat"),
-            )
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "QuickPathProbeFormat"
+            ))
         };
         assert!(registered != 0, "注册剪贴板格式必须成功");
         let registered_bytes = b"quickpath-registered-format-probe".to_vec();
 
         seed_clipboard_formats(&[(CF_HDROP, &hdrop), (registered, &registered_bytes)]);
 
-        let before = ClipboardSnapshot::capture()
-            .expect("含 CF_HDROP 与注册格式的剪贴板必须可安全捕获");
-        assert!(before.items.iter().any(|(f, _)| *f == CF_HDROP), "快照必须含 CF_HDROP");
+        let before =
+            ClipboardSnapshot::capture().expect("含 CF_HDROP 与注册格式的剪贴板必须可安全捕获");
+        assert!(
+            before.items.iter().any(|(f, _)| *f == CF_HDROP),
+            "快照必须含 CF_HDROP"
+        );
         assert!(
             before.items.iter().any(|(f, _)| *f == registered),
             "快照必须含注册格式"
@@ -1233,5 +1291,3 @@ mod tests {
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_owner_probe"));
     }
 }
-
-

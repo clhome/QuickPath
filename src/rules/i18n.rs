@@ -6,9 +6,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Language {
     #[serde(rename = "auto")]
+    #[default]
     Auto,
     #[serde(rename = "zh-CN")]
     ZhCN,
@@ -16,12 +17,6 @@ pub enum Language {
     EnUS,
     #[serde(untagged)]
     Custom(String),
-}
-
-impl Default for Language {
-    fn default() -> Self {
-        Language::Auto
-    }
 }
 
 impl Language {
@@ -373,17 +368,16 @@ impl I18n {
             ];
 
             for dir in candidate_dirs {
-                if dir.is_dir() {
-                    if let Ok(entries) = fs::read_dir(dir) {
-                        for entry in entries.flatten() {
-                            let path = entry.path();
-                            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
-                                if let Ok(content) = fs::read_to_string(&path) {
-                                    if let Some(bundle) = parse_bundle_with_version(&content) {
-                                        map.insert(bundle.meta.code.clone(), bundle);
-                                    }
-                                }
-                            }
+                if dir.is_dir()
+                    && let Ok(entries) = fs::read_dir(dir)
+                {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("toml")
+                            && let Ok(content) = fs::read_to_string(&path)
+                            && let Some(bundle) = parse_bundle_with_version(&content)
+                        {
+                            map.insert(bundle.meta.code.clone(), bundle);
                         }
                     }
                 }
@@ -512,12 +506,20 @@ impl I18n {
     pub fn tray_toggle_monitor(lang: &Language, enabled: bool) -> String {
         let check = if enabled { "✔ " } else { "    " };
         let text = &Self::get_bundle(lang).tray.toggle_monitor;
-        let title = if text.is_empty() { "任务栏状态监控" } else { text.as_str() };
+        let title = if text.is_empty() {
+            "任务栏状态监控"
+        } else {
+            text.as_str()
+        };
         format!("{}{}", check, title)
     }
 
     pub fn tray_show_candidates(lang: &Language, hotkey_display: &str) -> String {
-        format!("{}({})", Self::get_bundle(lang).tray.show_candidates, hotkey_display)
+        format!(
+            "{}({})",
+            Self::get_bundle(lang).tray.show_candidates,
+            hotkey_display
+        )
     }
 
     pub fn tray_settings(lang: &Language) -> &str {
@@ -591,12 +593,32 @@ mod tests {
     #[test]
     fn test_dynamic_version_injection() {
         let bundle_zh = I18n::get_bundle(&Language::ZhCN);
-        assert!(bundle_zh.about.version.contains(crate::rules::version::APP_VERSION));
-        assert!(bundle_zh.settings.version_info.contains(crate::rules::version::APP_VERSION));
+        assert!(
+            bundle_zh
+                .about
+                .version
+                .contains(crate::rules::version::APP_VERSION)
+        );
+        assert!(
+            bundle_zh
+                .settings
+                .version_info
+                .contains(crate::rules::version::APP_VERSION)
+        );
 
         let bundle_en = I18n::get_bundle(&Language::EnUS);
-        assert!(bundle_en.about.version.contains(crate::rules::version::APP_VERSION));
-        assert!(bundle_en.settings.version_info.contains(crate::rules::version::APP_VERSION));
+        assert!(
+            bundle_en
+                .about
+                .version
+                .contains(crate::rules::version::APP_VERSION)
+        );
+        assert!(
+            bundle_en
+                .settings
+                .version_info
+                .contains(crate::rules::version::APP_VERSION)
+        );
     }
 
     #[test]
@@ -610,7 +632,11 @@ mod tests {
 
         let en = I18n::get_bundle(&Language::EnUS);
         assert_eq!(en.monitor.tips_title, "💡 Tips & Smart Features");
-        assert!(en.monitor.tips_line1.contains("Double-click to open Task Manager"));
+        assert!(
+            en.monitor
+                .tips_line1
+                .contains("Double-click to open Task Manager")
+        );
         assert_eq!(en.monitor.interval_3s, "3.0s (Rec.)");
         assert_eq!(en.monitor.menu_pos_taskbar_left, "Top-Left (Float)");
         assert_eq!(en.monitor.menu_pos_tray_left, "Tray Right (Default)");

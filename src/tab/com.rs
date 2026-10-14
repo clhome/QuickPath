@@ -1,21 +1,21 @@
 #![allow(dead_code)]
 
-use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::sync::Mutex;
 use std::collections::VecDeque;
+use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
-use windows::core::{Interface, BSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL,
-    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
+    CoUninitialize,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::{IShellFolderViewDual, IShellWindows, IWebBrowser2, ShellWindows};
 use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
+use windows::core::{BSTR, Interface};
 
 #[derive(Debug, Clone)]
 pub struct ShellTabInfo {
@@ -234,6 +234,12 @@ fn percentile_ms(sorted_us: &[u64], percentile: f64) -> f64 {
 pub struct ShellComManager {
     worker: Mutex<StaWorker>,
     stats: ComStats,
+}
+
+impl Default for ShellComManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ShellComManager {
@@ -489,7 +495,12 @@ impl ShellComManager {
     /// **单一绝对截止时间：总上界 1000ms**（不再有“文档说 800ms、实际约 1s”的不一致）：
     /// - 前 800ms：轮询向 STA 请求原子单次检查（每轮 ≤ 80ms）；
     /// - 剩余 ≤ 200ms：用一次 `navigate_latest` 兜底，且该兜底同样受同一个截止时间约束。
-    pub fn wait_and_navigate_new_tab(&self, host_hwnd: HWND, count_before: usize, target_path: &str) -> bool {
+    pub fn wait_and_navigate_new_tab(
+        &self,
+        host_hwnd: HWND,
+        count_before: usize,
+        target_path: &str,
+    ) -> bool {
         /// 总预算（外部可见的硬上界）
         const TOTAL_BUDGET: Duration = Duration::from_millis(1000);
         /// 轮询阶段预算
@@ -549,23 +560,23 @@ impl ShellComManager {
         }
 
         // 1. 如果有 target_index 且在范围内，且其标题与 target_title 匹配（或未指定 title）
-        if let Some(idx) = target_index {
-            if idx < window_tabs.len() {
-                if let Some(expected_title) = target_title {
-                    if window_tabs[idx].title == expected_title {
-                        return Some(window_tabs[idx].path.clone());
-                    }
-                } else {
+        if let Some(idx) = target_index
+            && idx < window_tabs.len()
+        {
+            if let Some(expected_title) = target_title {
+                if window_tabs[idx].title == expected_title {
                     return Some(window_tabs[idx].path.clone());
                 }
+            } else {
+                return Some(window_tabs[idx].path.clone());
             }
         }
 
         // 2. 如果指定了 target_title，按标题精确匹配
-        if let Some(title) = target_title {
-            if let Some(matched) = window_tabs.iter().find(|t| t.title == title) {
-                return Some(matched.path.clone());
-            }
+        if let Some(title) = target_title
+            && let Some(matched) = window_tabs.iter().find(|t| t.title == title)
+        {
+            return Some(matched.path.clone());
         }
 
         // 3. 回退到当前处于 active 的 Tab
@@ -605,32 +616,61 @@ fn sta_worker_loop(rx: std::sync::mpsc::Receiver<ComRequest>) {
                 let tabs = enumerate_shell_tabs();
                 let _ = reply.send(tabs);
             }
-            ComRequest::GetActiveTabPath { target_hwnd_raw, reply, .. } => {
+            ComRequest::GetActiveTabPath {
+                target_hwnd_raw,
+                reply,
+                ..
+            } => {
                 let hwnd_opt = target_hwnd_raw.map(|raw| HWND(raw as *mut _));
                 let path = get_active_tab_path_internal(hwnd_opt);
                 let _ = reply.send(path);
             }
-            ComRequest::Navigate { hwnd_raw, target_path, reply, .. } => {
+            ComRequest::Navigate {
+                hwnd_raw,
+                target_path,
+                reply,
+                ..
+            } => {
                 let hwnd = HWND(hwnd_raw as *mut _);
                 let ok = navigate_internal(hwnd, &target_path);
                 let _ = reply.send(ok);
             }
-            ComRequest::NavigateLatest { hwnd_raw, target_path, reply, .. } => {
+            ComRequest::NavigateLatest {
+                hwnd_raw,
+                target_path,
+                reply,
+                ..
+            } => {
                 let hwnd = HWND(hwnd_raw as *mut _);
                 let ok = navigate_latest_internal(hwnd, &target_path);
                 let _ = reply.send(ok);
             }
-            ComRequest::GetWindowTargetInfo { target_hwnd_raw, reply, .. } => {
+            ComRequest::GetWindowTargetInfo {
+                target_hwnd_raw,
+                reply,
+                ..
+            } => {
                 let hwnd = HWND(target_hwnd_raw as *mut _);
                 let info = get_window_target_info_internal(hwnd);
                 let _ = reply.send(info);
             }
-            ComRequest::TryNavigateNewTab { host_hwnd_raw, count_before, target_path, reply, .. } => {
+            ComRequest::TryNavigateNewTab {
+                host_hwnd_raw,
+                count_before,
+                target_path,
+                reply,
+                ..
+            } => {
                 let hwnd = HWND(host_hwnd_raw as *mut _);
                 let ok = try_navigate_new_tab_internal(hwnd, count_before, &target_path);
                 let _ = reply.send(ok);
             }
-            ComRequest::FindTabIndexByPath { host_hwnd_raw, target_path, reply, .. } => {
+            ComRequest::FindTabIndexByPath {
+                host_hwnd_raw,
+                target_path,
+                reply,
+                ..
+            } => {
                 let hwnd = HWND(host_hwnd_raw as *mut _);
                 let idx = find_tab_index_by_path_internal(hwnd, &target_path);
                 let _ = reply.send(idx);
@@ -652,59 +692,78 @@ fn enumerate_shell_tabs() -> Vec<ShellTabInfo> {
         let top_explorer = crate::managers::explorer::get_top_visible_explorer_hwnd();
         let top_active_tab = top_explorer.and_then(crate::managers::explorer::get_active_tab_hwnd);
 
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
 
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
-                            // 关键 Fail-Safe：严格检查窗口存活性与可见性，彻底剔除 dead/zombie 窗口
-                            if hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
-                                continue;
-                            }
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
+                    // 关键 Fail-Safe：严格检查窗口存活性与可见性，彻底剔除 dead/zombie 窗口
+                    if hwnd.0.is_null()
+                        || !IsWindow(Some(hwnd)).as_bool()
+                        || !IsWindowVisible(hwnd).as_bool()
+                    {
+                        continue;
+                    }
 
-                            let url = browser.LocationURL().map(|u| u.to_string()).unwrap_or_default();
-                            let name = browser.LocationName().map(|n| n.to_string()).unwrap_or_default();
+                    let url = browser
+                        .LocationURL()
+                        .map(|u| u.to_string())
+                        .unwrap_or_default();
+                    let name = browser
+                        .LocationName()
+                        .map(|n| n.to_string())
+                        .unwrap_or_default();
 
-                            if let Some(path) = parse_shell_url(&url, &name) {
-                                let is_valid = path.starts_with("shell:") || path.starts_with("::{") || (path.len() >= 2 && &path[1..2] == ":") || path.starts_with("\\\\");
-                                if is_valid {
-                                    let title = if name.is_empty() {
-                                        Path::new(&path)
-                                            .file_name()
-                                            .map(|f| f.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| path.clone())
-                                    } else {
-                                        name
-                                    };
+                    if let Some(path) = parse_shell_url(&url, &name) {
+                        let is_valid = path.starts_with("shell:")
+                            || path.starts_with("::{")
+                            || (path.len() >= 2 && &path[1..2] == ":")
+                            || path.starts_with("\\\\");
+                        if is_valid {
+                            let title = if name.is_empty() {
+                                Path::new(&path)
+                                    .file_name()
+                                    .map(|f| f.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| path.clone())
+                            } else {
+                                name
+                            };
 
-                                    // 核心：基于 ShellTabWindowClass 精准识别 Win11 多标签页活动状态
-                                    let mut is_active = false;
-                                    let tab_sub_hwnd = crate::managers::explorer::get_browser_tab_hwnd(&browser);
+                            // 核心：基于 ShellTabWindowClass 精准识别 Win11 多标签页活动状态
+                            let mut is_active = false;
+                            let tab_sub_hwnd =
+                                crate::managers::explorer::get_browser_tab_hwnd(&browser);
 
-                                    if let Some(top_exp) = top_explorer {
-                                        if hwnd == top_exp {
-                                            if let (Some(my_tab), Some(active_tab)) = (tab_sub_hwnd, top_active_tab) {
-                                                if my_tab == active_tab {
-                                                    is_active = true;
-                                                }
-                                            } else if top_active_tab.is_none() {
-                                                is_active = true;
-                                            }
-                                        }
+                            if let Some(top_exp) = top_explorer
+                                && hwnd == top_exp
+                            {
+                                if let (Some(my_tab), Some(active_tab)) =
+                                    (tab_sub_hwnd, top_active_tab)
+                                {
+                                    if my_tab == active_tab {
+                                        is_active = true;
                                     }
-
-                                    results.push(ShellTabInfo {
-                                        hwnd_raw: hwnd.0 as usize,
-                                        path,
-                                        title,
-                                        is_active,
-                                    });
+                                } else if top_active_tab.is_none() {
+                                    is_active = true;
                                 }
                             }
+
+                            results.push(ShellTabInfo {
+                                hwnd_raw: hwnd.0 as usize,
+                                path,
+                                title,
+                                is_active,
+                            });
                         }
                     }
                 }
@@ -742,28 +801,35 @@ fn get_active_tab_path_internal(target_hwnd: Option<HWND>) -> Option<String> {
 /// 内部导航实现
 fn navigate_internal(target_hwnd: HWND, target_path: &str) -> bool {
     unsafe {
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
-                            if hwnd == target_hwnd || target_hwnd.0.is_null() {
-                                let path_bstr = BSTR::from(target_path);
-                                let var_url = VARIANT::from(path_bstr);
-                                let null_var = VARIANT::default();
-                                if browser.Navigate2(
-                                    &var_url,
-                                    Some(&null_var as *const _),
-                                    Some(&null_var as *const _),
-                                    Some(&null_var as *const _),
-                                    Some(&null_var as *const _),
-                                ).is_ok() {
-                                    return true;
-                                }
-                            }
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
+                    if hwnd == target_hwnd || target_hwnd.0.is_null() {
+                        let path_bstr = BSTR::from(target_path);
+                        let var_url = VARIANT::from(path_bstr);
+                        let null_var = VARIANT::default();
+                        if browser
+                            .Navigate2(
+                                &var_url,
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                            )
+                            .is_ok()
+                        {
+                            return true;
                         }
                     }
                 }
@@ -776,28 +842,35 @@ fn navigate_internal(target_hwnd: HWND, target_path: &str) -> bool {
 /// 内部导航实现（从后往前反向查找最新创建的 Tab）
 fn navigate_latest_internal(target_hwnd: HWND, target_path: &str) -> bool {
     unsafe {
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                for i in (0..count).rev() {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
-                            if hwnd == target_hwnd || target_hwnd.0.is_null() {
-                                let path_bstr = BSTR::from(target_path);
-                                let var_url = VARIANT::from(path_bstr);
-                                let null_var = VARIANT::default();
-                                if browser.Navigate2(
-                                    &var_url,
-                                    Some(&null_var as *const _),
-                                    Some(&null_var as *const _),
-                                    Some(&null_var as *const _),
-                                    Some(&null_var as *const _),
-                                ).is_ok() {
-                                    return true;
-                                }
-                            }
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            for i in (0..count).rev() {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
+                    if hwnd == target_hwnd || target_hwnd.0.is_null() {
+                        let path_bstr = BSTR::from(target_path);
+                        let var_url = VARIANT::from(path_bstr);
+                        let null_var = VARIANT::default();
+                        if browser
+                            .Navigate2(
+                                &var_url,
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                                Some(&null_var as *const _),
+                            )
+                            .is_ok()
+                        {
+                            return true;
                         }
                     }
                 }
@@ -810,38 +883,46 @@ fn navigate_latest_internal(target_hwnd: HWND, target_path: &str) -> bool {
 /// 单次原子检查宿主窗口内新注册的 Tab 并对其调用 Navigate2（零 sleep，极速无阻塞）
 fn try_navigate_new_tab_internal(host_hwnd: HWND, count_before: usize, target_path: &str) -> bool {
     unsafe {
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                let mut host_browsers = Vec::new();
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
-                            if hwnd == host_hwnd {
-                                host_browsers.push(browser);
-                            }
-                        }
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            let mut host_browsers = Vec::new();
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
+                    if hwnd == host_hwnd {
+                        host_browsers.push(browser);
                     }
                 }
+            }
 
-                // 当属于 host_hwnd 的 Tab 数量出现增长，或者无前置数量但已存在有效 browser
-                if host_browsers.len() > count_before || (count_before == 0 && !host_browsers.is_empty()) {
-                    if let Some(newest_browser) = host_browsers.last() {
-                        let path_bstr = BSTR::from(target_path);
-                        let var_url = VARIANT::from(path_bstr);
-                        let null_var = VARIANT::default();
-                        if newest_browser.Navigate2(
-                            &var_url,
-                            Some(&null_var as *const _),
-                            Some(&null_var as *const _),
-                            Some(&null_var as *const _),
-                            Some(&null_var as *const _),
-                        ).is_ok() {
-                            return true;
-                        }
-                    }
+            // 当属于 host_hwnd 的 Tab 数量出现增长，或者无前置数量但已存在有效 browser
+            if (host_browsers.len() > count_before
+                || (count_before == 0 && !host_browsers.is_empty()))
+                && let Some(newest_browser) = host_browsers.last()
+            {
+                let path_bstr = BSTR::from(target_path);
+                let var_url = VARIANT::from(path_bstr);
+                let null_var = VARIANT::default();
+                if newest_browser
+                    .Navigate2(
+                        &var_url,
+                        Some(&null_var as *const _),
+                        Some(&null_var as *const _),
+                        Some(&null_var as *const _),
+                        Some(&null_var as *const _),
+                    )
+                    .is_ok()
+                {
+                    return true;
                 }
             }
         }
@@ -857,26 +938,36 @@ fn find_tab_index_by_path_internal(host_hwnd: HWND, target_path: &str) -> Option
     let target_norm = normalize_path_local(target_path);
 
     unsafe {
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                let mut current_idx = 0usize;
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
-                            if hwnd == host_hwnd {
-                                let url = browser.LocationURL().map(|u| u.to_string()).unwrap_or_default();
-                                let name = browser.LocationName().map(|n| n.to_string()).unwrap_or_default();
-                                if let Some(path) = parse_shell_url(&url, &name) {
-                                    if normalize_path_local(&path) == target_norm {
-                                        return Some(current_idx);
-                                    }
-                                }
-                                current_idx += 1;
-                            }
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            let mut current_idx = 0usize;
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
+                    if hwnd == host_hwnd {
+                        let url = browser
+                            .LocationURL()
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                        let name = browser
+                            .LocationName()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default();
+                        if let Some(path) = parse_shell_url(&url, &name)
+                            && normalize_path_local(&path) == target_norm
+                        {
+                            return Some(current_idx);
                         }
+                        current_idx += 1;
                     }
                 }
             }
@@ -904,67 +995,74 @@ fn get_window_target_info_internal(target_hwnd: HWND) -> Option<(String, Option<
             return None;
         }
 
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser.HWND().map(|h| HWND(h.0 as *mut _)).unwrap_or_default();
-                            if hwnd == target_hwnd {
-                                // 1. 解析 LocationURL 基础路径
-                                let url = browser.LocationURL().map(|u| u.to_string()).unwrap_or_default();
-                                let name = browser.LocationName().map(|n| n.to_string()).unwrap_or_default();
-                                let parsed_path = parse_shell_url(&url, &name);
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
+                    if hwnd == target_hwnd {
+                        // 1. 解析 LocationURL 基础路径
+                        let url = browser
+                            .LocationURL()
+                            .map(|u| u.to_string())
+                            .unwrap_or_default();
+                        let name = browser
+                            .LocationName()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default();
+                        let parsed_path = parse_shell_url(&url, &name);
 
-                                // 2. 穿透提取 SelectedItems（针对外部 /select 或 SHOpenFolderAndSelectItems 唤起）
-                                let mut selected_file = None;
-                                let mut selected_full_path = None;
+                        // 2. 穿透提取 SelectedItems（针对外部 /select 或 SHOpenFolderAndSelectItems 唤起）
+                        let mut selected_file = None;
+                        let mut selected_full_path = None;
 
-                                if let Ok(doc_disp) = browser.Document() {
-                                    if let Ok(sfv) = doc_disp.cast::<IShellFolderViewDual>() {
-                                        if let Ok(items) = sfv.SelectedItems() {
-                                            if let Ok(item_count) = items.Count() {
-                                                if item_count > 0 {
-                                                    let v_zero = VARIANT::from(0i32);
-                                                    if let Ok(first_item) = items.Item(&v_zero) {
-                                                        if let Ok(item_path) = first_item.Path() {
-                                                            let path_str = item_path.to_string();
-                                                            if !path_str.is_empty() {
-                                                                selected_full_path = Some(path_str);
-                                                            }
-                                                        }
-                                                        if let Ok(item_name) = first_item.Name() {
-                                                            let name_str = item_name.to_string();
-                                                            if !name_str.is_empty() {
-                                                                selected_file = Some(name_str);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+                        if let Ok(doc_disp) = browser.Document()
+                            && let Ok(sfv) = doc_disp.cast::<IShellFolderViewDual>()
+                            && let Ok(items) = sfv.SelectedItems()
+                            && let Ok(item_count) = items.Count()
+                            && item_count > 0
+                        {
+                            let v_zero = VARIANT::from(0i32);
+                            if let Ok(first_item) = items.Item(&v_zero) {
+                                if let Ok(item_path) = first_item.Path() {
+                                    let path_str = item_path.to_string();
+                                    if !path_str.is_empty() {
+                                        selected_full_path = Some(path_str);
                                     }
                                 }
-
-                                // 3. 优先依据选中项完整路径定位父目录与高亮文件
-                                if let Some(ref full_p) = selected_full_path {
-                                    let p = Path::new(full_p);
-                                    if let Some(parent) = p.parent() {
-                                        let folder = parent.to_string_lossy().to_string();
-                                        let file = p.file_name().map(|f| f.to_string_lossy().to_string());
-                                        if is_physical_dir_path(&folder) {
-                                            return Some((folder, file.or(selected_file)));
-                                        }
+                                if let Ok(item_name) = first_item.Name() {
+                                    let name_str = item_name.to_string();
+                                    if !name_str.is_empty() {
+                                        selected_file = Some(name_str);
                                     }
-                                }
-
-                                // 4. 若无选中项全路径，使用解析出的 URL 路径结合文件名
-                                if let Some(path) = parsed_path {
-                                    return Some((path, selected_file));
                                 }
                             }
+                        }
+
+                        // 3. 优先依据选中项完整路径定位父目录与高亮文件
+                        if let Some(ref full_p) = selected_full_path {
+                            let p = Path::new(full_p);
+                            if let Some(parent) = p.parent() {
+                                let folder = parent.to_string_lossy().to_string();
+                                let file = p.file_name().map(|f| f.to_string_lossy().to_string());
+                                if is_physical_dir_path(&folder) {
+                                    return Some((folder, file.or(selected_file)));
+                                }
+                            }
+                        }
+
+                        // 4. 若无选中项全路径，使用解析出的 URL 路径结合文件名
+                        if let Some(path) = parsed_path {
+                            return Some((path, selected_file));
                         }
                     }
                 }
@@ -981,14 +1079,16 @@ pub fn parse_shell_url(url: &str, location_name: &str) -> Option<String> {
         if location_name == "此电脑" || location_name.eq_ignore_ascii_case("this pc") {
             return Some("shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}".to_string());
         }
-        if location_name == "主文件夹" || location_name == "主页" || location_name.eq_ignore_ascii_case("home") {
+        if location_name == "主文件夹"
+            || location_name == "主页"
+            || location_name.eq_ignore_ascii_case("home")
+        {
             return Some("shell:Home".to_string());
         }
         return None;
     }
 
-    if url.starts_with("file:///") {
-        let raw = &url[8..];
+    if let Some(raw) = url.strip_prefix("file:///") {
         let decoded = url_decode(raw);
         let path_str = decoded.replace('/', "\\");
 
@@ -1027,14 +1127,11 @@ fn url_decode(input: &str) -> String {
         if b == b'%' {
             let h1 = chars.next();
             let h2 = chars.next();
-            if let (Some(h1), Some(h2)) = (h1, h2) {
-                if let Ok(val) = u8::from_str_radix(
-                    &format!("{}{}", h1 as char, h2 as char),
-                    16,
-                ) {
-                    bytes.push(val);
-                    continue;
-                }
+            if let (Some(h1), Some(h2)) = (h1, h2)
+                && let Ok(val) = u8::from_str_radix(&format!("{}{}", h1 as char, h2 as char), 16)
+            {
+                bytes.push(val);
+                continue;
             }
         }
         bytes.push(b);
@@ -1060,8 +1157,16 @@ mod tests {
             stats.record_success(Duration::from_micros(us));
         }
         let snapshot = stats.snapshot();
-        assert!((snapshot.p50_ms - 3.0).abs() < 0.001, "p50 应为 3ms，实际 {}", snapshot.p50_ms);
-        assert!((snapshot.p95_ms - 5.0).abs() < 0.001, "p95 应为 5ms，实际 {}", snapshot.p95_ms);
+        assert!(
+            (snapshot.p50_ms - 3.0).abs() < 0.001,
+            "p50 应为 3ms，实际 {}",
+            snapshot.p50_ms
+        );
+        assert!(
+            (snapshot.p95_ms - 5.0).abs() < 0.001,
+            "p95 应为 5ms，实际 {}",
+            snapshot.p95_ms
+        );
         assert!((snapshot.p99_ms - 5.0).abs() < 0.001);
         assert_eq!(snapshot.requests, 0, "requests 只在投递时累加");
         assert!(snapshot.describe().contains("p50="));
@@ -1089,7 +1194,10 @@ mod tests {
 
         let snapshot = manager.stats();
         assert_eq!(snapshot.timeouts, MAX_CONSECUTIVE_TIMEOUTS);
-        assert_eq!(snapshot.worker_rebuilds, 1, "连续超时必须触发 STA worker 重建");
+        assert_eq!(
+            snapshot.worker_rebuilds, 1,
+            "连续超时必须触发 STA worker 重建"
+        );
         assert_eq!(manager.generation(), 2, "重建后 generation 必须递增");
         assert_eq!(snapshot.queue_depth, 0, "请求结束后队列深度必须归零");
         // 重建后连续超时计数已清零
@@ -1128,7 +1236,10 @@ mod tests {
         );
 
         let snapshot = manager.stats();
-        assert_eq!(snapshot.worker_rebuilds, 1, "通道断开必须重建 worker 并重试");
+        assert_eq!(
+            snapshot.worker_rebuilds, 1,
+            "通道断开必须重建 worker 并重试"
+        );
         assert_eq!(snapshot.timeouts, 0, "通道断开不应被计为超时");
         assert_eq!(manager.generation(), 2);
     }
@@ -1185,10 +1296,7 @@ mod tests {
             parse_shell_url("", "主文件夹"),
             Some("shell:Home".to_string())
         );
-        assert_eq!(
-            parse_shell_url("", "Home"),
-            Some("shell:Home".to_string())
-        );
+        assert_eq!(parse_shell_url("", "Home"), Some("shell:Home".to_string()));
 
         // GUID 格式直传
         assert_eq!(
@@ -1206,13 +1314,17 @@ mod tests {
         // 虚拟路径必须一律判定为 false，杜绝 Navigate2 触发系统报错
         assert!(!is_physical_dir_path(""));
         assert!(!is_physical_dir_path("shell:Home"));
-        assert!(!is_physical_dir_path("shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
-        assert!(!is_physical_dir_path("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
+        assert!(!is_physical_dir_path(
+            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+        ));
+        assert!(!is_physical_dir_path(
+            "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+        ));
     }
 
     #[test]
     fn test_resolve_tab_path_logic() {
-        let tabs = vec![
+        let tabs = [
             ShellTabInfo {
                 hwnd_raw: 100,
                 path: "C:\\FolderA".to_string(),
@@ -1235,21 +1347,21 @@ mod tests {
 
         // 模拟 resolve 匹配逻辑
         let resolve = |target_title: Option<&str>, target_index: Option<usize>| -> Option<String> {
-            if let Some(idx) = target_index {
-                if idx < tabs.len() {
-                    if let Some(expected_title) = target_title {
-                        if tabs[idx].title == expected_title {
-                            return Some(tabs[idx].path.clone());
-                        }
-                    } else {
+            if let Some(idx) = target_index
+                && idx < tabs.len()
+            {
+                if let Some(expected_title) = target_title {
+                    if tabs[idx].title == expected_title {
                         return Some(tabs[idx].path.clone());
                     }
+                } else {
+                    return Some(tabs[idx].path.clone());
                 }
             }
-            if let Some(title) = target_title {
-                if let Some(matched) = tabs.iter().find(|t| t.title == title) {
-                    return Some(matched.path.clone());
-                }
+            if let Some(title) = target_title
+                && let Some(matched) = tabs.iter().find(|t| t.title == title)
+            {
+                return Some(matched.path.clone());
             }
             if let Some(active) = tabs.iter().find(|t| t.is_active) {
                 return Some(active.path.clone());
@@ -1258,15 +1370,27 @@ mod tests {
         };
 
         // 双击第 0 个 Tab (FolderA) -> 必须精准解析出 FolderA，绝不是最后的 FolderC 或活跃的 FolderB
-        assert_eq!(resolve(Some("FolderA"), Some(0)), Some("C:\\FolderA".to_string()));
+        assert_eq!(
+            resolve(Some("FolderA"), Some(0)),
+            Some("C:\\FolderA".to_string())
+        );
 
         // 双击第 2 个 Tab (FolderC) -> 必须精准解析出 FolderC
-        assert_eq!(resolve(Some("FolderC"), Some(2)), Some("E:\\FolderC".to_string()));
+        assert_eq!(
+            resolve(Some("FolderC"), Some(2)),
+            Some("E:\\FolderC".to_string())
+        );
 
         // 仅通过标题匹配
-        assert_eq!(resolve(Some("FolderA"), None), Some("C:\\FolderA".to_string()));
+        assert_eq!(
+            resolve(Some("FolderA"), None),
+            Some("C:\\FolderA".to_string())
+        );
 
         // 未命中任何特征 -> 回退到当前 active (FolderB)
-        assert_eq!(resolve(Some("NonExistent"), None), Some("D:\\FolderB".to_string()));
+        assert_eq!(
+            resolve(Some("NonExistent"), None),
+            Some("D:\\FolderB".to_string())
+        );
     }
 }

@@ -5,9 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
-use windows::core::Interface;
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationSelectionItemPattern, TreeScope_Children,
@@ -16,10 +15,11 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetAncestor, GetSystemMetrics, SetWindowsHookExW,
-    UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HHOOK, MSLLHOOKSTRUCT, SM_CXDOUBLECLK,
-    SM_CYDOUBLECLK, WH_MOUSE_LL, WM_LBUTTONDOWN,
+    CallNextHookEx, GA_ROOT, GetAncestor, GetSystemMetrics, HHOOK, MSLLHOOKSTRUCT, SM_CXDOUBLECLK,
+    SM_CYDOUBLECLK, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN,
+    WindowFromPoint,
 };
+use windows::core::Interface;
 
 use super::coordinator::TabCoordinator;
 use super::owner::CoordinatorSlot;
@@ -134,8 +134,13 @@ unsafe extern "system" fn mouse_ll_proc(code: i32, wparam: WPARAM, lparam: LPARA
                         }
 
                         // 校验坐标是否落在 TabItem 主体区域，并提取目标 Tab 标题和序号
-                        if let Some((tab_title, tab_index)) = find_tab_item_at_point(root_hwnd, pt) {
-                            coordinator_clone.duplicate_tab(root_hwnd, Some(&tab_title), Some(tab_index));
+                        if let Some((tab_title, tab_index)) = find_tab_item_at_point(root_hwnd, pt)
+                        {
+                            coordinator_clone.duplicate_tab(
+                                root_hwnd,
+                                Some(&tab_title),
+                                Some(tab_index),
+                            );
                         }
                     });
                 }
@@ -155,7 +160,8 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+        let uia: Result<IUIAutomation, _> =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
         let uia = match uia {
             Ok(u) => u,
             Err(_) => return None,
@@ -165,20 +171,22 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
         if let Ok(elem) = uia.ElementFromPoint(pt) {
             let mut curr = elem;
             for _ in 0..4 {
-                if let Ok(ctrl_type) = curr.CurrentControlType() {
-                    if ctrl_type == UIA_TabItemControlTypeId {
-                        if let Ok(rect) = curr.CurrentBoundingRectangle() {
-                            // 排除右侧关闭按钮区域（约 34px 宽度）
-                            if pt.x <= (rect.right - 34) {
-                                let title = curr.CurrentName().map(|n| n.to_string()).unwrap_or_default();
-                                if let Ok(pattern) = curr.GetCurrentPattern(UIA_SelectionItemPatternId) {
-                                    if let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
-                                        let _ = sel.Select();
-                                    }
-                                }
-                                return Some((title, 0));
-                            }
+                if let Ok(ctrl_type) = curr.CurrentControlType()
+                    && ctrl_type == UIA_TabItemControlTypeId
+                    && let Ok(rect) = curr.CurrentBoundingRectangle()
+                {
+                    // 排除右侧关闭按钮区域（约 34px 宽度）
+                    if pt.x <= (rect.right - 34) {
+                        let title = curr
+                            .CurrentName()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default();
+                        if let Ok(pattern) = curr.GetCurrentPattern(UIA_SelectionItemPatternId)
+                            && let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>()
+                        {
+                            let _ = sel.Select();
                         }
+                        return Some((title, 0));
                     }
                 }
                 if let Ok(walker) = uia.RawViewWalker() {
@@ -200,16 +208,20 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
         };
 
         // 尝试快速定位标签栏容器控件 (TabControl)
-        let var_tab_ctrl = VARIANT::from(UIA_TabControlTypeId.0 as i32);
-        let cond_tab_ctrl = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_tab_ctrl).ok();
+        let var_tab_ctrl = VARIANT::from(UIA_TabControlTypeId.0);
+        let cond_tab_ctrl = uia
+            .CreatePropertyCondition(UIA_ControlTypePropertyId, &var_tab_ctrl)
+            .ok();
 
         let search_root = if let Some(ref cond) = cond_tab_ctrl {
-            root_elem.FindFirst(TreeScope_Descendants, cond).unwrap_or_else(|_| root_elem.clone())
+            root_elem
+                .FindFirst(TreeScope_Descendants, cond)
+                .unwrap_or_else(|_| root_elem.clone())
         } else {
             root_elem.clone()
         };
 
-        let var_type = VARIANT::from(UIA_TabItemControlTypeId.0 as i32);
+        let var_type = VARIANT::from(UIA_TabItemControlTypeId.0);
         let cond_tab = match uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_type) {
             Ok(c) => c,
             Err(_) => return None,
@@ -222,28 +234,25 @@ fn find_tab_item_at_point(root_hwnd: HWND, pt: POINT) -> Option<(String, usize)>
             TreeScope_Children
         };
 
-        if let Ok(tabs) = search_root.FindAll(scope, &cond_tab) {
-            if let Ok(count) = tabs.Length() {
-                for i in 0..count {
-                    if let Ok(tab) = tabs.GetElement(i) {
-                        if let Ok(rect) = tab.CurrentBoundingRectangle() {
-                            if pt.x >= rect.left
-                                && pt.x <= rect.right
-                                && pt.y >= rect.top
-                                && pt.y <= rect.bottom
-                            {
-                                if pt.x <= (rect.right - 34) {
-                                    let title = tab.CurrentName().map(|n| n.to_string()).unwrap_or_default();
-                                    if let Ok(pattern) = tab.GetCurrentPattern(UIA_SelectionItemPatternId) {
-                                        if let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
-                                            let _ = sel.Select();
-                                        }
-                                    }
-                                    return Some((title, i as usize));
-                                }
-                            }
-                        }
+        if let Ok(tabs) = search_root.FindAll(scope, &cond_tab)
+            && let Ok(count) = tabs.Length()
+        {
+            for i in 0..count {
+                if let Ok(tab) = tabs.GetElement(i)
+                    && let Ok(rect) = tab.CurrentBoundingRectangle()
+                    && pt.x >= rect.left
+                    && pt.x <= rect.right
+                    && pt.y >= rect.top
+                    && pt.y <= rect.bottom
+                    && pt.x <= (rect.right - 34)
+                {
+                    let title = tab.CurrentName().map(|n| n.to_string()).unwrap_or_default();
+                    if let Ok(pattern) = tab.GetCurrentPattern(UIA_SelectionItemPatternId)
+                        && let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>()
+                    {
+                        let _ = sel.Select();
                     }
+                    return Some((title, i as usize));
                 }
             }
         }

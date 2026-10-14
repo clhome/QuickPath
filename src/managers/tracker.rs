@@ -39,20 +39,21 @@ impl WindowTracker {
     /// 获取最推荐的自动秒切目标目录 (AutoSwitch 路径)
     pub fn get_auto_switch_target(&mut self, config: &AppConfig) -> Option<String> {
         // 1. 核心提速：极速探测当前或最顶层可见资源管理器的活动 Tab 路径（纳秒/微秒级短路命中）
-        if config.enable_win11_tabs {
-            if let Some(fast_folder) = super::explorer::get_active_explorer_folder_fast() {
-                let norm = normalize_path(&fast_folder);
-                self.last_manager_path = Some(norm.clone());
-                self.last_manager_time = Some(Instant::now());
-                return Some(norm);
-            }
+        if config.enable_win11_tabs
+            && let Some(fast_folder) = super::explorer::get_active_explorer_folder_fast()
+        {
+            let norm = normalize_path(&fast_folder);
+            self.last_manager_path = Some(norm.clone());
+            self.last_manager_time = Some(Instant::now());
+            return Some(norm);
         }
 
         // 2. 检查最近活跃的文件管理器缓存（放宽至 30 分钟内有效，避免用户阅读/编辑较久后缓存失效）
-        if let (Some(path), Some(time)) = (&self.last_manager_path, self.last_manager_time) {
-            if time.elapsed().as_secs() < 1800 && is_fast_valid_folder(path) {
-                return Some(path.clone());
-            }
+        if let (Some(path), Some(time)) = (&self.last_manager_path, self.last_manager_time)
+            && time.elapsed().as_secs() < 1800
+            && is_fast_valid_folder(path)
+        {
+            return Some(path.clone());
         }
 
         // 3. 资源管理器（含 Win11 标签页）与第三方管理器：读取后台 scanner 的
@@ -72,17 +73,17 @@ impl WindowTracker {
         }
 
         // 4. 回退策略：使用最后一次访问的历史记录路径 (Last Used Folder)
-        if let Some(last_history) = config.history_folders.first() {
-            if is_fast_valid_folder(last_history) {
-                return Some(normalize_path(last_history));
-            }
+        if let Some(last_history) = config.history_folders.first()
+            && is_fast_valid_folder(last_history)
+        {
+            return Some(normalize_path(last_history));
         }
 
         // 5. 回退策略：使用第一个收藏夹路径
-        if let Some(first_pinned) = config.pinned_folders.first() {
-            if is_fast_valid_folder(first_pinned) {
-                return Some(normalize_path(first_pinned));
-            }
+        if let Some(first_pinned) = config.pinned_folders.first()
+            && is_fast_valid_folder(first_pinned)
+        {
+            return Some(normalize_path(first_pinned));
         }
 
         None
@@ -145,42 +146,46 @@ impl WindowTracker {
         }
 
         // 7. 如果列表仍完全为空，补齐系统常用目录（下载、桌面、文档），确保绝不为空！
-        if list.is_empty() {
-            if let Some(user_dirs) = directories::UserDirs::new() {
-                if let Some(down) = user_dirs.download_dir() {
-                    let norm = normalize_path(&down.to_string_lossy());
-                    if seen.insert(norm.to_lowercase()) {
-                        list.push(FolderCandidate {
-                            path: norm,
-                            title: crate::rules::I18n::dir_download(&config.language).to_string(),
-                            source: "系统目录".to_string(),
-                            is_active: false,
-                        });
-                    }
+        if list.is_empty()
+            && let Some(user_dirs) = directories::UserDirs::new()
+        {
+            if let Some(down) = user_dirs.download_dir() {
+                let norm = normalize_path(&down.to_string_lossy());
+                if seen.insert(norm.to_lowercase()) {
+                    list.push(FolderCandidate {
+                        path: norm,
+                        title: crate::rules::I18n::dir_download(&config.language).to_string(),
+                        source: "系统目录".to_string(),
+                        is_active: false,
+                    });
                 }
-                let desk = user_dirs.desktop_dir().map(|d| d.to_string_lossy().to_string());
-                if let Some(desk) = desk {
-                    let norm = normalize_path(&desk);
-                    if seen.insert(norm.to_lowercase()) {
-                        list.push(FolderCandidate {
-                            path: norm,
-                            title: crate::rules::I18n::dir_desktop(&config.language).to_string(),
-                            source: "系统目录".to_string(),
-                            is_active: false,
-                        });
-                    }
+            }
+            let desk = user_dirs
+                .desktop_dir()
+                .map(|d| d.to_string_lossy().to_string());
+            if let Some(desk) = desk {
+                let norm = normalize_path(&desk);
+                if seen.insert(norm.to_lowercase()) {
+                    list.push(FolderCandidate {
+                        path: norm,
+                        title: crate::rules::I18n::dir_desktop(&config.language).to_string(),
+                        source: "系统目录".to_string(),
+                        is_active: false,
+                    });
                 }
-                let doc = user_dirs.document_dir().map(|d| d.to_string_lossy().to_string());
-                if let Some(doc) = doc {
-                    let norm = normalize_path(&doc);
-                    if seen.insert(norm.to_lowercase()) {
-                        list.push(FolderCandidate {
-                            path: norm,
-                            title: crate::rules::I18n::dir_documents(&config.language).to_string(),
-                            source: "系统目录".to_string(),
-                            is_active: false,
-                        });
-                    }
+            }
+            let doc = user_dirs
+                .document_dir()
+                .map(|d| d.to_string_lossy().to_string());
+            if let Some(doc) = doc {
+                let norm = normalize_path(&doc);
+                if seen.insert(norm.to_lowercase()) {
+                    list.push(FolderCandidate {
+                        path: norm,
+                        title: crate::rules::I18n::dir_documents(&config.language).to_string(),
+                        source: "系统目录".to_string(),
+                        is_active: false,
+                    });
                 }
             }
         }
@@ -209,11 +214,11 @@ pub fn is_fast_valid_folder(path: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    // 1. 网络/UNC 路径 (\\server\share)：格式校验，坚决不调用 Path::is_dir() 触发 SMB 超时卡死
-    if trimmed.starts_with("\\\\") {
-        return trimmed.len() >= 5 && trimmed[2..].contains('\\');
+    // 1. 网络/UNC 路径 (\\server\share):格式校验,坚决不调用 Path::is_dir() 触发 SMB 超时卡死
+    if let Some(rest) = trimmed.strip_prefix("\\\\") {
+        return rest.len() >= 3 && rest.contains('\\');
     }
-    // 2. 本地绝对路径 (如 C:\...)：热路径优先信任格式，排除虚拟或非法格式
+    // 2. 本地绝对路径 (如 C:\...):热路径优先信任格式,排除虚拟或非法格式
     if trimmed.len() >= 3 && &trimmed[1..3] == ":\\" {
         return true;
     }

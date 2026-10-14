@@ -2,10 +2,9 @@
 
 use std::thread;
 use std::time::Duration;
-use windows::core::{Interface, BSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
@@ -15,6 +14,7 @@ use windows::Win32::UI::Accessibility::{
     UIA_TabControlTypeId, UIA_TabItemControlTypeId,
 };
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows::core::{BSTR, Interface};
 
 /// 在指定的 Explorer 宿主窗口内部，通过 UI Automation 尝试高亮选中指定文件名称的列表项
 pub fn try_select_file_item(host_hwnd: HWND, file_name: &str) -> bool {
@@ -28,7 +28,8 @@ pub fn try_select_file_item(host_hwnd: HWND, file_name: &str) -> bool {
         }
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+        let uia: Result<IUIAutomation, _> =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
         let uia = match uia {
             Ok(u) => u,
             Err(_) => return false,
@@ -44,11 +45,7 @@ pub fn try_select_file_item(host_hwnd: HWND, file_name: &str) -> bool {
                 None,
             );
             if let Ok(h) = h_tab_view {
-                if !h.0.is_null() {
-                    h
-                } else {
-                    host_hwnd
-                }
+                if !h.0.is_null() { h } else { host_hwnd }
             } else {
                 host_hwnd
             }
@@ -63,7 +60,7 @@ pub fn try_select_file_item(host_hwnd: HWND, file_name: &str) -> bool {
         };
 
         // 构建匹配条件：ControlType == ListItem 且 Name == file_name
-        let var_type = VARIANT::from(UIA_ListItemControlTypeId.0 as i32);
+        let var_type = VARIANT::from(UIA_ListItemControlTypeId.0);
         let cond_type = match uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_type) {
             Ok(c) => c,
             Err(_) => return false,
@@ -81,13 +78,12 @@ pub fn try_select_file_item(host_hwnd: HWND, file_name: &str) -> bool {
         };
 
         // 尝试查找匹配的文件项
-        if let Ok(item) = root.FindFirst(TreeScope_Descendants, &cond_and) {
-            if let Ok(pattern) = item.GetCurrentPattern(UIA_SelectionItemPatternId) {
-                if let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>() {
-                    let _ = sel.Select();
-                    return true;
-                }
-            }
+        if let Ok(item) = root.FindFirst(TreeScope_Descendants, &cond_and)
+            && let Ok(pattern) = item.GetCurrentPattern(UIA_SelectionItemPatternId)
+            && let Ok(sel) = pattern.cast::<IUIAutomationSelectionItemPattern>()
+        {
+            let _ = sel.Select();
+            return true;
         }
     }
 
@@ -117,11 +113,11 @@ unsafe fn tab_search_target(
     root: &IUIAutomationElement,
 ) -> (IUIAutomationElement, TreeScope) {
     unsafe {
-        let var_tab_ctrl = VARIANT::from(UIA_TabControlTypeId.0 as i32);
-        if let Ok(cond) = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_tab_ctrl) {
-            if let Ok(container) = root.FindFirst(TreeScope_Descendants, &cond) {
-                return (container, TreeScope_Children);
-            }
+        let var_tab_ctrl = VARIANT::from(UIA_TabControlTypeId.0);
+        if let Ok(cond) = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_tab_ctrl)
+            && let Ok(container) = root.FindFirst(TreeScope_Descendants, &cond)
+        {
+            return (container, TreeScope_Children);
         }
         (root.clone(), TreeScope_Descendants)
     }
@@ -135,18 +131,18 @@ unsafe fn collect_tab_items(
     unsafe {
         let (search_root, scope) = tab_search_target(uia, root);
         let mut items = Vec::new();
-        let var_type = VARIANT::from(UIA_TabItemControlTypeId.0 as i32);
-        if let Ok(cond) = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_type) {
-            if let Ok(tabs) = search_root.FindAll(scope, &cond) {
-                let count = tabs.Length().unwrap_or(0);
-                for i in 0..count {
-                    if let Ok(tab) = tabs.GetElement(i) {
-                        let name = tab
-                            .CurrentName()
-                            .map(|n| n.to_string().to_lowercase())
-                            .unwrap_or_default();
-                        items.push((tab, name));
-                    }
+        let var_type = VARIANT::from(UIA_TabItemControlTypeId.0);
+        if let Ok(cond) = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &var_type)
+            && let Ok(tabs) = search_root.FindAll(scope, &cond)
+        {
+            let count = tabs.Length().unwrap_or(0);
+            for i in 0..count {
+                if let Ok(tab) = tabs.GetElement(i) {
+                    let name = tab
+                        .CurrentName()
+                        .map(|n| n.to_string().to_lowercase())
+                        .unwrap_or_default();
+                    items.push((tab, name));
                 }
             }
         }
@@ -162,11 +158,7 @@ unsafe fn collect_tab_items(
 /// 3. 目标为空或回退索引越界时返回 None（宁可放弃，也不猜）。
 ///
 /// 真正的身份确认不在这里，而由调用方在选中后回查 Shell COM 的**完整路径**。
-fn pick_tab_index_for_selection(
-    names: &[String],
-    target: &str,
-    com_index: usize,
-) -> Option<usize> {
+fn pick_tab_index_for_selection(names: &[String], target: &str, com_index: usize) -> Option<usize> {
     let lower = target.to_lowercase();
     if lower.is_empty() {
         return None;
@@ -204,7 +196,8 @@ pub fn try_select_tab_item(host_hwnd: HWND, com_index: usize, leaf_name: &str) -
         }
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+        let uia: Result<IUIAutomation, _> =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
         let Ok(uia) = uia else {
             return false;
         };
@@ -273,7 +266,10 @@ mod tests {
         assert_eq!(pick_tab_index_for_selection(&tabs, "release", 0), Some(1));
         // 空目标与全空名称均不得命中
         assert_eq!(pick_tab_index_for_selection(&tabs, "", 0), None);
-        assert_eq!(pick_tab_index_for_selection(&names(&["", ""]), "src", 0), None);
+        assert_eq!(
+            pick_tab_index_for_selection(&names(&["", ""]), "src", 0),
+            None
+        );
     }
 
     /// P-02 架构不变式守卫：STA 线程（`tab/com.rs`）与 STA 链路（`managers/explorer.rs`）
@@ -283,7 +279,10 @@ mod tests {
     fn test_sta_worker_source_never_calls_uia() {
         let sources = [
             ("tab/com.rs", include_str!("com.rs")),
-            ("managers/explorer.rs", include_str!("../managers/explorer.rs")),
+            (
+                "managers/explorer.rs",
+                include_str!("../managers/explorer.rs"),
+            ),
         ];
 
         for (name, source) in sources {

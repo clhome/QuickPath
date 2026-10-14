@@ -3,8 +3,8 @@ use crate::monitor::collector::{
 };
 use crate::monitor::metrics::{MetricsSnapshot, WaveformBuffer};
 use arc_swap::ArcSwap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -88,7 +88,7 @@ impl MetricsWorker {
                     loop_count = loop_count.wrapping_add(1);
 
                     // 每 30 秒重新校验活跃网卡
-                    if loop_count % 30 == 0 {
+                    if loop_count.is_multiple_of(30) {
                         // 触发网卡检测
                     }
 

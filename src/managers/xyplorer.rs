@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, WM_COPYDATA};
+use windows::core::PCWSTR;
 
 use super::ipc::{self, Manager};
 
@@ -109,7 +109,8 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
                 break;
             }
 
-            hwnd = FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
+            hwnd =
+                FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
         }
 
         // 扫描完成，立即恢复用户原始剪贴板（恢复失败仅记录，不影响扫描结果）

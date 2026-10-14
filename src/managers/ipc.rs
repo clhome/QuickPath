@@ -20,9 +20,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::{
-    SendMessageTimeoutW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
-};
+use windows::Win32::UI::WindowsAndMessaging::{SMTO_ABORTIFHUNG, SMTO_BLOCK, SendMessageTimeoutW};
 
 /// 子进程创建时隐藏控制台窗口
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -180,7 +178,10 @@ mod tests {
             return; // 极端环境缺少 ping 时跳过（不影响被测语义）
         };
         let start = Instant::now();
-        let ok = run_bounded(&ping, &["-n".to_string(), "30".to_string(), "127.0.0.1".to_string()]);
+        let ok = run_bounded(
+            &ping,
+            &["-n".to_string(), "30".to_string(), "127.0.0.1".to_string()],
+        );
         assert!(!ok, "超时子进程必须返回失败");
         assert!(
             start.elapsed() < CHILD_TIMEOUT + Duration::from_secs(2),

@@ -1,7 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::collections::{HashMap, HashSet};
-use windows::core::w;
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory4};
 use windows::Win32::NetworkManagement::IpHelper::{
@@ -9,17 +8,19 @@ use windows::Win32::NetworkManagement::IpHelper::{
     MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW,
+    PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
 };
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::{
-    GetProcessIoCounters, GetProcessTimes, OpenProcess, IO_COUNTERS, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessIoCounters, GetProcessTimes, IO_COUNTERS, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::core::w;
 
 #[derive(Debug, Clone)]
 pub struct DetailMetrics {
@@ -104,7 +105,8 @@ impl VramCollector {
                 i += 1;
             }
 
-            let luid_pat = best_luid.map(|l| format!("{:08x}_{:08x}", l.HighPart, l.LowPart).to_lowercase());
+            let luid_pat =
+                best_luid.map(|l| format!("{:08x}_{:08x}", l.HighPart, l.LowPart).to_lowercase());
             (best_dedicated, luid_pat)
         }
     }
@@ -117,12 +119,9 @@ impl VramCollector {
                 return;
             }
             let mut c = PDH_HCOUNTER::default();
-            if PdhAddEnglishCounterW(
-                q,
-                w!("\\GPU Adapter Memory(*)\\Dedicated Usage"),
-                0,
-                &mut c,
-            ) == 0 {
+            if PdhAddEnglishCounterW(q, w!("\\GPU Adapter Memory(*)\\Dedicated Usage"), 0, &mut c)
+                == 0
+            {
                 let _ = PdhCollectQueryData(q);
                 self.query = Some(q);
                 self.counter = Some(c);
@@ -172,7 +171,8 @@ impl VramCollector {
                         Some(self.buffer.as_mut_ptr() as *mut PDH_FMT_COUNTERVALUE_ITEM_W),
                     );
 
-                    if res == 0x800007D2 { // PDH_MORE_DATA
+                    if res == 0x800007D2 {
+                        // PDH_MORE_DATA
                         self.buffer.resize(buf_size as usize + 2048, 0);
                         let mut new_size = self.buffer.len() as u32;
                         res = PdhGetFormattedCounterArrayW(
@@ -196,7 +196,8 @@ impl VramCollector {
                             if let Some(target) = &self.target_luid_pattern {
                                 let ptr = item.szName.0;
                                 if !ptr.is_null() {
-                                    let name_len = (0..).take_while(|&idx| *ptr.add(idx) != 0).count();
+                                    let name_len =
+                                        (0..).take_while(|&idx| *ptr.add(idx) != 0).count();
                                     let name_slice = std::slice::from_raw_parts(ptr, name_len);
                                     let name = String::from_utf16_lossy(name_slice).to_lowercase();
                                     if name.contains(target) {
@@ -272,8 +273,12 @@ impl DetailsCollector {
             self.last_heavy_sample_time = Some(std::time::Instant::now());
         }
 
-        let (ref vram_display, ref top_process_display, ref top_net_process_display, ref top_disk_process_display) =
-            self.cached_heavy_metrics;
+        let (
+            ref vram_display,
+            ref top_process_display,
+            ref top_net_process_display,
+            ref top_disk_process_display,
+        ) = self.cached_heavy_metrics;
 
         DetailMetrics {
             vram_display: vram_display.clone(),
@@ -309,16 +314,30 @@ impl DetailsCollector {
                 loop {
                     let pid = entry.th32ProcessID;
                     if pid != 0 && pid != 4 {
-                        let name_len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len());
+                        let name_len = entry
+                            .szExeFile
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(entry.szExeFile.len());
                         let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
 
-                        if let Ok(h_proc) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                        if let Ok(h_proc) =
+                            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                        {
                             let mut creation = FILETIME::default();
                             let mut exit = FILETIME::default();
                             let mut kernel = FILETIME::default();
                             let mut user = FILETIME::default();
 
-                            if GetProcessTimes(h_proc, &mut creation, &mut exit, &mut kernel, &mut user).is_ok() {
+                            if GetProcessTimes(
+                                h_proc,
+                                &mut creation,
+                                &mut exit,
+                                &mut kernel,
+                                &mut user,
+                            )
+                            .is_ok()
+                            {
                                 let total_time = filetime_to_u64(&kernel) + filetime_to_u64(&user);
                                 current_times.insert(pid, (total_time, name.clone()));
                             }
@@ -359,15 +378,15 @@ impl DetailsCollector {
             let mut top_net_name = String::new();
 
             for (pid, cur_io) in &current_io {
-                if net_pids.contains(pid) {
-                    if let Some(prev_io) = self.last_process_io.get(pid) {
-                        let delta = cur_io.saturating_sub(*prev_io);
-                        // 过滤闲置底噪：单采样周期增量至少 16 KB
-                        if delta > max_net_delta && delta >= 16 * 1024 {
-                            max_net_delta = delta;
-                            if let Some((_, name)) = current_times.get(pid) {
-                                top_net_name = name.clone();
-                            }
+                if net_pids.contains(pid)
+                    && let Some(prev_io) = self.last_process_io.get(pid)
+                {
+                    let delta = cur_io.saturating_sub(*prev_io);
+                    // 过滤闲置底噪：单采样周期增量至少 16 KB
+                    if delta > max_net_delta && delta >= 16 * 1024 {
+                        max_net_delta = delta;
+                        if let Some((_, name)) = current_times.get(pid) {
+                            top_net_name = name.clone();
                         }
                     }
                 }
@@ -432,7 +451,8 @@ fn query_active_network_pids() -> HashSet<u32> {
                 2,
                 TCP_TABLE_OWNER_PID_ALL,
                 0,
-            ) == 0 {
+            ) == 0
+            {
                 let table = buf.as_ptr() as *const MIB_TCPTABLE_OWNER_PID;
                 let num = (*table).dwNumEntries as usize;
                 let rows = std::slice::from_raw_parts((*table).table.as_ptr(), num);
@@ -456,7 +476,8 @@ fn query_active_network_pids() -> HashSet<u32> {
                 23,
                 TCP_TABLE_OWNER_PID_ALL,
                 0,
-            ) == 0 {
+            ) == 0
+            {
                 let table = buf6.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID;
                 let num = (*table).dwNumEntries as usize;
                 let rows = std::slice::from_raw_parts((*table).table.as_ptr(), num);
@@ -480,7 +501,8 @@ fn query_active_network_pids() -> HashSet<u32> {
                 2,
                 UDP_TABLE_OWNER_PID,
                 0,
-            ) == 0 {
+            ) == 0
+            {
                 let table = buf_u.as_ptr() as *const MIB_UDPTABLE_OWNER_PID;
                 let num = (*table).dwNumEntries as usize;
                 let rows = std::slice::from_raw_parts((*table).table.as_ptr(), num);
@@ -509,7 +531,11 @@ fn query_power_status() -> (Option<u8>, bool, Option<String>) {
                 } else {
                     "电池供电"
                 };
-                return (Some(percent), is_ac, Some(format!("{}% ({})", percent, state_str)));
+                return (
+                    Some(percent),
+                    is_ac,
+                    Some(format!("{}% ({})", percent, state_str)),
+                );
             }
         }
         (None, false, None)

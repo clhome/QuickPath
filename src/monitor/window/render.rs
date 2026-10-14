@@ -1,20 +1,21 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+// 波形/文字/图标自绘函数需要同时传入坐标、尺寸、配色、缩放与主题；
+// 拆成参数结构体只会把样板搬到调用端而不提升可读性（clippy::too_many_arguments 说明）。
+#![allow(clippy::too_many_arguments)]
 
 use crate::monitor::metrics::MetricsSnapshot;
 use crate::rules::MonitorConfig;
-use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC,
-    DeleteObject, DrawTextW, FillRect, GetTextExtentPoint32W, Polyline, SelectObject, SetBkMode,
-    SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, DT_CALCRECT,
-    DT_LEFT, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, FONT_CHARSET, FONT_CLIP_PRECISION,
-    FONT_OUTPUT_PRECISION, FONT_QUALITY, FW_NORMAL, HDC, HGDIOBJ, PS_SOLID, TRANSPARENT,
-    AC_SRC_ALPHA, AC_SRC_OVER,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DIB_RGB_COLORS,
+    DT_CALCRECT, DT_LEFT, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
+    FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FW_NORMAL, FillRect,
+    GetTextExtentPoint32W, HDC, HGDIOBJ, PS_SOLID, Polyline, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    UpdateLayeredWindow, ULW_ALPHA,
-};
+use windows::Win32::UI::WindowsAndMessaging::{ULW_ALPHA, UpdateLayeredWindow};
+use windows::core::w;
 
 /// 动态列布局信息
 pub struct LayoutInfo {
@@ -123,14 +124,7 @@ pub unsafe fn render_bar_window(
     };
 
     let mut bits_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
-    let dib_bitmap = CreateDIBSection(
-        Some(mem_dc),
-        &bmi,
-        DIB_RGB_COLORS,
-        &mut bits_ptr,
-        None,
-        0,
-    );
+    let dib_bitmap = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0);
 
     if dib_bitmap.is_err() || bits_ptr.is_null() {
         let _ = DeleteDC(mem_dc);
@@ -163,9 +157,10 @@ pub unsafe fn render_bar_window(
 
     pixels.fill(premul_bg_pixel);
 
-    // 2. 绘制实时历史折线波形背景（如开启）
-    if config.show_graph_bg && layout.col_cpu_mem.is_some() {
-        let col = layout.col_cpu_mem.as_ref().unwrap();
+    // 2. 绘制实时历史折线波形背景(如开启)
+    if config.show_graph_bg
+        && let Some(col) = layout.col_cpu_mem.as_ref()
+    {
         draw_waveform_graph_gdi(mem_dc, snapshot, col, scale, is_dark_theme);
     }
 
@@ -230,8 +225,8 @@ pub unsafe fn render_bar_window(
         AlphaFormat: AC_SRC_ALPHA as u8,
     };
 
-    let mut pt_src = POINT { x: 0, y: 0 };
-    let mut size = SIZE {
+    let pt_src = POINT { x: 0, y: 0 };
+    let size = SIZE {
         cx: width,
         cy: height,
     };
@@ -240,9 +235,9 @@ pub unsafe fn render_bar_window(
         hwnd,
         Some(screen_dc),
         None,
-        Some(&mut size),
+        Some(&size),
         Some(mem_dc),
-        Some(&mut pt_src),
+        Some(&pt_src),
         COLORREF(0),
         Some(&blend),
         ULW_ALPHA,
@@ -310,7 +305,12 @@ unsafe fn draw_gdi_text(hdc: HDC, text: &str, x: i32, y: i32, w: i32, h: i32) {
         right: x + w,
         bottom: y + h,
     };
-    let _ = DrawTextW(hdc, &mut buf, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let _ = DrawTextW(
+        hdc,
+        &mut buf,
+        &mut rect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
 }
 
 /// 绘制单行文字片段 (Win32 ClearType，带 DT_NOCLIP 杜绝边缘亚像素裁切)
@@ -322,36 +322,43 @@ unsafe fn draw_gdi_text_segment(hdc: HDC, text: &str, x: i32, y: i32, h: i32) {
         right: x + 200,
         bottom: y + h,
     };
-    let _ = DrawTextW(hdc, &mut buf, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    let _ = DrawTextW(
+        hdc,
+        &mut buf,
+        &mut rect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+    );
 }
 
 /// 解析指标字符串，拆分为 (前缀, 数值部分, 后缀%)
 #[inline]
-fn parse_metric_display<'a>(display: &'a str) -> Option<(&'a str, &'a str, &'a str)> {
-    if let Some(colon_pos) = display.find(": ") {
-        if display.ends_with('%') && colon_pos + 2 < display.len() - 1 {
-            let prefix = &display[..colon_pos + 2];
-            let num_part = &display[colon_pos + 2..display.len() - 1];
-            let suffix = "%";
-            return Some((prefix, num_part, suffix));
-        }
+fn parse_metric_display(display: &str) -> Option<(&str, &str, &str)> {
+    if let Some(colon_pos) = display.find(": ")
+        && display.ends_with('%')
+        && colon_pos + 2 < display.len() - 1
+    {
+        let prefix = &display[..colon_pos + 2];
+        let num_part = &display[colon_pos + 2..display.len() - 1];
+        let suffix = "%";
+        return Some((prefix, num_part, suffix));
     }
     None
 }
 
 /// 解析网速显示字符串，拆分为 (前缀箭头, 速率数值部分)
 #[inline]
-fn parse_network_display<'a>(display: &'a str) -> Option<(&'a str, &'a str)> {
+fn parse_network_display(display: &str) -> Option<(&str, &str)> {
     let mut chars = display.char_indices();
-    if let Some((_, first_char)) = chars.next() {
-        if (first_char == '↑' || first_char == '↓') && chars.next().is_some() {
-            // 前缀为箭头与紧随的1个标准空格 (例如 "↑ " 或 "↓ ")
-            let prefix_end = first_char.len_utf8() + 1;
-            if display.len() >= prefix_end {
-                let prefix = &display[..prefix_end];
-                let num_part = &display[prefix_end..];
-                return Some((prefix, num_part));
-            }
+    if let Some((_, first_char)) = chars.next()
+        && (first_char == '↑' || first_char == '↓')
+        && chars.next().is_some()
+    {
+        // 前缀为箭头与紧随的1个标准空格 (例如 "↑ " 或 "↓ ")
+        let prefix_end = first_char.len_utf8() + 1;
+        if display.len() >= prefix_end {
+            let prefix = &display[..prefix_end];
+            let num_part = &display[prefix_end..];
+            return Some((prefix, num_part));
         }
     }
     None
@@ -405,7 +412,15 @@ unsafe fn draw_metric_text_with_threshold(
 }
 
 /// 绘制微型警戒色块条 (GDI)
-unsafe fn draw_gauge_bar_gdi(hdc: HDC, x: i32, y: i32, w: i32, h: i32, percent: f32, base_color: COLORREF) {
+unsafe fn draw_gauge_bar_gdi(
+    hdc: HDC,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    percent: f32,
+    base_color: COLORREF,
+) {
     let color = get_metric_status_color(percent, base_color);
 
     let fill_w = ((w as f32 * (percent / 100.0)).round() as i32).clamp(1, w);
@@ -508,7 +523,15 @@ unsafe fn draw_cpu_mem_column(
             base_color,
         );
         let bar_y = y1 + row_h - 2;
-        draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.cpu.usage_percent, base_color);
+        draw_gauge_bar_gdi(
+            hdc,
+            col.left,
+            bar_y,
+            col.right - col.left - 2,
+            2,
+            snapshot.cpu.usage_percent,
+            base_color,
+        );
     }
 
     if config.show_memory {
@@ -523,7 +546,15 @@ unsafe fn draw_cpu_mem_column(
             base_color,
         );
         let bar_y = col.bottom - 2;
-        draw_gauge_bar_gdi(hdc, col.left, bar_y, col.right - col.left - 2, 2, snapshot.memory.usage_percent as f32, base_color);
+        draw_gauge_bar_gdi(
+            hdc,
+            col.left,
+            bar_y,
+            col.right - col.left - 2,
+            2,
+            snapshot.memory.usage_percent as f32,
+            base_color,
+        );
     }
 }
 
@@ -597,7 +628,8 @@ unsafe fn draw_waveform_graph_gdi(
     let mut gdi_pts: Vec<POINT> = Vec::with_capacity(points.len());
     for (i, &p) in points.iter().enumerate() {
         let x = (x_start + i as f32 * step_x).round() as i32;
-        let y = (col.bottom as f32 - (p.clamp(0.0, 100.0) / 100.0) * (height * 0.75)).round() as i32;
+        let y =
+            (col.bottom as f32 - (p.clamp(0.0, 100.0) / 100.0) * (height * 0.75)).round() as i32;
         gdi_pts.push(POINT { x, y });
     }
 

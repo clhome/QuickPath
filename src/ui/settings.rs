@@ -1,37 +1,39 @@
 #![allow(dead_code)]
+// 自绘几何/布局辅助函数天然需要较多坐标与配色参数;拆成参数结构体只会增加
+// 调用端样板而不带来任何安全性或可读性收益(clippy::too_many_arguments lint 说明)。
+#![allow(clippy::too_many_arguments)]
 
 use crate::rules::{AppConfig, I18n, Language, MonitorPosition};
 use crate::win32::autostart::set_autostart;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::Mutex;
-use windows::core::w;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint, FillRect, GetStockObject,
-    InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_CALCRECT,
-    DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
-    DT_WORDBREAK, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, HBRUSH, HDC, HGDIOBJ, PAINTSTRUCT, PS_NULL,
-    PS_SOLID, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
+    CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC, DeleteObject, DrawTextW, EndPaint, FW_BOLD,
+    FW_NORMAL, FW_SEMIBOLD, FillRect, GetStockObject, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    PAINTSTRUCT, PS_NULL, PS_SOLID, RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DrawIconEx, GetClientRect, GetSystemMetrics, LoadCursorW,
-    RegisterClassW, SendMessageW, SetCursor, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
-    DI_NORMAL, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, SW_HIDE, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETICON, WM_SYSKEYDOWN, WNDCLASSW,
-    WS_CAPTION, WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_SYSMENU,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DrawIconEx, GetClientRect,
+    GetSystemMetrics, ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SendMessageW, SetCursor,
+    SetWindowPos, ShowWindow, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETICON, WM_SYSKEYDOWN, WNDCLASSW, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_MINIMIZEBOX, WS_SYSMENU,
 };
+use windows::core::w;
 
-static SETTINGS_WINDOW_HWND: AtomicPtr<core::ffi::c_void> =
-    AtomicPtr::new(std::ptr::null_mut());
+static SETTINGS_WINDOW_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -44,10 +46,26 @@ pub enum SettingsTab {
 enum DragMode {
     None,
     OpacitySlider,
-    AutoSwitchToggle { start_x: i32, initial_state: bool, has_moved: bool },
-    AutostartToggle { start_x: i32, initial_state: bool, has_moved: bool },
-    TabMasterToggle { start_x: i32, initial_state: bool, has_moved: bool },
-    MonitorMasterToggle { start_x: i32, initial_state: bool, has_moved: bool },
+    AutoSwitchToggle {
+        start_x: i32,
+        initial_state: bool,
+        has_moved: bool,
+    },
+    AutostartToggle {
+        start_x: i32,
+        initial_state: bool,
+        has_moved: bool,
+    },
+    TabMasterToggle {
+        start_x: i32,
+        initial_state: bool,
+        has_moved: bool,
+    },
+    MonitorMasterToggle {
+        start_x: i32,
+        initial_state: bool,
+        has_moved: bool,
+    },
     MonitorOpacitySlider,
 }
 
@@ -61,10 +79,10 @@ static IS_DROPDOWN_OPEN: AtomicBool = AtomicBool::new(false);
 static HOVER_DROPDOWN_ITEM_IDX: Mutex<Option<usize>> = Mutex::new(None);
 
 fn get_draft_config() -> AppConfig {
-    if let Ok(draft) = DRAFT_CONFIG.lock() {
-        if let Some(cfg) = &*draft {
-            return cfg.clone();
-        }
+    if let Ok(draft) = DRAFT_CONFIG.lock()
+        && let Some(cfg) = &*draft
+    {
+        return cfg.clone();
     }
     crate::get_global_config()
 }
@@ -113,8 +131,18 @@ impl SettingsWindow {
                 None,
             ) {
                 Ok(h) if !h.0.is_null() => {
-                    let _ = SendMessageW(h, WM_SETICON, Some(WPARAM(ICON_SMALL as _)), Some(LPARAM(hicon_sm.0 as _)));
-                    let _ = SendMessageW(h, WM_SETICON, Some(WPARAM(ICON_BIG as _)), Some(LPARAM(hicon_big.0 as _)));
+                    let _ = SendMessageW(
+                        h,
+                        WM_SETICON,
+                        Some(WPARAM(ICON_SMALL as _)),
+                        Some(LPARAM(hicon_sm.0 as _)),
+                    );
+                    let _ = SendMessageW(
+                        h,
+                        WM_SETICON,
+                        Some(WPARAM(ICON_BIG as _)),
+                        Some(LPARAM(hicon_big.0 as _)),
+                    );
                     h
                 }
                 _ => return Err("创建设置中心窗口失败".to_string()),
@@ -122,7 +150,11 @@ impl SettingsWindow {
 
             // 获取当前显示器 DPI 并自适应缩放尺寸
             let dpi = GetDpiForWindow(hwnd);
-            let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
+            let scale = if dpi == 0 {
+                1.0
+            } else {
+                (dpi as f32 / 96.0).max(1.0)
+            };
             let win_w = (660.0 * scale).round() as i32;
             let win_h = (750.0 * scale).round() as i32;
 
@@ -215,7 +247,17 @@ unsafe extern "system" fn settings_wnd_proc(
 
                 render_settings_ui(hwnd, mem_dc);
 
-                let _ = BitBlt(hdc, 0, 0, rect.right, rect.bottom, Some(mem_dc), 0, 0, SRCCOPY);
+                let _ = BitBlt(
+                    hdc,
+                    0,
+                    0,
+                    rect.right,
+                    rect.bottom,
+                    Some(mem_dc),
+                    0,
+                    0,
+                    SRCCOPY,
+                );
 
                 let _ = SelectObject(mem_dc, old_bmp);
                 let _ = DeleteObject(HGDIOBJ(mem_bmp.0 as _));
@@ -241,15 +283,21 @@ unsafe extern "system" fn settings_wnd_proc(
                     let is_ctrl = unsafe { GetKeyState(0x11) < 0 };
                     let is_alt = unsafe { GetKeyState(0x12) < 0 };
                     let is_shift = unsafe { GetKeyState(0x10) < 0 };
-                    let is_win = unsafe {
-                        GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0
-                    };
+                    let is_win = unsafe { GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0 };
 
                     let mut combo_parts = Vec::new();
-                    if is_ctrl { combo_parts.push("Ctrl"); }
-                    if is_alt { combo_parts.push("Alt"); }
-                    if is_shift { combo_parts.push("Shift"); }
-                    if is_win { combo_parts.push("Win"); }
+                    if is_ctrl {
+                        combo_parts.push("Ctrl");
+                    }
+                    if is_alt {
+                        combo_parts.push("Alt");
+                    }
+                    if is_shift {
+                        combo_parts.push("Shift");
+                    }
+                    if is_win {
+                        combo_parts.push("Win");
+                    }
 
                     if combo_parts.is_empty() && !key_name.starts_with('F') {
                         combo_parts.push("Ctrl");
@@ -317,7 +365,11 @@ unsafe extern "system" fn settings_wnd_proc(
 unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
     unsafe {
         let dpi = GetDpiForWindow(hwnd);
-        let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
+        let scale = if dpi == 0 {
+            1.0
+        } else {
+            (dpi as f32 / 96.0).max(1.0)
+        };
 
         let mut rect = RECT::default();
         let _ = GetClientRect(hwnd, &mut rect);
@@ -330,7 +382,14 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         SetBkMode(hdc, TRANSPARENT);
 
         let font_h1 = CreateFontW(
-            (-19.0 * scale).round() as i32, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
+            (-19.0 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_BOLD.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -339,7 +398,14 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
         let font_card_title = CreateFontW(
-            (-13.5 * scale).round() as i32, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+            (-13.5 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -348,7 +414,14 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
         let font_text = CreateFontW(
-            (-11.5 * scale).round() as i32, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+            (-11.5 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -357,7 +430,14 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             w!("Segoe UI"),
         );
         let font_small = CreateFontW(
-            (-10.5 * scale).round() as i32, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+            (-10.5 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -370,7 +450,10 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         let bundle = I18n::get_bundle(&config.language);
         let pad_x = (28.0 * scale).round() as i32;
 
-        let current_tab = CURRENT_TAB.lock().map(|t| *t).unwrap_or(SettingsTab::General);
+        let current_tab = CURRENT_TAB
+            .lock()
+            .map(|t| *t)
+            .unwrap_or(SettingsTab::General);
         let hovered = HOVER_CARD_IDX.lock().ok().and_then(|h| *h);
 
         // 1. 顶部 Header 品牌区（主标题 + 副标题）
@@ -385,7 +468,12 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             right: rect.right - pad_x,
             bottom: (34.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut title_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         SelectObject(hdc, HGDIOBJ(font_text.0 as _));
         SetTextColor(hdc, COLORREF(0x008e8e8e));
@@ -401,7 +489,12 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             right: rect.right - pad_x,
             bottom: (50.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut sub_buf, &mut sub_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut sub_buf,
+            &mut sub_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         // 顶部 Tab 选项卡栏
         let tab_y = (56.0 * scale).round() as i32;
@@ -454,11 +547,19 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 let card0_top = card_top_base;
                 let is_hov_0 = hovered == Some(0);
                 render_toggle_card(
-                    hdc, pad_x, card0_top, pad_x + card_w, card0_top + card_h, scale,
-                    font_card_title, font_text,
-                    &bundle.settings.auto_switch, &bundle.settings.auto_switch_desc,
+                    hdc,
+                    pad_x,
+                    card0_top,
+                    pad_x + card_w,
+                    card0_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.settings.auto_switch,
+                    &bundle.settings.auto_switch_desc,
                     config.auto_switch_enabled,
-                    &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                    &bundle.settings.status_enabled,
+                    &bundle.settings.status_disabled,
                     is_hov_0,
                 );
 
@@ -473,21 +574,38 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     format!("[ {} · {} ]", hotkey_disp, bundle.hotkey.click_to_record)
                 };
                 render_hotkey_card(
-                    hdc, pad_x, card1_top, pad_x + card_w, card1_top + card_h, scale,
-                    font_card_title, font_text,
-                    &bundle.hotkey.card_title, &bundle.hotkey.card_desc,
-                    &card1_s, is_recording, is_hov_1,
+                    hdc,
+                    pad_x,
+                    card1_top,
+                    pad_x + card_w,
+                    card1_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.hotkey.card_title,
+                    &bundle.hotkey.card_desc,
+                    &card1_s,
+                    is_recording,
+                    is_hov_1,
                 );
 
                 // 卡片 2：开机静默自启 (Autostart) - Toggle 开关滑块
                 let card2_top = card1_top + card_h + card_gap;
                 let is_hov_2 = hovered == Some(2);
                 render_toggle_card(
-                    hdc, pad_x, card2_top, pad_x + card_w, card2_top + card_h, scale,
-                    font_card_title, font_text,
-                    &bundle.settings.autostart, &bundle.settings.autostart_desc,
+                    hdc,
+                    pad_x,
+                    card2_top,
+                    pad_x + card_w,
+                    card2_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.settings.autostart,
+                    &bundle.settings.autostart_desc,
                     config.autostart_enabled,
-                    &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                    &bundle.settings.status_enabled,
+                    &bundle.settings.status_disabled,
                     is_hov_2,
                 );
 
@@ -495,10 +613,18 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 let card3_top = card2_top + card_h + card_gap;
                 let is_hov_3 = hovered == Some(3);
                 render_slider_card(
-                    hdc, pad_x, card3_top, pad_x + card_w, card3_top + card_h, scale,
-                    font_card_title, font_text,
-                    &bundle.settings.opacity, &bundle.settings.opacity_desc,
-                    config.floating_bar_opacity, is_hov_3,
+                    hdc,
+                    pad_x,
+                    card3_top,
+                    pad_x + card_w,
+                    card3_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.settings.opacity,
+                    &bundle.settings.opacity_desc,
+                    config.floating_bar_opacity,
+                    is_hov_3,
                 );
 
                 // 卡片 4：界面语言 (Language) - 现代 Dropdown 下拉选择框
@@ -510,18 +636,36 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     _ => &bundle.meta.name,
                 };
                 render_dropdown_card(
-                    hdc, pad_x, card4_top, pad_x + card_w, card4_top + card_h, scale,
-                    font_card_title, font_text,
-                    &bundle.settings.language, &bundle.settings.language_desc,
-                    lang_name, is_hov_4, is_dropdown_open,
+                    hdc,
+                    pad_x,
+                    card4_top,
+                    pad_x + card_w,
+                    card4_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.settings.language,
+                    &bundle.settings.language_desc,
+                    lang_name,
+                    is_hov_4,
+                    is_dropdown_open,
                 );
 
                 // 卡片 5：“关于 QuickPath”现代专属信息卡片 (About Card)
                 let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
                 let about_h = (120.0 * scale).round() as i32;
                 render_about_card(
-                    hdc, pad_x, card5_top, pad_x + card_w, card5_top + about_h, scale,
-                    &bundle, font_card_title, font_text, font_small, hovered,
+                    hdc,
+                    pad_x,
+                    card5_top,
+                    pad_x + card_w,
+                    card5_top + about_h,
+                    scale,
+                    bundle,
+                    font_card_title,
+                    font_text,
+                    font_small,
+                    hovered,
                 );
 
                 // 卡片 5 下方：排错调试模式复选框（居中排布于关于卡片与底部区域之间）
@@ -561,7 +705,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                         pad_x + card_w,
                         btn_top,
                         scale,
-                        &bundle,
+                        bundle,
                         font_card_title,
                         font_text,
                         font_small,
@@ -572,25 +716,31 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     let card0_h = (56.0 * scale).round() as i32;
                     let is_hov_0 = hovered == Some(60);
                     render_toggle_card(
-                        hdc, pad_x, card0_top, pad_x + card_w, card0_top + card0_h, scale,
-                        font_card_title, font_text,
-                        &bundle.tab_module.enable_tab_module, &bundle.tab_module.enable_tab_module_desc,
+                        hdc,
+                        pad_x,
+                        card0_top,
+                        pad_x + card_w,
+                        card0_top + card0_h,
+                        scale,
+                        font_card_title,
+                        font_text,
+                        &bundle.tab_module.enable_tab_module,
+                        &bundle.tab_module.enable_tab_module_desc,
                         config.tab_module.enabled,
-                        &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                        &bundle.settings.status_enabled,
+                        &bundle.settings.status_disabled,
                         is_hov_0,
                     );
 
                     // 卡片 1：快捷键与窗口接管 (Card T1: Shortcuts & Window Integration)
                     let card1_top = card0_top + card0_h + card_gap;
                     let card1_h = (90.0 * scale).round() as i32;
-                    let shortcuts_items = [
-                        (
-                            bundle.tab_module.wine_to_tab.as_str(),
-                            bundle.tab_module.wine_to_tab_desc.as_str(),
-                            config.tab_module.wine_to_tab,
-                            61usize,
-                        ),
-                    ];
+                    let shortcuts_items = [(
+                        bundle.tab_module.wine_to_tab.as_str(),
+                        bundle.tab_module.wine_to_tab_desc.as_str(),
+                        config.tab_module.wine_to_tab,
+                        61usize,
+                    )];
                     render_tab_group_card(
                         hdc,
                         pad_x,
@@ -656,7 +806,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                         scale,
                         font_card_title,
                         font_small,
-                        &bundle,
+                        bundle,
                         config.tab_module.enabled,
                     );
                 }
@@ -666,37 +816,70 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                 let card_m0_h = (56.0 * scale).round() as i32;
                 let is_hov_m0 = hovered == Some(30);
                 render_toggle_card(
-                    hdc, pad_x, card_m0_top, pad_x + card_w, card_m0_top + card_m0_h, scale,
-                    font_card_title, font_text,
-                    &bundle.monitor.master_switch, &bundle.monitor.master_switch_desc,
+                    hdc,
+                    pad_x,
+                    card_m0_top,
+                    pad_x + card_w,
+                    card_m0_top + card_m0_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.monitor.master_switch,
+                    &bundle.monitor.master_switch_desc,
                     config.monitor.enabled,
-                    &bundle.settings.status_enabled, &bundle.settings.status_disabled,
+                    &bundle.settings.status_enabled,
+                    &bundle.settings.status_disabled,
                     is_hov_m0,
                 );
 
                 let card_m1_top = card_m0_top + card_m0_h + card_gap;
                 let card_m1_h = (140.0 * scale).round() as i32;
                 render_metrics_checklist_card(
-                    hdc, pad_x, card_m1_top, pad_x + card_w, card_m1_top + card_m1_h, scale,
-                    font_card_title, font_text,
-                    &bundle.monitor.metrics_title, &bundle.monitor.metrics_desc,
-                    &bundle, &config.monitor, hovered,
+                    hdc,
+                    pad_x,
+                    card_m1_top,
+                    pad_x + card_w,
+                    card_m1_top + card_m1_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.monitor.metrics_title,
+                    &bundle.monitor.metrics_desc,
+                    bundle,
+                    &config.monitor,
+                    hovered,
                 );
 
                 let card_m2_top = card_m1_top + card_m1_h + card_gap;
                 let card_m2_h = (182.0 * scale).round() as i32;
                 render_monitor_visual_card(
-                    hdc, pad_x, card_m2_top, pad_x + card_w, card_m2_top + card_m2_h, scale,
-                    font_card_title, font_text,
-                    &bundle.monitor.visual_title, &bundle.monitor.visual_desc,
-                    &bundle, &config.monitor, hovered,
+                    hdc,
+                    pad_x,
+                    card_m2_top,
+                    pad_x + card_w,
+                    card_m2_top + card_m2_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &bundle.monitor.visual_title,
+                    &bundle.monitor.visual_desc,
+                    bundle,
+                    &config.monitor,
+                    hovered,
                 );
 
                 let card_m3_top = card_m2_top + card_m2_h + card_gap;
                 let card_m3_h = (68.0 * scale).round() as i32;
                 render_monitor_tips_card(
-                    hdc, pad_x, card_m3_top, pad_x + card_w, card_m3_top + card_m3_h, scale,
-                    font_card_title, font_small, &bundle,
+                    hdc,
+                    pad_x,
+                    card_m3_top,
+                    pad_x + card_w,
+                    card_m3_top + card_m3_h,
+                    scale,
+                    font_card_title,
+                    font_small,
+                    bundle,
                 );
             }
         }
@@ -732,18 +915,42 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         let is_hov_cancel = hovered == Some(11);
 
         // 确定按钮：Win11 Accent Blue（深色高亮微渐变）
-        let ok_bg = if is_hov_ok { COLORREF(0x00e88410) } else { COLORREF(0x00d47800) };
+        let ok_bg = if is_hov_ok {
+            COLORREF(0x00e88410)
+        } else {
+            COLORREF(0x00d47800)
+        };
         render_rounded_button(
-            hdc, &btn_ok_rect, &bundle.settings.btn_ok, font_card_title,
-            ok_bg, COLORREF(0x00ffffff), None, (4.0 * scale).round() as i32,
+            hdc,
+            &btn_ok_rect,
+            &bundle.settings.btn_ok,
+            font_card_title,
+            ok_bg,
+            COLORREF(0x00ffffff),
+            None,
+            (4.0 * scale).round() as i32,
         );
 
         // 取消按钮：精致深灰面板，带微边框
-        let cancel_bg = if is_hov_cancel { COLORREF(0x00383838) } else { COLORREF(0x002c2c2c) };
-        let cancel_border = if is_hov_cancel { COLORREF(0x005c5c5c) } else { COLORREF(0x00444444) };
+        let cancel_bg = if is_hov_cancel {
+            COLORREF(0x00383838)
+        } else {
+            COLORREF(0x002c2c2c)
+        };
+        let cancel_border = if is_hov_cancel {
+            COLORREF(0x005c5c5c)
+        } else {
+            COLORREF(0x00444444)
+        };
         render_rounded_button(
-            hdc, &btn_cancel_rect, &bundle.settings.btn_cancel, font_card_title,
-            cancel_bg, COLORREF(0x00e2e2e2), Some(cancel_border), (4.0 * scale).round() as i32,
+            hdc,
+            &btn_cancel_rect,
+            &bundle.settings.btn_cancel,
+            font_card_title,
+            cancel_bg,
+            COLORREF(0x00e2e2e2),
+            Some(cancel_border),
+            (4.0 * scale).round() as i32,
         );
 
         // 4. 底部微型标语与版本信息（与确定/取消按钮垂直平齐，排布在左侧）
@@ -757,7 +964,12 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             right: btn_ok_left - (16.0 * scale).round() as i32,
             bottom: btn_bottom,
         };
-        DrawTextW(hdc, &mut ver_buf, &mut ver_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(
+            hdc,
+            &mut ver_buf,
+            &mut ver_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
 
         // 5. 顶层叠加渲染网页风格下拉选择选项层（展开时覆盖在关于卡片上方）
         if current_tab == SettingsTab::General && IS_DROPDOWN_OPEN.load(Ordering::SeqCst) {
@@ -773,8 +985,14 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
 
             let hov_item = HOVER_DROPDOWN_ITEM_IDX.lock().ok().and_then(|h| *h);
             render_web_dropdown_layer(
-                hdc, combo_left, combo_bottom, combo_w, scale,
-                config.language.as_code(), font_text, hov_item,
+                hdc,
+                combo_left,
+                combo_bottom,
+                combo_w,
+                scale,
+                config.language.as_code(),
+                font_text,
+                hov_item,
             );
         }
 
@@ -824,13 +1042,27 @@ unsafe fn render_rounded_button(
 ) {
     unsafe {
         let bc = border_color.unwrap_or(bg_color);
-        draw_fluent_box(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, bg_color, bc);
+        draw_fluent_box(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius,
+            bg_color,
+            bc,
+        );
 
         SelectObject(hdc, HGDIOBJ(font.0 as _));
         SetTextColor(hdc, text_color);
         let mut buf: Vec<u16> = text.encode_utf16().collect();
         let mut r = *rect;
-        DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut buf,
+            &mut r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
     }
 }
 
@@ -859,7 +1091,12 @@ unsafe fn render_card_texts(
             right: right_limit,
             bottom: top + (27.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut title_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
         SetTextColor(hdc, COLORREF(0x00909090));
@@ -870,7 +1107,12 @@ unsafe fn render_card_texts(
             right: right_limit,
             bottom: bottom - (6.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut desc_buf, &mut desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut desc_buf,
+            &mut desc_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
     }
 }
 
@@ -897,7 +1139,16 @@ unsafe fn render_toggle_card(
         } else {
             (COLORREF(0x00242424), COLORREF(0x00353535))
         };
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
 
         let sw_w = (46.0 * scale).round() as i32;
         let sw_h = (24.0 * scale).round() as i32;
@@ -909,7 +1160,18 @@ unsafe fn render_toggle_card(
         let sw_bottom = sw_top + sw_h;
 
         let right_limit = sw_left - (80.0 * scale).round() as i32;
-        render_card_texts(hdc, left, top, right_limit, bottom, scale, font_title, font_desc, title, desc);
+        render_card_texts(
+            hdc,
+            left,
+            top,
+            right_limit,
+            bottom,
+            scale,
+            font_title,
+            font_desc,
+            title,
+            desc,
+        );
 
         // 状态文字提示（开关左侧）
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
@@ -922,11 +1184,16 @@ unsafe fn render_toggle_card(
         let mut status_buf: Vec<u16> = txt.encode_utf16().collect();
         let mut status_rect = RECT {
             left: sw_left - (70.0 * scale).round() as i32,
-            top: top,
+            top,
             right: sw_left - (10.0 * scale).round() as i32,
-            bottom: bottom,
+            bottom,
         };
-        DrawTextW(hdc, &mut status_buf, &mut status_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut status_buf,
+            &mut status_rect,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 绘制 Toggle Switch 胶囊滑块槽体
         let (sw_bg, sw_border) = if is_on {
@@ -934,7 +1201,9 @@ unsafe fn render_toggle_card(
         } else {
             (COLORREF(0x00323232), COLORREF(0x00525252)) // 灰底
         };
-        draw_fluent_box(hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border);
+        draw_fluent_box(
+            hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border,
+        );
 
         // 绘制 Toggle 滑块圆纽 Thumb（纯白圆）
         let thumb_margin = (3.0 * scale).round() as i32;
@@ -987,11 +1256,31 @@ unsafe fn render_hotkey_card(
         } else {
             (COLORREF(0x00242424), COLORREF(0x00353535))
         };
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
 
         let badge_w = (180.0 * scale).round() as i32;
         let right_limit = right - badge_w - (16.0 * scale).round() as i32;
-        render_card_texts(hdc, left, top, right_limit, bottom, scale, font_title, font_desc, title, desc);
+        render_card_texts(
+            hdc,
+            left,
+            top,
+            right_limit,
+            bottom,
+            scale,
+            font_title,
+            font_desc,
+            title,
+            desc,
+        );
 
         // 右侧按键 Badge
         let badge_h = (28.0 * scale).round() as i32;
@@ -1004,18 +1293,40 @@ unsafe fn render_hotkey_card(
         };
 
         let (badge_bg, badge_border, text_color) = if is_recording {
-            (COLORREF(0x001f3045), COLORREF(0x0000a5ff), COLORREF(0x0000a5ff)) // 录制橙/亮蓝
+            (
+                COLORREF(0x001f3045),
+                COLORREF(0x0000a5ff),
+                COLORREF(0x0000a5ff),
+            ) // 录制橙/亮蓝
         } else {
-            (COLORREF(0x002c2c2c), COLORREF(0x00d47800), COLORREF(0x0050d268)) // 正常常态
+            (
+                COLORREF(0x002c2c2c),
+                COLORREF(0x00d47800),
+                COLORREF(0x0050d268),
+            ) // 正常常态
         };
 
-        draw_fluent_box(hdc, badge_rect.left, badge_rect.top, badge_rect.right, badge_rect.bottom, (4.0 * scale).round() as i32, badge_bg, badge_border);
+        draw_fluent_box(
+            hdc,
+            badge_rect.left,
+            badge_rect.top,
+            badge_rect.right,
+            badge_rect.bottom,
+            (4.0 * scale).round() as i32,
+            badge_bg,
+            badge_border,
+        );
 
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
         SetTextColor(hdc, text_color);
         let mut buf: Vec<u16> = badge_text.encode_utf16().collect();
         let mut r = badge_rect;
-        DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut buf,
+            &mut r,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
     }
 }
 
@@ -1040,7 +1351,16 @@ unsafe fn render_slider_card(
         } else {
             (COLORREF(0x00242424), COLORREF(0x00353535))
         };
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
 
         let slider_w = (140.0 * scale).round() as i32;
         let right_pad = (18.0 * scale).round() as i32;
@@ -1048,7 +1368,18 @@ unsafe fn render_slider_card(
         let track_left = track_right - slider_w;
         let right_limit = track_left - (20.0 * scale).round() as i32;
 
-        render_card_texts(hdc, left, top, right_limit, bottom, scale, font_title, font_desc, title, desc);
+        render_card_texts(
+            hdc,
+            left,
+            top,
+            right_limit,
+            bottom,
+            scale,
+            font_title,
+            font_desc,
+            title,
+            desc,
+        );
 
         // 1. 数值显示
         let val_text = format!("{}%", opacity_pct);
@@ -1061,7 +1392,12 @@ unsafe fn render_slider_card(
         };
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
         SetTextColor(hdc, COLORREF(0x0050d268));
-        DrawTextW(hdc, &mut val_buf, &mut val_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut val_buf,
+            &mut val_rect,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 2. 滑槽
         let track_cy = top + (36.0 * scale).round() as i32;
@@ -1125,7 +1461,16 @@ unsafe fn render_dropdown_card(
         } else {
             (COLORREF(0x00242424), COLORREF(0x00353535))
         };
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
 
         let combo_w = (170.0 * scale).round() as i32;
         let combo_h = (30.0 * scale).round() as i32;
@@ -1137,7 +1482,18 @@ unsafe fn render_dropdown_card(
         let combo_bottom = combo_top + combo_h;
 
         let right_limit = combo_left - (16.0 * scale).round() as i32;
-        render_card_texts(hdc, left, top, right_limit, bottom, scale, font_title, font_desc, title, desc);
+        render_card_texts(
+            hdc,
+            left,
+            top,
+            right_limit,
+            bottom,
+            scale,
+            font_title,
+            font_desc,
+            title,
+            desc,
+        );
 
         // 下拉框背景与描边：展开时边框呈现 Accent Blue 激活高亮
         let combo_bg = COLORREF(0x002b2b2b);
@@ -1148,7 +1504,16 @@ unsafe fn render_dropdown_card(
         } else {
             COLORREF(0x00444444)
         };
-        draw_fluent_box(hdc, combo_left, combo_top, combo_right, combo_bottom, (4.0 * scale).round() as i32, combo_bg, combo_border);
+        draw_fluent_box(
+            hdc,
+            combo_left,
+            combo_top,
+            combo_right,
+            combo_bottom,
+            (4.0 * scale).round() as i32,
+            combo_bg,
+            combo_border,
+        );
 
         // 下拉框文字
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
@@ -1160,10 +1525,22 @@ unsafe fn render_dropdown_card(
             right: combo_right - (22.0 * scale).round() as i32,
             bottom: combo_bottom,
         };
-        DrawTextW(hdc, &mut lang_buf, &mut lang_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut lang_buf,
+            &mut lang_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 下拉小三角：展开时为 ▲，收起时为 ▼
-        SetTextColor(hdc, if is_open { COLORREF(0x00d47800) } else { COLORREF(0x00999999) });
+        SetTextColor(
+            hdc,
+            if is_open {
+                COLORREF(0x00d47800)
+            } else {
+                COLORREF(0x00999999)
+            },
+        );
         let arrow_char = if is_open { "▲" } else { "▼" };
         let mut arrow_buf: Vec<u16> = arrow_char.encode_utf16().collect();
         let mut arrow_rect = RECT {
@@ -1172,7 +1549,12 @@ unsafe fn render_dropdown_card(
             right: combo_right - (8.0 * scale).round() as i32,
             bottom: combo_bottom,
         };
-        DrawTextW(hdc, &mut arrow_buf, &mut arrow_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut arrow_buf,
+            &mut arrow_rect,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
     }
 }
 
@@ -1229,10 +1611,28 @@ unsafe fn render_web_dropdown_layer(
 
             if is_hover {
                 let hover_bg = COLORREF(0x00333333);
-                draw_fluent_box(hdc, it_left, it_top, it_right, it_bottom, (4.0 * scale).round() as i32, hover_bg, hover_bg);
+                draw_fluent_box(
+                    hdc,
+                    it_left,
+                    it_top,
+                    it_right,
+                    it_bottom,
+                    (4.0 * scale).round() as i32,
+                    hover_bg,
+                    hover_bg,
+                );
             } else if is_selected {
                 let sel_bg = COLORREF(0x002a2a2a);
-                draw_fluent_box(hdc, it_left, it_top, it_right, it_bottom, (4.0 * scale).round() as i32, sel_bg, sel_bg);
+                draw_fluent_box(
+                    hdc,
+                    it_left,
+                    it_top,
+                    it_right,
+                    it_bottom,
+                    (4.0 * scale).round() as i32,
+                    sel_bg,
+                    sel_bg,
+                );
             }
 
             SelectObject(hdc, HGDIOBJ(font.0 as _));
@@ -1278,7 +1678,16 @@ unsafe fn render_about_card(
 ) {
     unsafe {
         // 卡片背景与精致微边框
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00212121), COLORREF(0x00343434));
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            COLORREF(0x00212121),
+            COLORREF(0x00343434),
+        );
 
         // 左侧 Logo 图标：放大显示 logo.png，占满所在卡片高度的 80%
         let card_h = bottom - top;
@@ -1289,7 +1698,9 @@ unsafe fn render_about_card(
 
         if !crate::win32::icon::draw_logo_png(hdc, logo_x, logo_y, logo_w, logo_h) {
             let hicon = crate::win32::icon::get_app_icon(false);
-            let _ = DrawIconEx(hdc, logo_x, logo_y, hicon, logo_w, logo_h, 0, None, DI_NORMAL);
+            let _ = DrawIconEx(
+                hdc, logo_x, logo_y, hicon, logo_w, logo_h, 0, None, DI_NORMAL,
+            );
         }
 
         let text_x = logo_x + logo_w + (18.0 * scale).round() as i32;
@@ -1299,7 +1710,10 @@ unsafe fn render_about_card(
         SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
         let ver_name = if bundle.about.version.is_empty() {
-            format!("v{} 正式版 (原生极速 · 极简轻量)", crate::rules::version::APP_VERSION)
+            format!(
+                "v{} 正式版 (原生极速 · 极简轻量)",
+                crate::rules::version::APP_VERSION
+            )
         } else {
             bundle.about.version.clone()
         };
@@ -1311,7 +1725,12 @@ unsafe fn render_about_card(
             right: text_right,
             bottom: top + (28.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut buf1, &mut r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut buf1,
+            &mut r1,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 行 2: 运行系统环境（当前 Windows 具体版本）
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
@@ -1319,7 +1738,10 @@ unsafe fn render_about_card(
         let is_chinese = bundle.meta.code.starts_with("zh");
         let os_ver_str = crate::win32::version::format_windows_version(is_chinese);
         let line_os = if !bundle.about.os_environment.is_empty() {
-            bundle.about.os_environment.replace("{os_version}", &os_ver_str)
+            bundle
+                .about
+                .os_environment
+                .replace("{os_version}", &os_ver_str)
         } else if is_chinese {
             format!("系统环境：{}", os_ver_str)
         } else {
@@ -1332,7 +1754,12 @@ unsafe fn render_about_card(
             right: text_right,
             bottom: top + (48.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut buf_os, &mut r_os, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(
+            hdc,
+            &mut buf_os,
+            &mut r_os,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
 
         // 行 3: 出品方及官网链接（衢州御风科技有限公司 · qp.yftec.top ↗）
         SelectObject(hdc, HGDIOBJ(font_normal.0 as _));
@@ -1356,7 +1783,12 @@ unsafe fn render_about_card(
             right: text_right,
             bottom: top + (69.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut buf2, &mut r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut buf2,
+            &mut r2,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 行 4: GitHub 官方开源地址（GitHub 纯白高清图标 + github.com/clhome/QuickPath ↗）
         let gh_size = (15.0 * scale).round() as i32;
@@ -1379,7 +1811,12 @@ unsafe fn render_about_card(
             right: text_right,
             bottom: top + (90.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut buf3, &mut r3, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut buf3,
+            &mut r3,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 行 5: 版权声明
         SetTextColor(hdc, COLORREF(0x00666666));
@@ -1395,7 +1832,12 @@ unsafe fn render_about_card(
             right: text_right,
             bottom: top + (110.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut buf4, &mut r4, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut buf4,
+            &mut r4,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
     }
 }
 
@@ -1431,7 +1873,12 @@ unsafe fn render_tab_unsupported_view(
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
         let mut badge_buf: Vec<u16> = badge_text.encode_utf16().collect();
         let mut r_badge_calc = RECT::default();
-        DrawTextW(hdc, &mut badge_buf, &mut r_badge_calc, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut badge_buf,
+            &mut r_badge_calc,
+            DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+        );
         let badge_txt_w = r_badge_calc.right - r_badge_calc.left;
         let badge_pad_x = (14.0 * scale).round() as i32;
         let badge_w = (badge_txt_w + badge_pad_x * 2).max((100.0 * scale).round() as i32);
@@ -1463,9 +1910,15 @@ unsafe fn render_tab_unsupported_view(
         let is_chinese = bundle.meta.code.starts_with("zh");
         let os_str = crate::win32::version::format_windows_version(is_chinese);
         let desc_text = if !bundle.tab_module.unsupported_desc.is_empty() {
-            bundle.tab_module.unsupported_desc.replace("{os_version}", &os_str)
+            bundle
+                .tab_module
+                .unsupported_desc
+                .replace("{os_version}", &os_str)
         } else {
-            format!("文件资源管理器多标签增强需要 Windows 11 22H2 (Build 22621) 或更高版本 原生标签架构支持。\n当前检测到您的操作系统为：{}", os_str)
+            format!(
+                "文件资源管理器多标签增强需要 Windows 11 22H2 (Build 22621) 或更高版本 原生标签架构支持。\n当前检测到您的操作系统为：{}",
+                os_str
+            )
         };
         let mut desc_buf: Vec<u16> = desc_text.encode_utf16().collect();
         let mut r_desc_calc = RECT {
@@ -1488,8 +1941,9 @@ unsafe fn render_tab_unsupported_view(
         let gap_title_desc = (14.0 * scale).round() as i32;
         let bottom_pad = (22.0 * scale).round() as i32;
 
-        let box_h = (top_pad + badge_h + gap_badge_title + title_h + gap_title_desc + desc_h + bottom_pad)
-            .min(area_h - (16.0 * scale).round() as i32);
+        let box_h =
+            (top_pad + badge_h + gap_badge_title + title_h + gap_title_desc + desc_h + bottom_pad)
+                .min(area_h - (16.0 * scale).round() as i32);
 
         let box_left = left + (area_w - box_w) / 2;
         let box_top = top + (area_h - box_h) / 2;
@@ -1529,7 +1983,12 @@ unsafe fn render_tab_unsupported_view(
             right: badge_x + badge_w,
             bottom: badge_y + badge_h,
         };
-        DrawTextW(hdc, &mut badge_buf, &mut r_badge, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut badge_buf,
+            &mut r_badge,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         // 渲染 2: 居中主标题（DT_WORDBREAK 保证长英文自适应换行）
         SelectObject(hdc, HGDIOBJ(font_title.0 as _));
@@ -1541,7 +2000,12 @@ unsafe fn render_tab_unsupported_view(
             right: box_right - pad_inner_x,
             bottom: title_y + title_h,
         };
-        DrawTextW(hdc, &mut title_buf, &mut r_title, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut r_title,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+        );
 
         // 渲染 3: 居中说明与当前系统版本（DT_WORDBREAK 自动折行，中英文全显，绝不截断）
         SelectObject(hdc, HGDIOBJ(font_text.0 as _));
@@ -1553,7 +2017,12 @@ unsafe fn render_tab_unsupported_view(
             right: box_right - pad_inner_x,
             bottom: desc_y + desc_h + (4.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut desc_buf, &mut r_desc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut desc_buf,
+            &mut r_desc,
+            DT_CENTER | DT_WORDBREAK | DT_NOPREFIX,
+        );
     }
 }
 
@@ -1581,7 +2050,16 @@ unsafe fn render_tab_group_card(
         } else {
             (COLORREF(0x001e1e1e), COLORREF(0x002a2a2a))
         };
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
 
         let inner_x = left + (16.0 * scale).round() as i32;
         let right_pad = (16.0 * scale).round() as i32;
@@ -1592,7 +2070,14 @@ unsafe fn render_tab_group_card(
         let header_bottom = top + header_h;
 
         SelectObject(hdc, HGDIOBJ(font_title.0 as _));
-        SetTextColor(hdc, if is_master_enabled { COLORREF(0x00ffffff) } else { COLORREF(0x00787878) });
+        SetTextColor(
+            hdc,
+            if is_master_enabled {
+                COLORREF(0x00ffffff)
+            } else {
+                COLORREF(0x00787878)
+            },
+        );
         let mut g_title_buf: Vec<u16> = group_title.encode_utf16().collect();
         let mut g_title_rect = RECT {
             left: inner_x,
@@ -1600,10 +2085,22 @@ unsafe fn render_tab_group_card(
             right: right_content,
             bottom: top + (25.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut g_title_buf, &mut g_title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut g_title_buf,
+            &mut g_title_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
-        SetTextColor(hdc, if is_master_enabled { COLORREF(0x008e8e8e) } else { COLORREF(0x00525252) });
+        SetTextColor(
+            hdc,
+            if is_master_enabled {
+                COLORREF(0x008e8e8e)
+            } else {
+                COLORREF(0x00525252)
+            },
+        );
         let mut g_desc_buf: Vec<u16> = group_desc.encode_utf16().collect();
         let mut g_desc_rect = RECT {
             left: inner_x,
@@ -1611,7 +2108,12 @@ unsafe fn render_tab_group_card(
             right: right_content,
             bottom: header_bottom - (4.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut g_desc_buf, &mut g_desc_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut g_desc_buf,
+            &mut g_desc_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         // 头部与子项行之间的轻微分割线
         let sep_brush = CreateSolidBrush(COLORREF(0x002c2c2c));
@@ -1665,7 +2167,14 @@ unsafe fn render_tab_group_card(
 
             // 标题
             SelectObject(hdc, HGDIOBJ(font_desc.0 as _));
-            SetTextColor(hdc, if is_master_enabled { COLORREF(0x00ededed) } else { COLORREF(0x00666666) });
+            SetTextColor(
+                hdc,
+                if is_master_enabled {
+                    COLORREF(0x00ededed)
+                } else {
+                    COLORREF(0x00666666)
+                },
+            );
             let mut t_buf: Vec<u16> = item_title.encode_utf16().collect();
             let mut t_rect = RECT {
                 left: inner_x,
@@ -1673,10 +2182,22 @@ unsafe fn render_tab_group_card(
                 right: text_right_limit,
                 bottom: row_top + (23.0 * scale).round() as i32,
             };
-            DrawTextW(hdc, &mut t_buf, &mut t_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                hdc,
+                &mut t_buf,
+                &mut t_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
 
             // 描述
-            SetTextColor(hdc, if is_master_enabled { COLORREF(0x00888888) } else { COLORREF(0x004e4e4e) });
+            SetTextColor(
+                hdc,
+                if is_master_enabled {
+                    COLORREF(0x00888888)
+                } else {
+                    COLORREF(0x004e4e4e)
+                },
+            );
             let mut d_buf: Vec<u16> = item_desc.encode_utf16().collect();
             let mut d_rect = RECT {
                 left: inner_x,
@@ -1684,11 +2205,19 @@ unsafe fn render_tab_group_card(
                 right: text_right_limit,
                 bottom: row_bottom - (4.0 * scale).round() as i32,
             };
-            DrawTextW(hdc, &mut d_buf, &mut d_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                hdc,
+                &mut d_buf,
+                &mut d_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
 
             // 状态文字提示（开关左侧）
             let (txt, txt_color) = if !is_master_enabled {
-                (if is_on { status_on } else { status_off }, COLORREF(0x004a4a4a))
+                (
+                    if is_on { status_on } else { status_off },
+                    COLORREF(0x004a4a4a),
+                )
             } else if is_on {
                 (status_on, COLORREF(0x0050d268))
             } else {
@@ -1702,7 +2231,12 @@ unsafe fn render_tab_group_card(
                 right: sw_left - (8.0 * scale).round() as i32,
                 bottom: row_bottom,
             };
-            DrawTextW(hdc, &mut status_buf, &mut status_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(
+                hdc,
+                &mut status_buf,
+                &mut status_rect,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
 
             // Toggle 开关槽体
             let (sw_bg, sw_border) = if !is_master_enabled {
@@ -1716,7 +2250,9 @@ unsafe fn render_tab_group_card(
             } else {
                 (COLORREF(0x00323232), COLORREF(0x00525252))
             };
-            draw_fluent_box(hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border);
+            draw_fluent_box(
+                hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border,
+            );
 
             // Toggle 滑块 Thumb
             let thumb_margin = (2.0 * scale).round() as i32;
@@ -1727,7 +2263,11 @@ unsafe fn render_tab_group_card(
                 sw_left + thumb_margin + thumb_radius
             };
 
-            let thumb_color = if is_master_enabled { COLORREF(0x00ffffff) } else { COLORREF(0x00777777) };
+            let thumb_color = if is_master_enabled {
+                COLORREF(0x00ffffff)
+            } else {
+                COLORREF(0x00777777)
+            };
             let thumb_brush = CreateSolidBrush(thumb_color);
             let thumb_pen = CreatePen(PS_NULL, 0, COLORREF(0));
             let old_b = SelectObject(hdc, HGDIOBJ(thumb_brush.0 as _));
@@ -1770,12 +2310,25 @@ unsafe fn render_tab_tips_card(
         } else {
             (COLORREF(0x001d1d1d), COLORREF(0x002a2a2a))
         };
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, bg, border);
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
 
         let inner_x = left + (16.0 * scale).round() as i32;
 
         SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
-        let title_color = if is_master_enabled { COLORREF(0x0050d268) } else { COLORREF(0x003e6845) };
+        let title_color = if is_master_enabled {
+            COLORREF(0x0050d268)
+        } else {
+            COLORREF(0x003e6845)
+        };
         SetTextColor(hdc, title_color);
         let title_text = if !bundle.tab_module.tips_title.is_empty() {
             bundle.tab_module.tips_title.as_str()
@@ -1789,10 +2342,19 @@ unsafe fn render_tab_tips_card(
             right: right - (16.0 * scale).round() as i32,
             bottom: top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut title_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
-        let line_color = if is_master_enabled { COLORREF(0x009e9e9e) } else { COLORREF(0x00555555) };
+        let line_color = if is_master_enabled {
+            COLORREF(0x009e9e9e)
+        } else {
+            COLORREF(0x00555555)
+        };
         SetTextColor(hdc, line_color);
 
         let line1 = if !bundle.tab_module.tips_line1.is_empty() {
@@ -1807,7 +2369,12 @@ unsafe fn render_tab_tips_card(
             right: right - (16.0 * scale).round() as i32,
             bottom: top + (45.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut l1_buf, &mut l1_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut l1_buf,
+            &mut l1_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         let line2 = if !bundle.tab_module.tips_line2.is_empty() {
             bundle.tab_module.tips_line2.as_str()
@@ -1821,7 +2388,12 @@ unsafe fn render_tab_tips_card(
             right: right - (16.0 * scale).round() as i32,
             bottom: top + (63.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut l2_buf, &mut l2_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut l2_buf,
+            &mut l2_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
     }
 }
 
@@ -1857,14 +2429,35 @@ unsafe fn render_segmented_tabs(
             let is_hov = hovered == Some(hov_id);
 
             let (bg, border, text_color) = if is_active {
-                (COLORREF(0x002e2e2e), COLORREF(0x004d4d4d), COLORREF(0x00ffffff))
+                (
+                    COLORREF(0x002e2e2e),
+                    COLORREF(0x004d4d4d),
+                    COLORREF(0x00ffffff),
+                )
             } else if is_hov {
-                (COLORREF(0x00262626), COLORREF(0x00383838), COLORREF(0x00d0d0d0))
+                (
+                    COLORREF(0x00262626),
+                    COLORREF(0x00383838),
+                    COLORREF(0x00d0d0d0),
+                )
             } else {
-                (COLORREF(0x001f1f1f), COLORREF(0x002a2a2a), COLORREF(0x00888888))
+                (
+                    COLORREF(0x001f1f1f),
+                    COLORREF(0x002a2a2a),
+                    COLORREF(0x00888888),
+                )
             };
 
-            draw_fluent_box(hdc, tab_left, top, tab_right, tab_bottom, (6.0 * scale).round() as i32, bg, border);
+            draw_fluent_box(
+                hdc,
+                tab_left,
+                top,
+                tab_right,
+                tab_bottom,
+                (6.0 * scale).round() as i32,
+                bg,
+                border,
+            );
 
             // 若激活，底部绘制 Win11 Accent Blue 发光指示条 (高 3px)
             if is_active {
@@ -1890,7 +2483,12 @@ unsafe fn render_segmented_tabs(
                 right: tab_right,
                 bottom: tab_bottom,
             };
-            DrawTextW(hdc, &mut buf, &mut r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                hdc,
+                &mut buf,
+                &mut r,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
         }
     }
 }
@@ -1910,7 +2508,16 @@ unsafe fn draw_checkbox_item(
 ) {
     unsafe {
         if is_hovered {
-            draw_fluent_box(hdc, left, top, right, bottom, (4.0 * scale).round() as i32, COLORREF(0x00282828), COLORREF(0x003a3a3a));
+            draw_fluent_box(
+                hdc,
+                left,
+                top,
+                right,
+                bottom,
+                (4.0 * scale).round() as i32,
+                COLORREF(0x00282828),
+                COLORREF(0x003a3a3a),
+            );
         }
 
         let box_size = (16.0 * scale).round() as i32;
@@ -1928,7 +2535,16 @@ unsafe fn draw_checkbox_item(
             (COLORREF(0x00222222), COLORREF(0x00444444))
         };
 
-        draw_fluent_box(hdc, box_left, box_top, box_right, box_bottom, (4.0 * scale).round() as i32, box_bg, box_border);
+        draw_fluent_box(
+            hdc,
+            box_left,
+            box_top,
+            box_right,
+            box_bottom,
+            (4.0 * scale).round() as i32,
+            box_bg,
+            box_border,
+        );
 
         if is_checked {
             SelectObject(hdc, HGDIOBJ(font.0 as _));
@@ -1940,11 +2556,23 @@ unsafe fn draw_checkbox_item(
                 right: box_right,
                 bottom: box_bottom,
             };
-            DrawTextW(hdc, &mut check_buf, &mut check_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(
+                hdc,
+                &mut check_buf,
+                &mut check_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
         }
 
         SelectObject(hdc, HGDIOBJ(font.0 as _));
-        SetTextColor(hdc, if is_checked { COLORREF(0x00f0f0f0) } else { COLORREF(0x00999999) });
+        SetTextColor(
+            hdc,
+            if is_checked {
+                COLORREF(0x00f0f0f0)
+            } else {
+                COLORREF(0x00999999)
+            },
+        );
         let mut text_buf: Vec<u16> = label.encode_utf16().collect();
         let mut text_rect = RECT {
             left: box_right + (8.0 * scale).round() as i32,
@@ -1952,7 +2580,12 @@ unsafe fn draw_checkbox_item(
             right,
             bottom,
         };
-        DrawTextW(hdc, &mut text_buf, &mut text_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut text_buf,
+            &mut text_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+        );
     }
 }
 
@@ -1973,9 +2606,29 @@ unsafe fn render_metrics_checklist_card(
     hovered: Option<usize>,
 ) {
     unsafe {
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00242424), COLORREF(0x00353535));
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            COLORREF(0x00242424),
+            COLORREF(0x00353535),
+        );
 
-        render_card_texts(hdc, left, top, right, top + (54.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
+        render_card_texts(
+            hdc,
+            left,
+            top,
+            right,
+            top + (54.0 * scale).round() as i32,
+            scale,
+            font_title,
+            font_desc,
+            title,
+            desc,
+        );
 
         let items_top = top + (52.0 * scale).round() as i32;
         let item_h = (26.0 * scale).round() as i32;
@@ -1985,26 +2638,66 @@ unsafe fn render_metrics_checklist_card(
 
         // 左列 (Net, CPU, Mem)
         draw_checkbox_item(
-            hdc, col1_left, items_top, col1_left + col_w, items_top + item_h, scale,
-            font_desc, &bundle.monitor.metric_net_label, config.show_network, hovered == Some(31),
+            hdc,
+            col1_left,
+            items_top,
+            col1_left + col_w,
+            items_top + item_h,
+            scale,
+            font_desc,
+            &bundle.monitor.metric_net_label,
+            config.show_network,
+            hovered == Some(31),
         );
         draw_checkbox_item(
-            hdc, col1_left, items_top + item_h, col1_left + col_w, items_top + item_h * 2, scale,
-            font_desc, &bundle.monitor.metric_cpu_label, config.show_cpu, hovered == Some(32),
+            hdc,
+            col1_left,
+            items_top + item_h,
+            col1_left + col_w,
+            items_top + item_h * 2,
+            scale,
+            font_desc,
+            &bundle.monitor.metric_cpu_label,
+            config.show_cpu,
+            hovered == Some(32),
         );
         draw_checkbox_item(
-            hdc, col1_left, items_top + item_h * 2, col1_left + col_w, items_top + item_h * 3, scale,
-            font_desc, &bundle.monitor.metric_mem_label, config.show_memory, hovered == Some(33),
+            hdc,
+            col1_left,
+            items_top + item_h * 2,
+            col1_left + col_w,
+            items_top + item_h * 3,
+            scale,
+            font_desc,
+            &bundle.monitor.metric_mem_label,
+            config.show_memory,
+            hovered == Some(33),
         );
 
         // 右列 (GPU, Disk)
         draw_checkbox_item(
-            hdc, col2_left, items_top, col2_left + col_w, items_top + item_h, scale,
-            font_desc, &bundle.monitor.metric_gpu_label, config.show_gpu, hovered == Some(34),
+            hdc,
+            col2_left,
+            items_top,
+            col2_left + col_w,
+            items_top + item_h,
+            scale,
+            font_desc,
+            &bundle.monitor.metric_gpu_label,
+            config.show_gpu,
+            hovered == Some(34),
         );
         draw_checkbox_item(
-            hdc, col2_left, items_top + item_h, col2_left + col_w, items_top + item_h * 2, scale,
-            font_desc, &bundle.monitor.metric_disk_label, config.show_disk, hovered == Some(35),
+            hdc,
+            col2_left,
+            items_top + item_h,
+            col2_left + col_w,
+            items_top + item_h * 2,
+            scale,
+            font_desc,
+            &bundle.monitor.metric_disk_label,
+            config.show_disk,
+            hovered == Some(35),
         );
     }
 }
@@ -2026,9 +2719,29 @@ unsafe fn render_monitor_visual_card(
     hovered: Option<usize>,
 ) {
     unsafe {
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00242424), COLORREF(0x00353535));
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            COLORREF(0x00242424),
+            COLORREF(0x00353535),
+        );
 
-        render_card_texts(hdc, left, top, right, top + (54.0 * scale).round() as i32, scale, font_title, font_desc, title, desc);
+        render_card_texts(
+            hdc,
+            left,
+            top,
+            right,
+            top + (54.0 * scale).round() as i32,
+            scale,
+            font_title,
+            font_desc,
+            title,
+            desc,
+        );
 
         let row0_top = top + (54.0 * scale).round() as i32;
         let row1_top = top + (84.0 * scale).round() as i32;
@@ -2047,15 +2760,30 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (160.0 * scale).round() as i32,
             bottom: row0_top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r0_lbl, &mut r0_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut r0_lbl,
+            &mut r0_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         let pos_w = (138.0 * scale).round() as i32;
         let seg_h = (24.0 * scale).round() as i32;
         let seg_gap = (6.0 * scale).round() as i32;
         let pos_base_right = right - right_pad;
         let pos_opts = [
-            (1, MonitorPosition::TaskbarLeft, &bundle.monitor.menu_pos_taskbar_left, 46usize),
-            (0, MonitorPosition::TrayLeft, &bundle.monitor.menu_pos_tray_left, 45usize),
+            (
+                1,
+                MonitorPosition::TaskbarLeft,
+                &bundle.monitor.menu_pos_taskbar_left,
+                46usize,
+            ),
+            (
+                0,
+                MonitorPosition::TrayLeft,
+                &bundle.monitor.menu_pos_tray_left,
+                45usize,
+            ),
         ];
 
         for (rev_i, pos_val, label, hov_id) in pos_opts {
@@ -2065,15 +2793,41 @@ unsafe fn render_monitor_visual_card(
             let is_hov = hovered == Some(hov_id);
 
             let (s_bg, s_bd, s_txt) = if is_sel {
-                (COLORREF(0x00d47800), COLORREF(0x00d47800), COLORREF(0x00ffffff))
+                (
+                    COLORREF(0x00d47800),
+                    COLORREF(0x00d47800),
+                    COLORREF(0x00ffffff),
+                )
             } else if is_hov {
-                (COLORREF(0x00333333), COLORREF(0x00555555), COLORREF(0x00e0e0e0))
+                (
+                    COLORREF(0x00333333),
+                    COLORREF(0x00555555),
+                    COLORREF(0x00e0e0e0),
+                )
             } else {
-                (COLORREF(0x00282828), COLORREF(0x003d3d3d), COLORREF(0x00909090))
+                (
+                    COLORREF(0x00282828),
+                    COLORREF(0x003d3d3d),
+                    COLORREF(0x00909090),
+                )
             };
 
-            let seg_rect = RECT { left: seg_l, top: row0_top, right: seg_r, bottom: row0_top + seg_h };
-            render_rounded_button(hdc, &seg_rect, label, font_desc, s_bg, s_txt, Some(s_bd), (4.0 * scale).round() as i32);
+            let seg_rect = RECT {
+                left: seg_l,
+                top: row0_top,
+                right: seg_r,
+                bottom: row0_top + seg_h,
+            };
+            render_rounded_button(
+                hdc,
+                &seg_rect,
+                label,
+                font_desc,
+                s_bg,
+                s_txt,
+                Some(s_bd),
+                (4.0 * scale).round() as i32,
+            );
         }
 
         // 行 1: 采样刷新频率 (3段式单选胶囊)
@@ -2086,7 +2840,12 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (160.0 * scale).round() as i32,
             bottom: row1_top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r1_lbl, &mut r1_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut r1_lbl,
+            &mut r1_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         let seg_w = (96.0 * scale).round() as i32;
         let seg_h = (24.0 * scale).round() as i32;
@@ -2105,15 +2864,41 @@ unsafe fn render_monitor_visual_card(
             let is_hov = hovered == Some(hov_id);
 
             let (s_bg, s_bd, s_txt) = if is_sel {
-                (COLORREF(0x00d47800), COLORREF(0x00d47800), COLORREF(0x00ffffff))
+                (
+                    COLORREF(0x00d47800),
+                    COLORREF(0x00d47800),
+                    COLORREF(0x00ffffff),
+                )
             } else if is_hov {
-                (COLORREF(0x00333333), COLORREF(0x00555555), COLORREF(0x00e0e0e0))
+                (
+                    COLORREF(0x00333333),
+                    COLORREF(0x00555555),
+                    COLORREF(0x00e0e0e0),
+                )
             } else {
-                (COLORREF(0x00282828), COLORREF(0x003d3d3d), COLORREF(0x00909090))
+                (
+                    COLORREF(0x00282828),
+                    COLORREF(0x003d3d3d),
+                    COLORREF(0x00909090),
+                )
             };
 
-            let seg_rect = RECT { left: seg_l, top: row1_top, right: seg_r, bottom: row1_top + seg_h };
-            render_rounded_button(hdc, &seg_rect, label, font_desc, s_bg, s_txt, Some(s_bd), (4.0 * scale).round() as i32);
+            let seg_rect = RECT {
+                left: seg_l,
+                top: row1_top,
+                right: seg_r,
+                bottom: row1_top + seg_h,
+            };
+            render_rounded_button(
+                hdc,
+                &seg_rect,
+                label,
+                font_desc,
+                s_bg,
+                s_txt,
+                Some(s_bd),
+                (4.0 * scale).round() as i32,
+            );
         }
 
         // 行 2: 实时历史波形折线图 Toggle (ID 43)
@@ -2125,7 +2910,12 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (280.0 * scale).round() as i32,
             bottom: row2_top + (24.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r2_lbl, &mut r2_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut r2_lbl,
+            &mut r2_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         let sw_w = (46.0 * scale).round() as i32;
         let sw_h = (22.0 * scale).round() as i32;
@@ -2141,7 +2931,9 @@ unsafe fn render_monitor_visual_card(
         } else {
             (COLORREF(0x00323232), COLORREF(0x00525252))
         };
-        draw_fluent_box(hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border);
+        draw_fluent_box(
+            hdc, sw_left, sw_top, sw_right, sw_bottom, sw_h, sw_bg, sw_border,
+        );
 
         let thumb_margin = (2.0 * scale).round() as i32;
         let thumb_radius = (sw_h - thumb_margin * 2) / 2;
@@ -2155,9 +2947,13 @@ unsafe fn render_monitor_visual_card(
         let old_b = SelectObject(hdc, HGDIOBJ(thumb_brush.0 as _));
         let old_p = SelectObject(hdc, HGDIOBJ(thumb_pen.0 as _));
         let _ = RoundRect(
-            hdc, thumb_cx - thumb_radius, sw_cy - thumb_radius,
-            thumb_cx + thumb_radius + 1, sw_cy + thumb_radius + 1,
-            thumb_radius * 2, thumb_radius * 2,
+            hdc,
+            thumb_cx - thumb_radius,
+            sw_cy - thumb_radius,
+            thumb_cx + thumb_radius + 1,
+            sw_cy + thumb_radius + 1,
+            thumb_radius * 2,
+            thumb_radius * 2,
         );
         let _ = SelectObject(hdc, old_b);
         let _ = SelectObject(hdc, old_p);
@@ -2173,7 +2969,12 @@ unsafe fn render_monitor_visual_card(
             right: inner_x + (160.0 * scale).round() as i32,
             bottom: row3_top + (24.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut r3_lbl, &mut r3_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut r3_lbl,
+            &mut r3_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         let slider_w = (140.0 * scale).round() as i32;
         let track_right = right - right_pad;
@@ -2189,7 +2990,12 @@ unsafe fn render_monitor_visual_card(
             bottom: row3_top + (24.0 * scale).round() as i32,
         };
         SetTextColor(hdc, COLORREF(0x0050d268));
-        DrawTextW(hdc, &mut pct_buf, &mut pct_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut pct_buf,
+            &mut pct_rect,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         let track_cy = row3_top + (12.0 * scale).round() as i32;
         let track_h = (4.0 * scale).round() as i32;
@@ -2242,7 +3048,16 @@ unsafe fn render_monitor_tips_card(
     bundle: &crate::rules::LocaleBundle,
 ) {
     unsafe {
-        draw_fluent_box(hdc, left, top, right, bottom, (8.0 * scale).round() as i32, COLORREF(0x00212121), COLORREF(0x00343434));
+        draw_fluent_box(
+            hdc,
+            left,
+            top,
+            right,
+            bottom,
+            (8.0 * scale).round() as i32,
+            COLORREF(0x00212121),
+            COLORREF(0x00343434),
+        );
 
         let inner_x = left + (16.0 * scale).round() as i32;
 
@@ -2260,7 +3075,12 @@ unsafe fn render_monitor_tips_card(
             right: right - (16.0 * scale).round() as i32,
             bottom: top + (26.0 * scale).round() as i32,
         };
-        DrawTextW(hdc, &mut title_buf, &mut title_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut title_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
         SetTextColor(hdc, COLORREF(0x009e9e9e));
@@ -2287,7 +3107,12 @@ unsafe fn render_monitor_tips_card(
                 right: right - (16.0 * scale).round() as i32,
                 bottom: tip_top + line_h,
             };
-            DrawTextW(hdc, &mut buf, &mut r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            DrawTextW(
+                hdc,
+                &mut buf,
+                &mut r,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
             tip_top += line_h + (2.0 * scale).round() as i32;
         }
     }
@@ -2296,7 +3121,11 @@ unsafe fn render_monitor_tips_card(
 /// 鼠标悬停位置探测与手型光标切换
 fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
-    let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
+    let scale = if dpi == 0 {
+        1.0
+    } else {
+        (dpi as f32 / 96.0).max(1.0)
+    };
 
     let mut rect = RECT::default();
     unsafe {
@@ -2327,7 +3156,10 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let btn_ok_right = btn_cancel_left - btn_gap;
     let btn_ok_left = btn_ok_right - btn_w;
 
-    let current_tab = CURRENT_TAB.lock().map(|t| *t).unwrap_or(SettingsTab::General);
+    let current_tab = CURRENT_TAB
+        .lock()
+        .map(|t| *t)
+        .unwrap_or(SettingsTab::General);
 
     // 如果下拉层处于展开状态（仅在 General Tab），优先处理下拉列表项的悬停检测
     if current_tab == SettingsTab::General && IS_DROPDOWN_OPEN.load(Ordering::SeqCst) {
@@ -2370,11 +3202,11 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
         }
 
         let mut changed = false;
-        if let Ok(mut h) = HOVER_DROPDOWN_ITEM_IDX.lock() {
-            if *h != new_hov_item {
-                *h = new_hov_item;
-                changed = true;
-            }
+        if let Ok(mut h) = HOVER_DROPDOWN_ITEM_IDX.lock()
+            && *h != new_hov_item
+        {
+            *h = new_hov_item;
+            changed = true;
         }
         if changed {
             unsafe {
@@ -2382,9 +3214,14 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
             }
         }
 
-        let is_over_combo = x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom;
+        let is_over_combo =
+            x >= combo_left && x <= combo_right && y >= combo_top && y <= combo_bottom;
         unsafe {
-            let cursor_id = if new_hov_item.is_some() || is_over_combo { IDC_HAND } else { IDC_ARROW };
+            let cursor_id = if new_hov_item.is_some() || is_over_combo {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            };
             let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
         }
         return;
@@ -2412,7 +3249,11 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
-            DragMode::AutoSwitchToggle { start_x, initial_state, ref mut has_moved } => {
+            DragMode::AutoSwitchToggle {
+                start_x,
+                initial_state,
+                ref mut has_moved,
+            } => {
                 let dx = x - start_x;
                 if dx.abs() > 4 {
                     *has_moved = true;
@@ -2434,7 +3275,11 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
-            DragMode::AutostartToggle { start_x, initial_state, ref mut has_moved } => {
+            DragMode::AutostartToggle {
+                start_x,
+                initial_state,
+                ref mut has_moved,
+            } => {
                 let dx = x - start_x;
                 if dx.abs() > 4 {
                     *has_moved = true;
@@ -2456,7 +3301,11 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
-            DragMode::TabMasterToggle { start_x, initial_state, ref mut has_moved } => {
+            DragMode::TabMasterToggle {
+                start_x,
+                initial_state,
+                ref mut has_moved,
+            } => {
                 let dx = x - start_x;
                 if dx.abs() > 4 {
                     *has_moved = true;
@@ -2478,7 +3327,11 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
-            DragMode::MonitorMasterToggle { start_x, initial_state, ref mut has_moved } => {
+            DragMode::MonitorMasterToggle {
+                start_x,
+                initial_state,
+                ref mut has_moved,
+            } => {
                 let dx = x - start_x;
                 if dx.abs() > 4 {
                     *has_moved = true;
@@ -2588,7 +3441,10 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                     }
                 } else if y >= card5_top && y <= card5_top + about_h {
                     let logo_w = ((about_h as f32) * 0.8).round() as i32;
-                    let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
+                    let text_x = pad_x
+                        + (16.0 * scale).round() as i32
+                        + logo_w
+                        + (18.0 * scale).round() as i32;
                     let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
 
                     let web_top = card5_top + (51.0 * scale).round() as i32;
@@ -2613,7 +3469,11 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                     let debug_h = (26.0 * scale).round() as i32;
                     let debug_top = debug_cy - debug_h / 2;
                     let debug_w = (320.0 * scale).round() as i32;
-                    if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h {
+                    if x >= pad_x
+                        && x <= pad_x + debug_w
+                        && y >= debug_top
+                        && y <= debug_top + debug_h
+                    {
                         new_hover = Some(50);
                         is_pointer = true;
                     }
@@ -2649,19 +3509,20 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                         }
                     }
                     // 卡片 2：智能行为与鼠标手势（仅总开关开启时响应悬停高亮）
-                    else if y >= card2_top && y <= card2_top + card2_h {
-                        if config.tab_module.enabled {
-                            let header_h = (46.0 * scale).round() as i32;
-                            let row_h = (44.0 * scale).round() as i32;
-                            let r1_top = card2_top + header_h;
-                            let r2_top = r1_top + row_h;
-                            if y >= r1_top && y <= r1_top + row_h {
-                                new_hover = Some(63);
-                                is_pointer = true;
-                            } else if y >= r2_top && y <= r2_top + row_h {
-                                new_hover = Some(64);
-                                is_pointer = true;
-                            }
+                    else if y >= card2_top
+                        && y <= card2_top + card2_h
+                        && config.tab_module.enabled
+                    {
+                        let header_h = (46.0 * scale).round() as i32;
+                        let row_h = (44.0 * scale).round() as i32;
+                        let r1_top = card2_top + header_h;
+                        let r2_top = r1_top + row_h;
+                        if y >= r1_top && y <= r1_top + row_h {
+                            new_hover = Some(63);
+                            is_pointer = true;
+                        } else if y >= r2_top && y <= r2_top + row_h {
+                            new_hover = Some(64);
+                            is_pointer = true;
                         }
                     }
                 }
@@ -2690,15 +3551,30 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                         let row = ((y - items_top) / item_h) as usize;
                         if x >= col1_left && x <= col1_left + col_w {
                             match row {
-                                0 => { new_hover = Some(31); is_pointer = true; }
-                                1 => { new_hover = Some(32); is_pointer = true; }
-                                2 => { new_hover = Some(33); is_pointer = true; }
+                                0 => {
+                                    new_hover = Some(31);
+                                    is_pointer = true;
+                                }
+                                1 => {
+                                    new_hover = Some(32);
+                                    is_pointer = true;
+                                }
+                                2 => {
+                                    new_hover = Some(33);
+                                    is_pointer = true;
+                                }
                                 _ => {}
                             }
                         } else if x >= col2_left && x <= col2_left + col_w {
                             match row {
-                                0 => { new_hover = Some(34); is_pointer = true; }
-                                1 => { new_hover = Some(35); is_pointer = true; }
+                                0 => {
+                                    new_hover = Some(34);
+                                    is_pointer = true;
+                                }
+                                1 => {
+                                    new_hover = Some(35);
+                                    is_pointer = true;
+                                }
                                 _ => {}
                             }
                         }
@@ -2752,7 +3628,9 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                         let slider_w = (140.0 * scale).round() as i32;
                         let track_right = pad_x + card_w - right_pad;
                         let track_left = track_right - slider_w;
-                        if x >= track_left - (10.0 * scale) as i32 && x <= track_right + (10.0 * scale) as i32 {
+                        if x >= track_left - (10.0 * scale) as i32
+                            && x <= track_right + (10.0 * scale) as i32
+                        {
                             new_hover = Some(44);
                             is_pointer = true;
                         }
@@ -2780,25 +3658,25 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     }
 
     // 悬停发生变化时触发重绘
-    if let Ok(mut h) = HOVER_CARD_IDX.lock() {
-        if *h != new_hover {
-            *h = new_hover;
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
+    if let Ok(mut h) = HOVER_CARD_IDX.lock()
+        && *h != new_hover
+    {
+        *h = new_hover;
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
         }
     }
 }
 
 /// 鼠标松开处理（释放拖拽模式）
 fn handle_settings_mouse_up(hwnd: HWND, _x: i32, _y: i32) {
-    if let Ok(mut drag) = DRAG_MODE.lock() {
-        if *drag != DragMode::None {
-            *drag = DragMode::None;
-            unsafe {
-                let _ = ReleaseCapture();
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
+    if let Ok(mut drag) = DRAG_MODE.lock()
+        && *drag != DragMode::None
+    {
+        *drag = DragMode::None;
+        unsafe {
+            let _ = ReleaseCapture();
+            let _ = InvalidateRect(Some(hwnd), None, false);
         }
     }
 }
@@ -2806,7 +3684,11 @@ fn handle_settings_mouse_up(hwnd: HWND, _x: i32, _y: i32) {
 /// 鼠标点击交互核心引擎
 fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
-    let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
+    let scale = if dpi == 0 {
+        1.0
+    } else {
+        (dpi as f32 / 96.0).max(1.0)
+    };
 
     let mut config = get_draft_config();
     let mut need_redraw = false;
@@ -2827,7 +3709,10 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
     let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
     let card_top_base = line_y + (10.0 * scale).round() as i32;
 
-    let current_tab = CURRENT_TAB.lock().map(|t| *t).unwrap_or(SettingsTab::General);
+    let current_tab = CURRENT_TAB
+        .lock()
+        .map(|t| *t)
+        .unwrap_or(SettingsTab::General);
 
     // 1. 顶部 Tab 选项卡点击
     if y >= tab_y && y <= tab_y + tab_h {
@@ -2896,7 +3781,8 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
 
             if is_dropdown_open {
                 let avail = I18n::get_available_languages();
-                let mut lang_options = vec![("auto".to_string(), "自动跟随系统 (Auto)".to_string())];
+                let mut lang_options =
+                    vec![("auto".to_string(), "自动跟随系统 (Auto)".to_string())];
                 for (code, name) in avail {
                     if !lang_options.iter().any(|(c, _)| c == &code) {
                         lang_options.push((code, name));
@@ -2962,11 +3848,13 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 unsafe {
                     let _ = SetCapture(hwnd);
                 }
-            } else if x >= pad_x && x <= pad_x + card_w && y >= card1_top && y <= card1_top + card_h {
+            } else if x >= pad_x && x <= pad_x + card_w && y >= card1_top && y <= card1_top + card_h
+            {
                 let is_rec = IS_RECORDING_HOTKEY.load(Ordering::SeqCst);
                 IS_RECORDING_HOTKEY.store(!is_rec, Ordering::SeqCst);
                 need_redraw = true;
-            } else if x >= pad_x && x <= pad_x + card_w && y >= card2_top && y <= card2_top + card_h {
+            } else if x >= pad_x && x <= pad_x + card_w && y >= card2_top && y <= card2_top + card_h
+            {
                 let old_state = config.autostart_enabled;
                 config.autostart_enabled = !old_state;
                 set_draft_config(config.clone());
@@ -2983,13 +3871,16 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 unsafe {
                     let _ = SetCapture(hwnd);
                 }
-            } else if x >= pad_x && x <= pad_x + card_w && y >= card3_top && y <= card3_top + card_h {
+            } else if x >= pad_x && x <= pad_x + card_w && y >= card3_top && y <= card3_top + card_h
+            {
                 IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
                 let slider_w = (140.0 * scale).round() as i32;
                 let track_right = rect.right - pad_x - (18.0 * scale).round() as i32;
                 let track_left = track_right - slider_w;
 
-                if x >= track_left - (20.0 * scale) as i32 && x <= track_right + (20.0 * scale) as i32 {
+                if x >= track_left - (20.0 * scale) as i32
+                    && x <= track_right + (20.0 * scale) as i32
+                {
                     let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
                     let new_val = (40.0 + ratio * 60.0).round() as u8;
                     config.floating_bar_opacity = new_val;
@@ -3011,7 +3902,8 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 }
             } else if y >= card5_top && y <= card5_top + about_h {
                 let logo_w = ((about_h as f32) * 0.8).round() as i32;
-                let text_x = pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
+                let text_x =
+                    pad_x + (16.0 * scale).round() as i32 + logo_w + (18.0 * scale).round() as i32;
                 let text_right = pad_x + card_w - (16.0 * scale).round() as i32;
 
                 let web_top = card5_top + (51.0 * scale).round() as i32;
@@ -3034,7 +3926,9 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                     }
                     return;
                 } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
-                    let url: Vec<u16> = "https://github.com/clhome/QuickPath\0".encode_utf16().collect();
+                    let url: Vec<u16> = "https://github.com/clhome/QuickPath\0"
+                        .encode_utf16()
+                        .collect();
                     let op: Vec<u16> = "open\0".encode_utf16().collect();
                     unsafe {
                         ShellExecuteW(
@@ -3058,7 +3952,8 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 let debug_h = (26.0 * scale).round() as i32;
                 let debug_top = debug_cy - debug_h / 2;
                 let debug_w = (320.0 * scale).round() as i32;
-                if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h {
+                if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h
+                {
                     let cur = crate::dialog::detector::is_debug_mode_enabled();
                     crate::dialog::detector::set_debug_mode_enabled(!cur);
                     need_redraw = true;
@@ -3107,21 +4002,23 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                         }
                     }
                     // 点击 卡片 2：智能行为与鼠标手势（仅总开关开启时响应）
-                    else if y >= card2_top && y <= card2_top + card2_h {
-                        if config.tab_module.enabled {
-                            let header_h = (46.0 * scale).round() as i32;
-                            let row_h = (44.0 * scale).round() as i32;
-                            let r1_top = card2_top + header_h;
-                            let r2_top = r1_top + row_h;
-                            if y >= r1_top && y <= r1_top + row_h {
-                                config.tab_module.deduplication = !config.tab_module.deduplication;
-                                set_draft_config(config.clone());
-                                need_redraw = true;
-                            } else if y >= r2_top && y <= r2_top + row_h {
-                                config.tab_module.double_click_to_duplicate = !config.tab_module.double_click_to_duplicate;
-                                set_draft_config(config.clone());
-                                need_redraw = true;
-                            }
+                    else if y >= card2_top
+                        && y <= card2_top + card2_h
+                        && config.tab_module.enabled
+                    {
+                        let header_h = (46.0 * scale).round() as i32;
+                        let row_h = (44.0 * scale).round() as i32;
+                        let r1_top = card2_top + header_h;
+                        let r2_top = r1_top + row_h;
+                        if y >= r1_top && y <= r1_top + row_h {
+                            config.tab_module.deduplication = !config.tab_module.deduplication;
+                            set_draft_config(config.clone());
+                            need_redraw = true;
+                        } else if y >= r2_top && y <= r2_top + row_h {
+                            config.tab_module.double_click_to_duplicate =
+                                !config.tab_module.double_click_to_duplicate;
+                            set_draft_config(config.clone());
+                            need_redraw = true;
                         }
                     }
                 }
@@ -3136,7 +4033,8 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
             let card_m2_h = (182.0 * scale).round() as i32;
 
             // 点击 M0: 任务栏监控总开关
-            if x >= pad_x && x <= pad_x + card_w && y >= card_m0_top && y <= card_m0_top + card_m0_h {
+            if x >= pad_x && x <= pad_x + card_w && y >= card_m0_top && y <= card_m0_top + card_m0_h
+            {
                 let old_state = config.monitor.enabled;
                 config.monitor.enabled = !old_state;
                 set_draft_config(config.clone());
@@ -3154,7 +4052,11 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 }
             }
             // 点击 M1: 常驻指标勾选面板
-            else if x >= pad_x && x <= pad_x + card_w && y >= card_m1_top && y <= card_m1_top + card_m1_h {
+            else if x >= pad_x
+                && x <= pad_x + card_w
+                && y >= card_m1_top
+                && y <= card_m1_top + card_m1_h
+            {
                 let items_top = card_m1_top + (52.0 * scale).round() as i32;
                 let item_h = (26.0 * scale).round() as i32;
                 let col_w = (card_w - (32.0 * scale).round() as i32) / 2;
@@ -3171,7 +4073,12 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                             _ => {}
                         }
                         // 防呆保护：至少保留 1 项开启
-                        if !config.monitor.show_network && !config.monitor.show_cpu && !config.monitor.show_memory && !config.monitor.show_gpu && !config.monitor.show_disk {
+                        if !config.monitor.show_network
+                            && !config.monitor.show_cpu
+                            && !config.monitor.show_memory
+                            && !config.monitor.show_gpu
+                            && !config.monitor.show_disk
+                        {
                             match row {
                                 0 => config.monitor.show_network = true,
                                 1 => config.monitor.show_cpu = true,
@@ -3187,7 +4094,12 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                             1 => config.monitor.show_disk = !config.monitor.show_disk,
                             _ => {}
                         }
-                        if !config.monitor.show_network && !config.monitor.show_cpu && !config.monitor.show_memory && !config.monitor.show_gpu && !config.monitor.show_disk {
+                        if !config.monitor.show_network
+                            && !config.monitor.show_cpu
+                            && !config.monitor.show_memory
+                            && !config.monitor.show_gpu
+                            && !config.monitor.show_disk
+                        {
                             match row {
                                 0 => config.monitor.show_gpu = true,
                                 1 => config.monitor.show_disk = true,
@@ -3200,7 +4112,11 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 }
             }
             // 点击 M2: 外观与采样参数面板
-            else if x >= pad_x && x <= pad_x + card_w && y >= card_m2_top && y <= card_m2_top + card_m2_h {
+            else if x >= pad_x
+                && x <= pad_x + card_w
+                && y >= card_m2_top
+                && y <= card_m2_top + card_m2_h
+            {
                 let row0_top = card_m2_top + (54.0 * scale).round() as i32;
                 let row1_top = card_m2_top + (84.0 * scale).round() as i32;
                 let row2_top = card_m2_top + (114.0 * scale).round() as i32;
@@ -3235,11 +4151,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                     let seg_w = (96.0 * scale).round() as i32;
                     let seg_gap = (6.0 * scale).round() as i32;
                     let seg_base_right = pad_x + card_w - right_pad;
-                    let seg_opts = [
-                        (2, 1000u64),
-                        (1, 3000u64),
-                        (0, 5000u64),
-                    ];
+                    let seg_opts = [(2, 1000u64), (1, 3000u64), (0, 5000u64)];
                     for (rev_i, val) in seg_opts {
                         let seg_r = seg_base_right - rev_i * (seg_w + seg_gap);
                         let seg_l = seg_r - seg_w;
@@ -3262,7 +4174,9 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                     let slider_w = (140.0 * scale).round() as i32;
                     let track_right = pad_x + card_w - right_pad;
                     let track_left = track_right - slider_w;
-                    if x >= track_left - (20.0 * scale) as i32 && x <= track_right + (20.0 * scale) as i32 {
+                    if x >= track_left - (20.0 * scale) as i32
+                        && x <= track_right + (20.0 * scale) as i32
+                    {
                         let ratio = ((x - track_left) as f32 / slider_w as f32).clamp(0.0, 1.0);
                         let new_val = (50.0 + ratio * 50.0).round() as u8;
                         config.monitor.opacity = new_val;
@@ -3359,16 +4273,28 @@ mod tests {
         let bundles = crate::rules::I18n::get_bundles();
         let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
         assert_eq!(zh.tab_module.unsupported_badge, "系统环境限制");
-        assert_eq!(zh.tab_module.unsupported_title, "当前 Windows 系统版本暂不支持多标签增强");
+        assert_eq!(
+            zh.tab_module.unsupported_title,
+            "当前 Windows 系统版本暂不支持多标签增强"
+        );
         let os_str = crate::win32::version::format_windows_version(true);
-        let desc = zh.tab_module.unsupported_desc.replace("{os_version}", &os_str);
+        let desc = zh
+            .tab_module
+            .unsupported_desc
+            .replace("{os_version}", &os_str);
         assert!(desc.contains("22621"));
         assert!(desc.contains(&os_str));
 
         let en = bundles.get("en-US").expect("en-US bundle should exist");
         assert_eq!(en.tab_module.unsupported_badge, "System Unsupported");
-        assert_eq!(en.tab_module.unsupported_title, "File Explorer Tabs Not Supported on Current Windows");
-        let desc_en = en.tab_module.unsupported_desc.replace("{os_version}", &os_str);
+        assert_eq!(
+            en.tab_module.unsupported_title,
+            "File Explorer Tabs Not Supported on Current Windows"
+        );
+        let desc_en = en
+            .tab_module
+            .unsupported_desc
+            .replace("{os_version}", &os_str);
         assert!(desc_en.contains("22621"));
     }
 
@@ -3388,12 +4314,18 @@ mod tests {
         let en = bundles.get("en-US").expect("en-US bundle should exist");
 
         let os_str_mock = "Windows 10 ServerStandard 1809 (OS 内部版本 17763.107)";
-        let desc_zh = zh.tab_module.unsupported_desc.replace("{os_version}", os_str_mock);
+        let desc_zh = zh
+            .tab_module
+            .unsupported_desc
+            .replace("{os_version}", os_str_mock);
         assert!(desc_zh.contains('\n'), "中文描述应包含分段换行符以保持整洁");
         assert!(desc_zh.contains("17763.107"));
         assert!(!desc_zh.is_empty());
 
-        let desc_en = en.tab_module.unsupported_desc.replace("{os_version}", os_str_mock);
+        let desc_en = en
+            .tab_module
+            .unsupported_desc
+            .replace("{os_version}", os_str_mock);
         assert!(desc_en.contains('\n'), "英文描述应包含分段换行符以保持整洁");
         assert!(desc_en.contains("17763.107"));
         assert!(!desc_en.is_empty());
@@ -3410,8 +4342,14 @@ mod tests {
         assert!(zh.tab_module.tips_line2.contains("Ctrl+Tab"));
 
         let en = bundles.get("en-US").expect("en-US bundle should exist");
-        assert_eq!(en.tab_module.shortcuts_group_title, "Shortcuts & Window Integration");
-        assert_eq!(en.tab_module.behaviors_group_title, "Smart Behaviors & Mouse Gestures");
+        assert_eq!(
+            en.tab_module.shortcuts_group_title,
+            "Shortcuts & Window Integration"
+        );
+        assert_eq!(
+            en.tab_module.behaviors_group_title,
+            "Smart Behaviors & Mouse Gestures"
+        );
         assert!(en.tab_module.tips_title.contains("💡"));
         assert!(en.tab_module.tips_line1.contains("Middle-click"));
         assert!(en.tab_module.tips_line2.contains("Ctrl+Tab"));

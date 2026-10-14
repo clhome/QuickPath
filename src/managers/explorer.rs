@@ -1,17 +1,18 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use windows::core::Interface;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL,
-    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, IServiceProvider,
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
+    IServiceProvider,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::{IShellBrowser, IShellWindows, IWebBrowser2, ShellWindows};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetClassNameW, GetForegroundWindow, GetWindow, IsWindow, IsWindowVisible, GW_HWNDNEXT,
+    FindWindowExW, GW_HWNDNEXT, GetClassNameW, GetForegroundWindow, GetWindow, IsWindow,
+    IsWindowVisible,
 };
+use windows::core::Interface;
 
 #[derive(Debug, Clone)]
 pub struct ExplorerFolder {
@@ -27,77 +28,76 @@ pub fn get_explorer_folders() -> Vec<ExplorerFolder> {
 
     unsafe {
         // 保证当前线程已初始化 COM
-        let _ = CoInitializeEx(
-            None,
-            COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
-        );
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
         let top_explorer = get_top_visible_explorer_hwnd();
         let top_active_tab = top_explorer.and_then(get_active_tab_hwnd);
 
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(
-            &ShellWindows,
-            None,
-            CLSCTX_ALL,
-        );
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
 
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser
-                                .HWND()
-                                .map(|h| HWND(h.0 as *mut _))
-                                .unwrap_or_default();
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
 
-                            // 严格过滤无效窗口与不可见窗口
-                            if hwnd.0.is_null() || !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
-                                continue;
-                            }
+                    // 严格过滤无效窗口与不可见窗口
+                    if hwnd.0.is_null()
+                        || !IsWindow(Some(hwnd)).as_bool()
+                        || !IsWindowVisible(hwnd).as_bool()
+                    {
+                        continue;
+                    }
 
-                            if let Ok(url_bstr) = browser.LocationURL() {
-                                let url = url_bstr.to_string();
-                                if let Some(path) = parse_file_url(&url) {
-                                    if (path.len() >= 2 && &path[1..2] == ":") || path.starts_with("\\\\") {
-                                        let title = browser
-                                            .LocationName()
-                                            .map(|n| n.to_string())
-                                            .unwrap_or_else(|_| {
-                                                Path::new(&path)
-                                                    .file_name()
-                                                    .map(|f| f.to_string_lossy().to_string())
-                                                    .unwrap_or_else(|| path.clone())
-                                            });
+                    if let Ok(url_bstr) = browser.LocationURL() {
+                        let url = url_bstr.to_string();
+                        if let Some(path) = parse_file_url(&url)
+                            && ((path.len() >= 2 && &path[1..2] == ":") || path.starts_with("\\\\"))
+                        {
+                            let title = browser
+                                .LocationName()
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|_| {
+                                    Path::new(&path)
+                                        .file_name()
+                                        .map(|f| f.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| path.clone())
+                                });
 
-                                        // 核心：基于 ShellTabWindowClass 精准识别 Win11 多标签页活动状态
-                                        let mut is_active = false;
-                                        let tab_sub_hwnd = get_browser_tab_hwnd(&browser);
+                            // 核心：基于 ShellTabWindowClass 精准识别 Win11 多标签页活动状态
+                            let mut is_active = false;
+                            let tab_sub_hwnd = get_browser_tab_hwnd(&browser);
 
-                                        if let Some(top_exp) = top_explorer {
-                                            if hwnd == top_exp {
-                                                if let (Some(my_tab), Some(active_tab)) = (tab_sub_hwnd, top_active_tab) {
-                                                    // 多标签页窗口：严格匹配 Z-Order 顶层活跃 Tab
-                                                    if my_tab == active_tab {
-                                                        is_active = true;
-                                                    }
-                                                } else if top_active_tab.is_none() {
-                                                    // 经典单窗口或无标签页模式：顶级窗口匹配即为 active
-                                                    is_active = true;
-                                                }
-                                            }
-                                        }
-
-                                        results.push(ExplorerFolder {
-                                            path,
-                                            title,
-                                            is_active,
-                                            hwnd,
-                                        });
+                            if let Some(top_exp) = top_explorer
+                                && hwnd == top_exp
+                            {
+                                if let (Some(my_tab), Some(active_tab)) =
+                                    (tab_sub_hwnd, top_active_tab)
+                                {
+                                    // 多标签页窗口：严格匹配 Z-Order 顶层活跃 Tab
+                                    if my_tab == active_tab {
+                                        is_active = true;
                                     }
+                                } else if top_active_tab.is_none() {
+                                    // 经典单窗口或无标签页模式：顶级窗口匹配即为 active
+                                    is_active = true;
                                 }
                             }
+
+                            results.push(ExplorerFolder {
+                                path,
+                                title,
+                                is_active,
+                                hwnd,
+                            });
                         }
                     }
                 }
@@ -114,14 +114,13 @@ pub fn get_explorer_folders() -> Vec<ExplorerFolder> {
 /// 尝试从 IWebBrowser2 提取其对应的 ShellTabWindowClass 句柄
 pub fn get_browser_tab_hwnd(browser: &IWebBrowser2) -> Option<HWND> {
     unsafe {
-        if let Ok(sp) = browser.cast::<IServiceProvider>() {
-            if let Ok(sb) = sp.QueryService::<IShellBrowser>(&IShellBrowser::IID) {
-                if let Ok(tab_hwnd) = sb.GetWindow() {
-                    if !tab_hwnd.0.is_null() && IsWindow(Some(tab_hwnd)).as_bool() {
-                        return Some(tab_hwnd);
-                    }
-                }
-            }
+        if let Ok(sp) = browser.cast::<IServiceProvider>()
+            && let Ok(sb) = sp.QueryService::<IShellBrowser>(&IShellBrowser::IID)
+            && let Ok(tab_hwnd) = sb.GetWindow()
+            && !tab_hwnd.0.is_null()
+            && IsWindow(Some(tab_hwnd)).as_bool()
+        {
+            return Some(tab_hwnd);
         }
         None
     }
@@ -133,9 +132,14 @@ pub fn get_active_tab_hwnd(top_hwnd: HWND) -> Option<HWND> {
         if top_hwnd.0.is_null() || !IsWindow(Some(top_hwnd)).as_bool() {
             return None;
         }
-        FindWindowExW(Some(top_hwnd), None, windows::core::w!("ShellTabWindowClass"), None)
-            .ok()
-            .filter(|h| !h.0.is_null() && IsWindow(Some(*h)).as_bool())
+        FindWindowExW(
+            Some(top_hwnd),
+            None,
+            windows::core::w!("ShellTabWindowClass"),
+            None,
+        )
+        .ok()
+        .filter(|h| !h.0.is_null() && IsWindow(Some(*h)).as_bool())
     }
 }
 
@@ -186,46 +190,41 @@ pub fn get_active_explorer_folder_fast() -> Option<String> {
         let top_explorer = get_top_visible_explorer_hwnd()?;
         let top_active_tab = get_active_tab_hwnd(top_explorer);
 
-        let _ = CoInitializeEx(
-            None,
-            COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
-        );
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
-        let shell_windows: Result<IShellWindows, _> = CoCreateInstance(
-            &ShellWindows,
-            None,
-            CLSCTX_ALL,
-        );
+        let shell_windows: Result<IShellWindows, _> =
+            CoCreateInstance(&ShellWindows, None, CLSCTX_ALL);
 
-        if let Ok(shell_windows) = shell_windows {
-            if let Ok(count) = shell_windows.Count() {
-                for i in 0..count {
-                    let index = VARIANT::from(i);
-                    if let Ok(disp) = shell_windows.Item(&index) {
-                        if let Ok(browser) = disp.cast::<IWebBrowser2>() {
-                            let hwnd = browser
-                                .HWND()
-                                .map(|h| HWND(h.0 as *mut _))
-                                .unwrap_or_default();
+        if let Ok(shell_windows) = shell_windows
+            && let Ok(count) = shell_windows.Count()
+        {
+            for i in 0..count {
+                let index = VARIANT::from(i);
+                if let Ok(disp) = shell_windows.Item(&index)
+                    && let Ok(browser) = disp.cast::<IWebBrowser2>()
+                {
+                    let hwnd = browser
+                        .HWND()
+                        .map(|h| HWND(h.0 as *mut _))
+                        .unwrap_or_default();
 
-                            if hwnd == top_explorer {
-                                let is_match = if let (Some(active_tab), Some(my_tab)) = (top_active_tab, get_browser_tab_hwnd(&browser)) {
-                                    my_tab == active_tab
-                                } else {
-                                    // 经典单窗口或无标签页模式，顶级窗口匹配即为目标
-                                    true
-                                };
+                    if hwnd == top_explorer {
+                        let is_match = if let (Some(active_tab), Some(my_tab)) =
+                            (top_active_tab, get_browser_tab_hwnd(&browser))
+                        {
+                            my_tab == active_tab
+                        } else {
+                            // 经典单窗口或无标签页模式，顶级窗口匹配即为目标
+                            true
+                        };
 
-                                if is_match {
-                                    if let Ok(url_bstr) = browser.LocationURL() {
-                                        let url = url_bstr.to_string();
-                                        if let Some(path) = parse_file_url(&url) {
-                                            if (path.len() >= 2 && &path[1..2] == ":") || path.starts_with("\\\\") {
-                                                return Some(path);
-                                            }
-                                        }
-                                    }
-                                }
+                        if is_match && let Ok(url_bstr) = browser.LocationURL() {
+                            let url = url_bstr.to_string();
+                            if let Some(path) = parse_file_url(&url)
+                                && ((path.len() >= 2 && &path[1..2] == ":")
+                                    || path.starts_with("\\\\"))
+                            {
+                                return Some(path);
                             }
                         }
                     }
@@ -265,14 +264,11 @@ fn url_decode(input: &str) -> String {
         if b == b'%' {
             let h1 = chars.next();
             let h2 = chars.next();
-            if let (Some(h1), Some(h2)) = (h1, h2) {
-                if let Ok(val) = u8::from_str_radix(
-                    &format!("{}{}", h1 as char, h2 as char),
-                    16,
-                ) {
-                    bytes.push(val);
-                    continue;
-                }
+            if let (Some(h1), Some(h2)) = (h1, h2)
+                && let Ok(val) = u8::from_str_radix(&format!("{}{}", h1 as char, h2 as char), 16)
+            {
+                bytes.push(val);
+                continue;
             }
         }
         bytes.push(b);

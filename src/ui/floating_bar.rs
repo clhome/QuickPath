@@ -1,37 +1,37 @@
 #![allow(dead_code)]
+// `show()` 是吸附条对外的展示入口，参数即对话框上下文（窗口/编辑框/矩形/候选/
+// 透明度/语言/类型），拆包反而让调用端更难读（clippy::too_many_arguments 说明）。
+#![allow(clippy::too_many_arguments)]
 
-use crate::dialog::{inject_path_to_dialog, DialogKind};
+use crate::dialog::{DialogKind, inject_path_to_dialog};
 use crate::managers::FolderCandidate;
 use crate::rules::{I18n, Language};
 use std::sync::atomic::{AtomicPtr, Ordering};
-use windows::core::w;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-    FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect, MonitorFromWindow,
-    SelectObject, SetBkMode, SetTextColor, UpdateWindow, DT_CALCRECT, DT_END_ELLIPSIS,
-    DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
-    HBRUSH, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
-    TRANSPARENT, WHITE_BRUSH,
+    BeginPaint, CreateFontW, CreateSolidBrush, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
+    FillRect, GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode,
+    SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetSystemMetrics, LoadCursorW, RegisterClassW,
-    SetCursor, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, CS_HREDRAW,
-    CS_VREDRAW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LWA_ALPHA, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_DESTROY, WM_ERASEBKGND,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSW, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetSystemMetrics, HWND_TOPMOST,
+    IDC_ARROW, IDC_HAND, LWA_ALPHA, LoadCursorW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE,
+    SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetLayeredWindowAttributes, SetWindowPos,
+    ShowWindow, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
+    WNDCLASSW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
+use windows::core::w;
 
-static FLOATING_BAR_INSTANCE: AtomicPtr<FloatingBarState> =
-    AtomicPtr::new(std::ptr::null_mut());
+static FLOATING_BAR_INSTANCE: AtomicPtr<FloatingBarState> = AtomicPtr::new(std::ptr::null_mut());
 
 pub struct FloatingBarState {
     pub hwnd: HWND,
@@ -186,7 +186,9 @@ impl FloatingBar {
         let mut dpi_x = 0u32;
         let mut dpi_y = 0u32;
         let dpi = unsafe {
-            if GetDpiForMonitor(h_mon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok() && dpi_x > 0 {
+            if GetDpiForMonitor(h_mon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok()
+                && dpi_x > 0
+            {
                 dpi_x
             } else {
                 let d = GetDpiForWindow(dialog_hwnd);
@@ -212,7 +214,8 @@ impl FloatingBar {
 
         // 单行紧凑高密度展示，最多展示 8 行
         let visible_items = self.state.candidates.len().min(8) as i32;
-        let total_height = self.state.header_height + visible_items * self.state.item_height + self.state.padding;
+        let total_height =
+            self.state.header_height + visible_items * self.state.item_height + self.state.padding;
 
         // 3. 多显示器感知定位：精准获取对话框所在显示器的物理工作区 rcWork
         let mut mi = MONITORINFO {
@@ -335,13 +338,7 @@ impl FloatingBar {
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
             }
-            inject_path_to_dialog(
-                dlg_hwnd,
-                edit_hwnd,
-                &path,
-                kind,
-                None,
-            );
+            inject_path_to_dialog(dlg_hwnd, edit_hwnd, &path, kind, None);
         }
     }
 }
@@ -381,7 +378,11 @@ unsafe extern "system" fn floating_bar_wnd_proc(
             let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
             if !state_ptr.is_null() {
                 let state = unsafe { &*state_ptr };
-                let cursor_id = if state.is_producer_hovered { IDC_HAND } else { IDC_ARROW };
+                let cursor_id = if state.is_producer_hovered {
+                    IDC_HAND
+                } else {
+                    IDC_ARROW
+                };
                 unsafe {
                     let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
                 }
@@ -438,7 +439,14 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
         let font_tag_size = (-11.0 * scale).round() as i32;
 
         let font_header = CreateFontW(
-            font_title_size, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+            font_title_size,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -447,7 +455,14 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
         let font_item_title = CreateFontW(
-            font_item_title_size, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
+            font_item_title_size,
+            0,
+            0,
+            0,
+            FW_BOLD.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -456,7 +471,14 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             w!("Microsoft YaHei UI"),
         );
         let font_path = CreateFontW(
-            font_path_size, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
+            font_path_size,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -465,7 +487,14 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             w!("Segoe UI"),
         );
         let font_tag = CreateFontW(
-            font_tag_size, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0,
+            font_tag_size,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
             windows::Win32::Graphics::Gdi::FONT_CHARSET(1),
             windows::Win32::Graphics::Gdi::FONT_OUTPUT_PRECISION(0),
             windows::Win32::Graphics::Gdi::FONT_CLIP_PRECISION(0),
@@ -479,7 +508,11 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             0,
             0,
             0,
-            if state.is_producer_hovered { FW_SEMIBOLD.0 as i32 } else { FW_NORMAL.0 as i32 },
+            if state.is_producer_hovered {
+                FW_SEMIBOLD.0 as i32
+            } else {
+                FW_NORMAL.0 as i32
+            },
             0,
             0,
             0,
@@ -501,7 +534,12 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
 
         SelectObject(hdc, HGDIOBJ(font_producer.0 as _));
         let mut measure_r = RECT::default();
-        DrawTextW(hdc, &mut producer_buf, &mut measure_r, DT_CALCRECT | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut producer_buf,
+            &mut measure_r,
+            DT_CALCRECT | DT_SINGLELINE,
+        );
         let prod_w = measure_r.right - measure_r.left;
 
         let prod_right = right_edge;
@@ -529,7 +567,12 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             COLORREF(0x00a49c9c)
         };
         SetTextColor(hdc, prod_color);
-        DrawTextW(hdc, &mut producer_buf, &mut prod_draw_rect, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(
+            hdc,
+            &mut producer_buf,
+            &mut prod_draw_rect,
+            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+        );
 
         // 3.2 绘制左侧主标题与快捷提示（右边界留出安全间距，杜绝重叠）
         let header_left = pad + (6.0 * scale) as i32;
@@ -544,7 +587,12 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
         SetTextColor(hdc, COLORREF(0x00e0e0e0));
         let title_text = I18n::floating_title(&state.language);
         let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
-        DrawTextW(hdc, &mut title_buf, &mut header_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut header_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
 
         // 4. 循环单行排布绘制每个候选项目
         let visible_count = state.candidates.len().min(8);
@@ -590,12 +638,18 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             // 4.1 文件夹名称（左段单行排布）
             let title_left = item_rect.left + (14.0 * scale) as i32;
             let mut item_title_buf: Vec<u16> = item.title.encode_utf16().collect();
-            
+
             // 测算文件夹名实际文字宽度，以便平滑紧接路径
             SelectObject(hdc, HGDIOBJ(font_item_title.0 as _));
             let mut measure_r = RECT::default();
-            DrawTextW(hdc, &mut item_title_buf, &mut measure_r, DT_CALCRECT | DT_SINGLELINE);
-            let title_w = (measure_r.right - measure_r.left).clamp((60.0 * scale) as i32, (220.0 * scale) as i32);
+            DrawTextW(
+                hdc,
+                &mut item_title_buf,
+                &mut measure_r,
+                DT_CALCRECT | DT_SINGLELINE,
+            );
+            let title_w = (measure_r.right - measure_r.left)
+                .clamp((60.0 * scale) as i32, (220.0 * scale) as i32);
 
             let mut title_r = RECT {
                 left: title_left,
@@ -603,8 +657,20 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                 right: title_left + title_w,
                 bottom: item_rect.bottom,
             };
-            SetTextColor(hdc, if is_selected { COLORREF(0x00ffffff) } else { COLORREF(0x00f0f0f0) });
-            DrawTextW(hdc, &mut item_title_buf, &mut title_r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            SetTextColor(
+                hdc,
+                if is_selected {
+                    COLORREF(0x00ffffff)
+                } else {
+                    COLORREF(0x00f0f0f0)
+                },
+            );
+            DrawTextW(
+                hdc,
+                &mut item_title_buf,
+                &mut title_r,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
 
             // 4.2 右侧来源标签徽章（右段单行对齐）
             let tag_w = (110.0 * scale) as i32;
@@ -625,7 +691,12 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
             let localized_source = translate_source(&item.source, &state.language);
             let tag_text = format!("[{}]", localized_source);
             let mut tag_buf: Vec<u16> = tag_text.encode_utf16().collect();
-            DrawTextW(hdc, &mut tag_buf, &mut tag_r, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(
+                hdc,
+                &mut tag_buf,
+                &mut tag_r,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            );
 
             // 4.3 完整路径（中段单行排布，平滑填充在文件夹名与标签之间）
             let path_left = title_left + title_w + (12.0 * scale) as i32;
@@ -638,9 +709,21 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                     bottom: item_rect.bottom,
                 };
                 SelectObject(hdc, HGDIOBJ(font_path.0 as _));
-                SetTextColor(hdc, if is_selected { COLORREF(0x00d0d0d0) } else { COLORREF(0x00888888) });
+                SetTextColor(
+                    hdc,
+                    if is_selected {
+                        COLORREF(0x00d0d0d0)
+                    } else {
+                        COLORREF(0x00888888)
+                    },
+                );
                 let mut path_buf: Vec<u16> = item.path.encode_utf16().collect();
-                DrawTextW(hdc, &mut path_buf, &mut path_r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                DrawTextW(
+                    hdc,
+                    &mut path_buf,
+                    &mut path_r,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                );
             }
 
             curr_y += state.item_height;
@@ -664,7 +747,6 @@ fn translate_source<'a>(source: &str, lang: &'a Language) -> &'a str {
     }
 }
 
-
 fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
     if state_ptr.is_null() {
@@ -681,8 +763,8 @@ fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
     if in_producer != state.is_producer_hovered {
         state.is_producer_hovered = in_producer;
         unsafe {
-            let mut r = state.producer_rect;
-            let _ = InvalidateRect(Some(hwnd), Some(&mut r), false);
+            let r = state.producer_rect;
+            let _ = InvalidateRect(Some(hwnd), Some(&r), false);
         }
     }
 
@@ -706,8 +788,8 @@ fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
     if state.is_producer_hovered {
         state.is_producer_hovered = false;
         unsafe {
-            let mut r = state.producer_rect;
-            let _ = InvalidateRect(Some(hwnd), Some(&mut r), false);
+            let r = state.producer_rect;
+            let _ = InvalidateRect(Some(hwnd), Some(&r), false);
         }
     }
 
@@ -766,24 +848,18 @@ fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
         let idx = (rel_y / state.item_height) as usize;
         let visible_count = state.candidates.len().min(8);
 
-        if idx < visible_count {
-            if let Some(target) = state.candidates.get(idx) {
-                let path = target.path.clone();
-                let dlg_hwnd = state.target_dialog_hwnd;
-                let edit_hwnd = state.target_edit_hwnd;
-                let kind = state.target_dialog_kind;
-                unsafe {
-                    let _ = ShowWindow(state.hwnd, SW_HIDE);
-                    let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
-                }
-                inject_path_to_dialog(
-                    dlg_hwnd,
-                    edit_hwnd,
-                    &path,
-                    kind,
-                    None,
-                );
+        if idx < visible_count
+            && let Some(target) = state.candidates.get(idx)
+        {
+            let path = target.path.clone();
+            let dlg_hwnd = state.target_dialog_hwnd;
+            let edit_hwnd = state.target_edit_hwnd;
+            let kind = state.target_dialog_kind;
+            unsafe {
+                let _ = ShowWindow(state.hwnd, SW_HIDE);
+                let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
             }
+            inject_path_to_dialog(dlg_hwnd, edit_hwnd, &path, kind, None);
         }
     }
 }

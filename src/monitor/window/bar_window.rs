@@ -5,35 +5,32 @@ use crate::monitor::window::render::{calculate_layout, render_bar_window};
 use crate::monitor::window::tooltip::MonitorTooltip;
 use crate::rules::{I18n, Language, MonitorConfig, MonitorPosition};
 use arc_swap::ArcSwap;
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
-use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{
-    HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
-};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::GetMonitorInfoW;
-use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TRACKMOUSEEVENT, TME_HOVER, TME_LEAVE,
+    TME_HOVER, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    FindWindowExW, FindWindowW, GetCursorPos, GetForegroundWindow, GetWindowRect,
-    KillTimer, LoadCursorW, PostMessageW, RegisterClassW, RegisterWindowMessageW,
-    SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    TrackPopupMenu, CS_DBLCLKS, HWND_TOPMOST, IDC_ARROW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
-    TPM_BOTTOMALIGN, TPM_TOPALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP, WM_EXITMENULOOP,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER,
+    AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DestroyWindow, FindWindowExW, FindWindowW, GetCursorPos, GetForegroundWindow, GetWindowRect,
+    HWND_TOPMOST, IDC_ARROW, KillTimer, LoadCursorW, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    MF_UNCHECKED, PostMessageW, RegisterClassW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos,
+    ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TPM_TOPALIGN, TrackPopupMenu,
+    WM_COMMAND, WM_DESTROY, WM_DPICHANGED, WM_ENTERMENULOOP, WM_EXITMENULOOP, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
+use windows::core::{PCWSTR, w};
 
 const WM_MOUSEHOVER: u32 = 0x02A1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -262,10 +259,11 @@ unsafe extern "system" fn bar_wnd_proc(
                 } else {
                     false
                 };
-                if !in_bar && !in_tooltip {
-                    if let Some(tooltip) = &mut inner.tooltip {
-                        tooltip.hide();
-                    }
+                if !in_bar
+                    && !in_tooltip
+                    && let Some(tooltip) = &mut inner.tooltip
+                {
+                    tooltip.hide();
                 }
             }
             LRESULT(0)
@@ -310,10 +308,20 @@ unsafe extern "system" fn bar_wnd_proc(
             // 弹出 Fluent Tooltip 硬件详情看板
             let snap = inner.snapshot_handle.load();
             let dpi = GetDpiForWindow(hwnd);
-            let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
+            let scale = if dpi == 0 {
+                1.0
+            } else {
+                (dpi as f32 / 96.0).max(1.0)
+            };
 
             if let Some(tooltip) = &mut inner.tooltip {
-                tooltip.show(inner.last_rect, &snap, &inner.language, scale, inner.is_dark_theme);
+                tooltip.show(
+                    inner.last_rect,
+                    &snap,
+                    &inner.language,
+                    scale,
+                    inner.is_dark_theme,
+                );
             }
             LRESULT(0)
         }
@@ -346,7 +354,7 @@ unsafe extern "system" fn bar_wnd_proc(
             LRESULT(0)
         }
         WM_COMMAND => {
-            let cmd = (wparam.0 & 0xFFFF) as usize;
+            let cmd = wparam.0 & 0xFFFF;
             handle_context_command(inner, cmd);
             LRESULT(0)
         }
@@ -392,44 +400,113 @@ unsafe fn show_monitor_context_menu(inner: &mut BarWindowInner) {
     let str_exit = to_utf16(&bundle.monitor.menu_exit);
 
     // 1. 打开设置
-    let _ = AppendMenuW(hmenu, MF_STRING, IDM_MONITOR_OPEN_SETTINGS, PCWSTR(str_settings.as_ptr()));
+    let _ = AppendMenuW(
+        hmenu,
+        MF_STRING,
+        IDM_MONITOR_OPEN_SETTINGS,
+        PCWSTR(str_settings.as_ptr()),
+    );
     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
 
     // 2. 指标子菜单
-    if let Ok(hsub) = CreatePopupMenu() {
-        if !hsub.0.is_null() {
-            let flag = |checked: bool| if checked { MF_CHECKED } else { MF_UNCHECKED };
+    if let Ok(hsub) = CreatePopupMenu()
+        && !hsub.0.is_null()
+    {
+        let flag = |checked: bool| if checked { MF_CHECKED } else { MF_UNCHECKED };
 
-            let _ = AppendMenuW(hsub, MF_STRING | flag(inner.config.show_network), IDM_TOGGLE_NET, PCWSTR(str_net.as_ptr()));
-            let _ = AppendMenuW(hsub, MF_STRING | flag(inner.config.show_cpu), IDM_TOGGLE_CPU, PCWSTR(str_cpu.as_ptr()));
-            let _ = AppendMenuW(hsub, MF_STRING | flag(inner.config.show_memory), IDM_TOGGLE_MEM, PCWSTR(str_mem.as_ptr()));
-            let _ = AppendMenuW(hsub, MF_STRING | flag(inner.config.show_gpu), IDM_TOGGLE_GPU, PCWSTR(str_gpu.as_ptr()));
-            let _ = AppendMenuW(hsub, MF_STRING | flag(inner.config.show_disk), IDM_TOGGLE_DISK, PCWSTR(str_disk.as_ptr()));
+        let _ = AppendMenuW(
+            hsub,
+            MF_STRING | flag(inner.config.show_network),
+            IDM_TOGGLE_NET,
+            PCWSTR(str_net.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hsub,
+            MF_STRING | flag(inner.config.show_cpu),
+            IDM_TOGGLE_CPU,
+            PCWSTR(str_cpu.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hsub,
+            MF_STRING | flag(inner.config.show_memory),
+            IDM_TOGGLE_MEM,
+            PCWSTR(str_mem.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hsub,
+            MF_STRING | flag(inner.config.show_gpu),
+            IDM_TOGGLE_GPU,
+            PCWSTR(str_gpu.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hsub,
+            MF_STRING | flag(inner.config.show_disk),
+            IDM_TOGGLE_DISK,
+            PCWSTR(str_disk.as_ptr()),
+        );
 
-            let _ = AppendMenuW(hmenu, MF_POPUP, hsub.0 as usize, PCWSTR(str_metrics.as_ptr()));
-        }
+        let _ = AppendMenuW(
+            hmenu,
+            MF_POPUP,
+            hsub.0 as usize,
+            PCWSTR(str_metrics.as_ptr()),
+        );
     }
 
     // 3. 停靠位置子菜单（防遮挡）
-    if let Ok(hpos) = CreatePopupMenu() {
-        if !hpos.0.is_null() {
-            let is_tray = inner.config.position == MonitorPosition::TrayLeft;
-            let is_taskbar = inner.config.position == MonitorPosition::TaskbarLeft;
-            let flag = |checked: bool| if checked { MF_CHECKED } else { MF_UNCHECKED };
+    if let Ok(hpos) = CreatePopupMenu()
+        && !hpos.0.is_null()
+    {
+        let is_tray = inner.config.position == MonitorPosition::TrayLeft;
+        let is_taskbar = inner.config.position == MonitorPosition::TaskbarLeft;
+        let flag = |checked: bool| if checked { MF_CHECKED } else { MF_UNCHECKED };
 
-            let _ = AppendMenuW(hpos, MF_STRING | flag(is_tray), IDM_POS_TRAY_LEFT, PCWSTR(str_pos_tray.as_ptr()));
-            let _ = AppendMenuW(hpos, MF_STRING | flag(is_taskbar), IDM_POS_TASKBAR_LEFT, PCWSTR(str_pos_taskbar.as_ptr()));
+        let _ = AppendMenuW(
+            hpos,
+            MF_STRING | flag(is_tray),
+            IDM_POS_TRAY_LEFT,
+            PCWSTR(str_pos_tray.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            hpos,
+            MF_STRING | flag(is_taskbar),
+            IDM_POS_TASKBAR_LEFT,
+            PCWSTR(str_pos_taskbar.as_ptr()),
+        );
 
-            let _ = AppendMenuW(hmenu, MF_POPUP, hpos.0 as usize, PCWSTR(str_pos.as_ptr()));
-        }
+        let _ = AppendMenuW(hmenu, MF_POPUP, hpos.0 as usize, PCWSTR(str_pos.as_ptr()));
     }
 
-    let flag_bg = if inner.config.show_graph_bg { MF_CHECKED } else { MF_UNCHECKED };
-    let _ = AppendMenuW(hmenu, MF_STRING | flag_bg, IDM_TOGGLE_GRAPH_BG, PCWSTR(str_graph_bg.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_STRING, IDM_REFRESH_ADAPTERS, PCWSTR(str_refresh.as_ptr()));
+    let flag_bg = if inner.config.show_graph_bg {
+        MF_CHECKED
+    } else {
+        MF_UNCHECKED
+    };
+    let _ = AppendMenuW(
+        hmenu,
+        MF_STRING | flag_bg,
+        IDM_TOGGLE_GRAPH_BG,
+        PCWSTR(str_graph_bg.as_ptr()),
+    );
+    let _ = AppendMenuW(
+        hmenu,
+        MF_STRING,
+        IDM_REFRESH_ADAPTERS,
+        PCWSTR(str_refresh.as_ptr()),
+    );
     let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(hmenu, MF_STRING, IDM_HIDE_MONITOR, PCWSTR(str_hide.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_STRING, IDM_MONITOR_EXIT, PCWSTR(str_exit.as_ptr()));
+    let _ = AppendMenuW(
+        hmenu,
+        MF_STRING,
+        IDM_HIDE_MONITOR,
+        PCWSTR(str_hide.as_ptr()),
+    );
+    let _ = AppendMenuW(
+        hmenu,
+        MF_STRING,
+        IDM_MONITOR_EXIT,
+        PCWSTR(str_exit.as_ptr()),
+    );
 
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
@@ -563,7 +640,11 @@ unsafe fn update_position_and_render(hwnd: HWND) {
     let inner = &mut *ptr;
 
     let dpi = GetDpiForWindow(hwnd);
-    let scale = if dpi == 0 { 1.0 } else { (dpi as f32 / 96.0).max(1.0) };
+    let scale = if dpi == 0 {
+        1.0
+    } else {
+        (dpi as f32 / 96.0).max(1.0)
+    };
     let layout = calculate_layout(&inner.config, scale);
 
     if layout.total_width <= 0 {
@@ -581,7 +662,8 @@ unsafe fn update_position_and_render(hwnd: HWND) {
     let _ = GetWindowRect(tray_wnd, &mut tray_rect);
 
     // 托盘通知区域 TrayNotifyWnd
-    let notify_wnd = FindWindowExW(Some(tray_wnd), None, w!("TrayNotifyWnd"), None).unwrap_or_default();
+    let notify_wnd =
+        FindWindowExW(Some(tray_wnd), None, w!("TrayNotifyWnd"), None).unwrap_or_default();
     let mut notify_rect = RECT::default();
     if !notify_wnd.0.is_null() {
         let _ = GetWindowRect(notify_wnd, &mut notify_rect);

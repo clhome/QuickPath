@@ -6,8 +6,8 @@ use std::time::Duration;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowThreadProcessId, IsChild, IsWindow, PostMessageW, SendMessageTimeoutW,
-    SMTO_ABORTIFHUNG, SMTO_BLOCK, WM_COMMAND, WM_GETTEXT, WM_SETTEXT,
+    GetWindowThreadProcessId, IsChild, IsWindow, PostMessageW, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+    SendMessageTimeoutW, WM_COMMAND, WM_GETTEXT, WM_SETTEXT,
 };
 
 const EM_SETSEL: u32 = 0x00B1;
@@ -89,7 +89,8 @@ fn inject_path_to_standard_dialog(dialog_hwnd: HWND, edit_hwnd: HWND, clean_path
                 WM_SETTEXT,
                 WPARAM(0),
                 LPARAM(wide_folder.as_ptr() as isize),
-            ).is_none_or(|result| result == 0)
+            )
+            .is_none_or(|result| result == 0)
         {
             return false;
         }
@@ -128,13 +129,16 @@ fn inject_path_to_standard_dialog(dialog_hwnd: HWND, edit_hwnd: HWND, clean_path
                     && window_identity(h_edit) == edit_identity
                     && get_edit_text(h_edit).as_deref() == Some(current.as_str())
                 {
-                    let wide_name: Vec<u16> = name_to_restore.encode_utf16().chain(Some(0)).collect();
+                    let wide_name: Vec<u16> =
+                        name_to_restore.encode_utf16().chain(Some(0)).collect();
                     if send_edit_message(
                         h_edit,
                         WM_SETTEXT,
                         WPARAM(0),
                         LPARAM(wide_name.as_ptr() as isize),
-                    ).is_none_or(|result| result == 0) {
+                    )
+                    .is_none_or(|result| result == 0)
+                    {
                         return;
                     }
                     // 只有原关系和恢复文本仍未改变，才全选；后台线程不抢焦点。
@@ -157,8 +161,10 @@ fn clean_directory_path(target_path: &str) -> &str {
     let bytes = trimmed.as_bytes();
     let drive_prefix = bytes.len() == 2
         || (bytes.len() == 6 && (trimmed.starts_with("\\\\?\\") || trimmed.starts_with("\\\\.\\")));
-    if drive_prefix && bytes[bytes.len() - 2].is_ascii_alphabetic()
-        && bytes[bytes.len() - 1] == b':' && path.len() > trimmed.len()
+    if drive_prefix
+        && bytes[bytes.len() - 2].is_ascii_alphabetic()
+        && bytes[bytes.len() - 1] == b':'
+        && path.len() > trimmed.len()
     {
         &path[..trimmed.len() + 1]
     } else {
@@ -244,8 +250,14 @@ mod tests {
         assert!(!Path::new(clean_directory_path("C:")).is_absolute());
         assert_eq!(clean_directory_path(" C:\\Users\\ "), "C:\\Users");
         assert_eq!(directory_navigation_text("C:\\Users"), "C:\\Users\\");
-        assert_eq!(directory_navigation_text(clean_directory_path("\\\\server\\share\\")), "\\\\server\\share\\");
-        assert_eq!(directory_navigation_text(clean_directory_path("\\\\?\\C:\\")), "\\\\?\\C:\\");
+        assert_eq!(
+            directory_navigation_text(clean_directory_path("\\\\server\\share\\")),
+            "\\\\server\\share\\"
+        );
+        assert_eq!(
+            directory_navigation_text(clean_directory_path("\\\\?\\C:\\")),
+            "\\\\?\\C:\\"
+        );
     }
 
     #[test]
@@ -253,7 +265,13 @@ mod tests {
         let folder = "C:\\target\\";
         assert!(should_restore_file_name("", folder));
         assert!(should_restore_file_name(folder, folder));
-        for current in ["D:\\other\\", "C:\\target\\new\\", "new.txt", " ", "C:\\target"] {
+        for current in [
+            "D:\\other\\",
+            "C:\\target\\new\\",
+            "new.txt",
+            " ",
+            "C:\\target",
+        ] {
             assert!(!should_restore_file_name(current, folder));
         }
     }
@@ -268,29 +286,65 @@ mod tests {
 
     #[test]
     fn test_hidden_edit_relationship_and_bounded_messages() {
-        use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_CHILD, WS_POPUP,
         };
+        use windows::core::w;
         unsafe {
             let dialog = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("#32770"), w!(""), WS_POPUP,
-                0, 0, 100, 100, None, None, None, None,
-            ).unwrap();
+                WINDOW_EX_STYLE(0),
+                w!("#32770"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let other = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("#32770"), w!(""), WS_POPUP,
-                0, 0, 100, 100, None, None, None, None,
-            ).unwrap();
+                WINDOW_EX_STYLE(0),
+                w!("#32770"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let edit = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("Edit"), w!("原文件.txt"), WS_CHILD,
-                0, 0, 100, 20, Some(dialog), None, None, None,
-            ).unwrap();
+                WINDOW_EX_STYLE(0),
+                w!("Edit"),
+                w!("原文件.txt"),
+                WS_CHILD,
+                0,
+                0,
+                100,
+                20,
+                Some(dialog),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             assert!(is_dialog_edit(dialog, edit));
             assert!(!is_dialog_edit(dialog, dialog));
             assert!(!is_dialog_edit(other, edit));
             assert_eq!(get_edit_text(edit).as_deref(), Some("原文件.txt"));
             let text: Vec<u16> = "C:\\".encode_utf16().chain(Some(0)).collect();
-            assert_eq!(send_edit_message(edit, WM_SETTEXT, WPARAM(0), LPARAM(text.as_ptr() as isize)), Some(1));
+            assert_eq!(
+                send_edit_message(edit, WM_SETTEXT, WPARAM(0), LPARAM(text.as_ptr() as isize)),
+                Some(1)
+            );
             assert_eq!(get_edit_text(edit).as_deref(), Some("C:\\"));
             assert!(send_edit_message(edit, EM_SETSEL, WPARAM(0), LPARAM(-1)).is_some());
             let _ = DestroyWindow(dialog);
@@ -301,17 +355,28 @@ mod tests {
 
     #[test]
     fn test_unresponsive_test_window_times_out() {
-        use windows::core::w;
         use windows::Win32::UI::WindowsAndMessaging::{
             CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_POPUP,
         };
+        use windows::core::w;
         let (created_tx, created_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let owner = thread::spawn(move || unsafe {
             let window = CreateWindowExW(
-                WINDOW_EX_STYLE(0), w!("Edit"), w!(""), WS_POPUP,
-                0, 0, 100, 20, None, None, None, None,
-            ).unwrap();
+                WINDOW_EX_STYLE(0),
+                w!("Edit"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                20,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             created_tx.send(window.0 as usize).unwrap();
             // 自建窗口线程故意不处理消息，模拟无响应目标，不操作真实进程。
             let _ = release_rx.recv();

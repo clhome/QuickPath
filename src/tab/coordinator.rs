@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-    PostMessageW, SetForegroundWindow, SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, WM_CLOSE,
+    PostMessageW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
+    SetWindowPos, WM_CLOSE,
 };
 
-use super::com::{is_physical_dir_path, ShellComManager};
+use super::com::{ShellComManager, is_physical_dir_path};
 use super::select::{async_select_file_item, try_select_tab_item};
 use super::uia::{trigger_new_tab, trigger_new_tab_safe};
 use windows::core::BOOL;
@@ -57,7 +57,9 @@ impl TabCoordinator {
             com_manager,
             pending_inherit_path: Arc::new(parking_lot_or_std::Mutex::new(None)),
             bypass_deduplication: Arc::new(AtomicBool::new(false)),
-            processing_new_windows: Arc::new(parking_lot_or_std::Mutex::new(std::collections::HashSet::new())),
+            processing_new_windows: Arc::new(parking_lot_or_std::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
         }
     }
 
@@ -87,19 +89,27 @@ impl TabCoordinator {
     }
 
     /// 预存当前活动目录（功能已废止，保留空实现兼容）
-    pub fn prepare_new_tab_inheritance(&self, _explorer_hwnd: HWND) {
-    }
+    pub fn prepare_new_tab_inheritance(&self, _explorer_hwnd: HWND) {}
 
     /// 用户双击标签页克隆特定标签页到右侧 (Duplicate Tab)
     /// 独立旁路去重，绝对不会被智能去重机制消除
-    pub fn duplicate_tab(&self, explorer_hwnd: HWND, target_title: Option<&str>, target_index: Option<usize>) {
+    pub fn duplicate_tab(
+        &self,
+        explorer_hwnd: HWND,
+        target_title: Option<&str>,
+        target_index: Option<usize>,
+    ) {
         let cfg = self.get_config();
         if !cfg.enabled || !cfg.double_click_to_duplicate {
             return;
         }
 
         // 1. 精准解析被点击 Tab 对应的物理路径
-        let curr_path = match self.com_manager.resolve_tab_path_by_target(explorer_hwnd, target_title, target_index) {
+        let curr_path = match self.com_manager.resolve_tab_path_by_target(
+            explorer_hwnd,
+            target_title,
+            target_index,
+        ) {
             Some(p) => p,
             None => {
                 // 回退到当前活动路径
@@ -241,7 +251,11 @@ impl TabCoordinator {
 
         // 优先检查当前前台聚焦窗口是否为合法的宿主窗口
         let fg = unsafe { GetForegroundWindow() };
-        if !fg.0.is_null() && fg != exclude_hwnd && Self::is_explorer_window(fg) && unsafe { IsWindowVisible(fg).as_bool() } {
+        if !fg.0.is_null()
+            && fg != exclude_hwnd
+            && Self::is_explorer_window(fg)
+            && unsafe { IsWindowVisible(fg).as_bool() }
+        {
             return Some(fg);
         }
 
@@ -298,10 +312,10 @@ impl TabCoordinator {
         let raw_new = new_hwnd.0 as usize;
         // 防重检查：如果该窗口已经在异步合并处理中，直接跳过
         {
-            if let Ok(mut set) = self.processing_new_windows.lock() {
-                if !set.insert(raw_new) {
-                    return;
-                }
+            if let Ok(mut set) = self.processing_new_windows.lock()
+                && !set.insert(raw_new)
+            {
+                return;
             }
         }
 
@@ -310,7 +324,10 @@ impl TabCoordinator {
             Some(h) => h,
             None => {
                 // 关键原则：若当前系统没有其它存活且可见的宿主窗口，坚决不隐藏、不干涉，完全原生放行
-                let _ = self.processing_new_windows.lock().map(|mut set| set.remove(&raw_new));
+                let _ = self
+                    .processing_new_windows
+                    .lock()
+                    .map(|mut set| set.remove(&raw_new));
                 return;
             }
         };
@@ -323,8 +340,8 @@ impl TabCoordinator {
         // 2. 确认存在真实有效宿主，采用分层窗口 Alpha=0 透明度 + 离屏移位，杜绝弹窗闪烁同时保持 COM 活跃
         unsafe {
             use windows::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongW, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE,
-                LWA_ALPHA, WS_EX_LAYERED,
+                GWL_EXSTYLE, GetWindowLongW, LWA_ALPHA, SetLayeredWindowAttributes, SetWindowLongW,
+                WS_EX_LAYERED,
             };
             let ex_style = GetWindowLongW(new_hwnd, GWL_EXSTYLE);
             let _ = SetWindowLongW(new_hwnd, GWL_EXSTYLE, ex_style | WS_EX_LAYERED.0 as i32);
@@ -364,12 +381,11 @@ impl TabCoordinator {
             unsafe {
                 let _ = GetWindowThreadProcessId(new_h, Some(&mut pid));
             }
-            if pid > 0 {
-                if let Some(cmd) = unsafe { query_process_cmdline(pid) } {
-                    if let Some(info) = parse_select_target_from_cmdline(&cmd) {
-                        target_info = Some(info);
-                    }
-                }
+            if pid > 0
+                && let Some(cmd) = unsafe { query_process_cmdline(pid) }
+                && let Some(info) = parse_select_target_from_cmdline(&cmd)
+            {
+                target_info = Some(info);
             }
 
             // 2. COM 穿透定向探测：有界等待预算 800ms，识别到有效物理路径立即短路跳出
@@ -413,7 +429,8 @@ impl TabCoordinator {
 
             if let Some((ref folder_path, _)) = target_info {
                 // 校验宿主窗口依然存活
-                if unsafe { IsWindow(Some(host_h)).as_bool() && IsWindowVisible(host_h).as_bool() } {
+                if unsafe { IsWindow(Some(host_h)).as_bool() && IsWindowVisible(host_h).as_bool() }
+                {
                     // 工作线程的 SetForegroundWindow 会被前台锁静默拒绝（后台进程无前台权限），
                     // 必须用输入桥接，否则合并成功了用户也看不见宿主窗口
                     unsafe {
@@ -450,7 +467,8 @@ impl TabCoordinator {
                             .get_tabs_count_for_hwnd_checked(host_h)
                             .unwrap_or(usize::MAX);
                         if trigger_new_tab(host_h) {
-                            merged_success = com.wait_and_navigate_new_tab(host_h, count_before, folder_path);
+                            merged_success =
+                                com.wait_and_navigate_new_tab(host_h, count_before, folder_path);
                         }
                     } else {
                         // 非物理路径（shell: 等）无法在标签页中重建：不创建空标签、不关闭源窗口，
@@ -467,10 +485,8 @@ impl TabCoordinator {
             // 外部 /select 携带文件名：文件夹落地已由 wait_and_navigate 确认，
             // 文件高亮改为后台异步重试——视图加载需要时间，同步等待是合并链路里最贵的一段
             // （实测可达数百毫秒），而高亮失败只是少一个选中态，不影响"窗口弹出来了"这个核心诉求
-            if merged_success {
-                if let Some((_, Some(ref file_name))) = target_info {
-                    async_select_file_item(host_h, file_name.clone());
-                }
+            if merged_success && let Some((_, Some(ref file_name))) = target_info {
+                async_select_file_item(host_h, file_name.clone());
             }
 
             if merged_success {
@@ -507,18 +523,11 @@ impl TabCoordinator {
                     unsafe {
                         use windows::Win32::Foundation::COLORREF;
                         use windows::Win32::UI::WindowsAndMessaging::{
-                            SetLayeredWindowAttributes, LWA_ALPHA,
+                            LWA_ALPHA, SetLayeredWindowAttributes,
                         };
                         let _ = SetLayeredWindowAttributes(new_h, COLORREF(0), 255, LWA_ALPHA);
-                        let _ = SetWindowPos(
-                            new_h,
-                            None,
-                            100,
-                            100,
-                            0,
-                            0,
-                            SWP_NOSIZE | SWP_SHOWWINDOW,
-                        );
+                        let _ =
+                            SetWindowPos(new_h, None, 100, 100, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
                         bring_window_to_front(new_h);
                     }
                 }
@@ -526,7 +535,7 @@ impl TabCoordinator {
                 // 【核心 Fail-Safe 兜底】：未能成功合并或超时未就绪，绝对不关窗，立即恢复显示源窗口并恢复不透明度！
                 unsafe {
                     use windows::Win32::UI::WindowsAndMessaging::{
-                        SetLayeredWindowAttributes, LWA_ALPHA,
+                        LWA_ALPHA, SetLayeredWindowAttributes,
                     };
                     let _ = SetLayeredWindowAttributes(
                         new_h,
@@ -534,15 +543,7 @@ impl TabCoordinator {
                         255,
                         LWA_ALPHA,
                     );
-                    let _ = SetWindowPos(
-                        new_h,
-                        None,
-                        100,
-                        100,
-                        0,
-                        0,
-                        SWP_NOSIZE | SWP_SHOWWINDOW,
-                    );
+                    let _ = SetWindowPos(new_h, None, 100, 100, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
                     // 同样走输入桥接：fail-safe 恢复的窗口是用户当前最期望看到的，必须尽力前台化
                     bring_window_to_front(new_h);
                 }
@@ -622,10 +623,10 @@ impl TabCoordinator {
         let expected = normalize_path(expected_path);
         for _ in 0..2 {
             std::thread::sleep(Duration::from_millis(150));
-            if let Some(active) = com.get_active_tab_path(Some(host_h)) {
-                if normalize_path(&active) == expected {
-                    return true;
-                }
+            if let Some(active) = com.get_active_tab_path(Some(host_h))
+                && normalize_path(&active) == expected
+            {
+                return true;
             }
         }
         false
@@ -651,9 +652,9 @@ impl TabCoordinator {
 unsafe fn bring_window_to_front(hwnd: HWND) -> bool {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, FlashWindowEx, GetForegroundWindow, GetWindowThreadProcessId,
-        IsWindow, SetForegroundWindow, SetWindowPos, FLASHWINFO, FLASHW_ALL,
-        FLASHW_TIMERNOFG, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        BringWindowToTop, FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx,
+        GetForegroundWindow, GetWindowThreadProcessId, HWND_TOP, IsWindow, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
     };
 
     // 仓库风格：unsafe fn 内部再包一层 unsafe 块，避免 unsafe_op_in_unsafe_fn lint
@@ -673,7 +674,8 @@ unsafe fn bring_window_to_front(hwnd: HWND) -> bool {
             let mut _pid = 0u32;
             let fg_tid = GetWindowThreadProcessId(fg, Some(&mut _pid));
             let cur_tid = GetCurrentThreadId();
-            if fg_tid != 0 && fg_tid != cur_tid
+            if fg_tid != 0
+                && fg_tid != cur_tid
                 && AttachThreadInput(cur_tid, fg_tid, true).as_bool()
             {
                 let ok = SetForegroundWindow(hwnd).as_bool();
@@ -740,8 +742,13 @@ unsafe fn query_process_cmdline(pid: u32) -> Option<String> {
 
     unsafe {
         let h_process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let ntdll = windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!("ntdll.dll")).ok()?;
-        let proc_addr = windows::Win32::System::LibraryLoader::GetProcAddress(ntdll, windows::core::s!("NtQueryInformationProcess"))?;
+        let ntdll =
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(windows::core::w!("ntdll.dll"))
+                .ok()?;
+        let proc_addr = windows::Win32::System::LibraryLoader::GetProcAddress(
+            ntdll,
+            windows::core::s!("NtQueryInformationProcess"),
+        )?;
         let nt_query: NtQueryInformationProcessFn = core::mem::transmute(proc_addr);
 
         let mut buf = vec![0u8; 2048];
@@ -780,11 +787,13 @@ unsafe fn query_process_cmdline(pid: u32) -> Option<String> {
                 let str_start = us.buffer as usize;
                 let str_bytes = us.length as usize;
 
-                if let Some(str_end) = str_start.checked_add(str_bytes) {
-                    if str_start >= buf_start && str_end <= buf_end && str_bytes % 2 == 0 {
-                        let slice = core::slice::from_raw_parts(us.buffer, str_bytes / 2);
-                        return Some(String::from_utf16_lossy(slice));
-                    }
+                if let Some(str_end) = str_start.checked_add(str_bytes)
+                    && str_start >= buf_start
+                    && str_end <= buf_end
+                    && str_bytes.is_multiple_of(2)
+                {
+                    let slice = core::slice::from_raw_parts(us.buffer, str_bytes / 2);
+                    return Some(String::from_utf16_lossy(slice));
                 }
             }
         }
@@ -805,9 +814,9 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
     // 2. 优先处理显式的 /select,"<path>" 模式
     if let Some(pos) = lower.find("/select,") {
         let remainder = cmd[pos + 8..].trim();
-        let target_str = if remainder.starts_with('"') {
-            if let Some(end) = remainder[1..].find('"') {
-                &remainder[1..1 + end]
+        let target_str = if let Some(quoted) = remainder.strip_prefix('"') {
+            if let Some(end) = quoted.find('"') {
+                &quoted[..end]
             } else {
                 remainder.trim_matches('"')
             }
@@ -819,7 +828,10 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
         if is_valid_select_path(target_str) {
             let p = std::path::Path::new(target_str);
             if p.is_file() {
-                let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| target_str.to_string());
+                let folder = p
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_else(|| target_str.to_string());
                 let file = p.file_name().map(|f| f.to_string_lossy().to_string());
                 return Some((folder, file));
             } else if p.is_dir() {
@@ -839,16 +851,19 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
     // 首先尝试在引号部分提取候选路径
     for part in args_str.split('"') {
         let mut candidate = part.trim();
-        if let Some(comma_pos) = candidate.find(',') {
-            if candidate.starts_with('/') || candidate.starts_with('-') {
-                candidate = candidate[comma_pos + 1..].trim();
-            }
+        if let Some(comma_pos) = candidate.find(',')
+            && (candidate.starts_with('/') || candidate.starts_with('-'))
+        {
+            candidate = candidate[comma_pos + 1..].trim();
         }
         let candidate = candidate.trim_matches('"').trim();
         if is_valid_target_dir_path(candidate) {
             let p = std::path::Path::new(candidate);
             if p.is_file() {
-                let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| candidate.to_string());
+                let folder = p
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_else(|| candidate.to_string());
                 let file = p.file_name().map(|f| f.to_string_lossy().to_string());
                 return Some((folder, file));
             }
@@ -859,16 +874,19 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
     // 若未被双引号包裹，按空白切分参数逐项检查
     for token in args_str.split_whitespace() {
         let mut candidate = token.trim();
-        if let Some(comma_pos) = candidate.find(',') {
-            if candidate.starts_with('/') || candidate.starts_with('-') {
-                candidate = candidate[comma_pos + 1..].trim();
-            }
+        if let Some(comma_pos) = candidate.find(',')
+            && (candidate.starts_with('/') || candidate.starts_with('-'))
+        {
+            candidate = candidate[comma_pos + 1..].trim();
         }
         let candidate = candidate.trim_matches('"').trim();
         if is_valid_target_dir_path(candidate) {
             let p = std::path::Path::new(candidate);
             if p.is_file() {
-                let folder = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_else(|| candidate.to_string());
+                let folder = p
+                    .parent()
+                    .map(|d| d.to_string_lossy().to_string())
+                    .unwrap_or_else(|| candidate.to_string());
                 let file = p.file_name().map(|f| f.to_string_lossy().to_string());
                 return Some((folder, file));
             }
@@ -882,15 +900,17 @@ pub fn parse_select_target_from_cmdline(cmd: &str) -> Option<(String, Option<Str
 /// 剥离命令行开头的可执行文件部分
 fn strip_exe_prefix(cmd: &str) -> &str {
     let trimmed = cmd.trim();
-    if trimmed.starts_with('"') {
-        if let Some(end_quote) = trimmed[1..].find('"') {
-            return trimmed[1 + end_quote + 1..].trim();
-        }
+    if trimmed.starts_with('"')
+        && let Some(end_quote) = trimmed[1..].find('"')
+    {
+        return trimmed[1 + end_quote + 1..].trim();
     }
 
     if let Some(space_pos) = trimmed.find(char::is_whitespace) {
         let first_token = &trimmed[..space_pos];
-        if first_token.to_lowercase().ends_with(".exe") || first_token.eq_ignore_ascii_case("explorer") {
+        if first_token.to_lowercase().ends_with(".exe")
+            || first_token.eq_ignore_ascii_case("explorer")
+        {
             return trimmed[space_pos..].trim();
         }
     }
@@ -929,7 +949,10 @@ mod tests {
         let res1 = parse_select_target_from_cmdline(cmd1);
         assert_eq!(
             res1,
-            Some(("C:\\Windows\\System32".to_string(), Some("notepad.exe".to_string())))
+            Some((
+                "C:\\Windows\\System32".to_string(),
+                Some("notepad.exe".to_string())
+            ))
         );
 
         let cmd2 = r#"C:\WINDOWS\explorer.exe /select, "D:\My Project\Cargo.toml""#;
@@ -948,7 +971,8 @@ mod tests {
         assert_eq!(res4, None);
 
         // 测试 COM 宿主模式启动命令过滤（核心防御）
-        let cmd_factory1 = r#"C:\WINDOWS\explorer.exe /factory,{ceff45ee-c862-41de-aee2-a022c81eda92} -Embedding"#;
+        let cmd_factory1 =
+            r#"C:\WINDOWS\explorer.exe /factory,{ceff45ee-c862-41de-aee2-a022c81eda92} -Embedding"#;
         assert_eq!(parse_select_target_from_cmdline(cmd_factory1), None);
 
         let cmd_factory2 = r#""C:\WINDOWS\explorer.exe" /factory,{75dff2b7-6936-4c06-a8bb-676a7b00b24b} -Embedding"#;
@@ -963,10 +987,15 @@ mod tests {
 
         // 测试直接带路径唤起
         let cmd_direct1 = r#"C:\WINDOWS\explorer.exe "D:\My Project""#;
-        assert_eq!(parse_select_target_from_cmdline(cmd_direct1), Some(("D:\\My Project".to_string(), None)));
+        assert_eq!(
+            parse_select_target_from_cmdline(cmd_direct1),
+            Some(("D:\\My Project".to_string(), None))
+        );
 
         let cmd_direct2 = r#"explorer.exe D:\WorkSpace"#;
-        assert_eq!(parse_select_target_from_cmdline(cmd_direct2), Some(("D:\\WorkSpace".to_string(), None)));
+        assert_eq!(
+            parse_select_target_from_cmdline(cmd_direct2),
+            Some(("D:\\WorkSpace".to_string(), None))
+        );
     }
 }
-

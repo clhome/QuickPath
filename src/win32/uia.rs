@@ -3,10 +3,10 @@
 use crate::dialog::detector::log_debug;
 use std::thread;
 use std::time::Duration;
-use windows::core::{Interface, BSTR};
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, POINT, RECT};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoUninitialize,
 };
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -16,13 +16,14 @@ use windows::Win32::UI::Accessibility::{
     TreeScope_Descendants, UIA_ValuePatternId,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, mouse_event, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    VK_CONTROL, VK_RETURN,
+    KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, VK_CONTROL, VK_RETURN, keybd_event,
+    mouse_event,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId,
     IsWindow, SetCursorPos, SetForegroundWindow,
 };
+use windows::core::{BSTR, Interface};
 
 /// 目标窗口身份指纹：句柄 + 进程 ID + 进程创建时间 + 窗口类名。
 ///
@@ -308,10 +309,22 @@ fn find_wps_edit_element(
                     Err(_) => continue,
                 };
 
-                let name = elem.CurrentName().map(|b| b.to_string()).unwrap_or_default();
-                let class_name = elem.CurrentClassName().map(|b| b.to_string()).unwrap_or_default();
-                let auto_id = elem.CurrentAutomationId().map(|b| b.to_string()).unwrap_or_default();
-                let val = val_pattern.CurrentValue().map(|b| b.to_string()).unwrap_or_default();
+                let name = elem
+                    .CurrentName()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default();
+                let class_name = elem
+                    .CurrentClassName()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default();
+                let auto_id = elem
+                    .CurrentAutomationId()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default();
+                let val = val_pattern
+                    .CurrentValue()
+                    .map(|b| b.to_string())
+                    .unwrap_or_default();
                 let ctrl_type = elem.CurrentControlType().map(|c| c.0).unwrap_or(0);
                 let elem_rect = elem.CurrentBoundingRectangle().unwrap_or_default();
 
@@ -335,14 +348,18 @@ fn find_wps_edit_element(
                 {
                     score -= 800;
                 }
-                if lower_name.contains("搜索") || lower_name.contains("search") || lower_id.contains("search") {
+                if lower_name.contains("搜索")
+                    || lower_name.contains("search")
+                    || lower_id.contains("search")
+                {
                     score -= 800;
                 }
 
                 // 绝对最高优先级：真正的文本编辑控件 QLineEdit
                 if class_name == "QLineEdit" || class_name == "kd::KDTextField" {
                     score += 500;
-                } else if ctrl_type == 50004 { // UIA_EditControlTypeId
+                } else if ctrl_type == 50004 {
+                    // UIA_EditControlTypeId
                     score += 200;
                 }
 
@@ -367,7 +384,11 @@ fn find_wps_edit_element(
                 }
 
                 // 名称语义辅助加分
-                if name.contains("文件名") || name.contains("File name") || auto_id.contains("fileName") || auto_id.contains("FileName") {
+                if name.contains("文件名")
+                    || name.contains("File name")
+                    || auto_id.contains("fileName")
+                    || auto_id.contains("FileName")
+                {
                     score += 100;
                 }
 
@@ -520,9 +541,8 @@ unsafe fn write_path_and_verify(
         // 每次 Ctrl+A / Ctrl+V 之前都重新核验身份、前台与控件焦点；
         // 任一环节不满足即立即中止，绝不把全局按键发给错误窗口。
         let mut sequence_ok = false;
-        let clipboard_result = crate::win32::clipboard::with_temporary_clipboard_text(
-            target,
-            || {
+        let clipboard_result =
+            crate::win32::clipboard::with_temporary_clipboard_text(target, || {
                 if !simulate_ctrl_a_checked(ctx) {
                     return;
                 }
@@ -532,8 +552,7 @@ unsafe fn write_path_and_verify(
                 }
                 thread::sleep(Duration::from_millis(50));
                 sequence_ok = true;
-            },
-        );
+            });
 
         let clipboard_injected = match clipboard_result {
             Ok(()) if sequence_ok => true,
@@ -607,15 +626,17 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
             return false;
         };
 
-        let uia =
-            match CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-            {
-                Ok(uia) => uia,
-                Err(err) => {
-                    log_debug(&format!("UIA_ERR: CoCreateInstance failed: {:?}", err));
-                    return false;
-                }
-            };
+        let uia = match CoCreateInstance::<_, IUIAutomation>(
+            &CUIAutomation,
+            None,
+            CLSCTX_INPROC_SERVER,
+        ) {
+            Ok(uia) => uia,
+            Err(err) => {
+                log_debug(&format!("UIA_ERR: CoCreateInstance failed: {:?}", err));
+                return false;
+            }
+        };
 
         // 1. 前台化并以 GetForegroundWindow 为准核验；失败即零输入放弃
         if !identity.bring_to_front() {
@@ -735,18 +756,19 @@ fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String) {
             elem: &elem,
         };
         let mut sequence_ok = false;
-        let clipboard_ok = crate::win32::clipboard::with_temporary_clipboard_text(&saved_name, || {
-            if !simulate_ctrl_a_checked(&ctx) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(20));
-            if !simulate_ctrl_v_checked(&ctx) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(20));
-            sequence_ok = simulate_ctrl_a_checked(&ctx); // 再次全选原文件名，方便用户直接改名
-        })
-        .is_ok();
+        let clipboard_ok =
+            crate::win32::clipboard::with_temporary_clipboard_text(&saved_name, || {
+                if !simulate_ctrl_a_checked(&ctx) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+                if !simulate_ctrl_v_checked(&ctx) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+                sequence_ok = simulate_ctrl_a_checked(&ctx); // 再次全选原文件名，方便用户直接改名
+            })
+            .is_ok();
         let restored = clipboard_ok && sequence_ok;
 
         log_debug(&format!(

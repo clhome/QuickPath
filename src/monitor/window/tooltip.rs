@@ -1,30 +1,33 @@
 #![allow(unsafe_op_in_unsafe_fn)]
+// 看板绘制与文本测量函数需要同时传入坐标、尺寸、配色与主题；
+// 拆成参数结构体只会把样板搬到调用端而不提升可读性（clippy::too_many_arguments 说明）。
+#![allow(clippy::too_many_arguments)]
 
 use crate::monitor::metrics::MetricsSnapshot;
 use crate::rules::{I18n, Language};
 use std::sync::atomic::{AtomicPtr, Ordering};
-use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{
+    COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC, DeleteObject,
-    DrawTextW, Ellipse, FillRect, GetMonitorInfoW, GetStockObject, LineTo, MonitorFromWindow, MoveToEx,
-    RoundRect, SelectObject, SetBkMode, SetTextColor,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CALCRECT, DT_LEFT, DT_SINGLELINE,
-    DT_VCENTER, FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FW_BOLD,
-    FW_NORMAL, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH, PS_SOLID, TRANSPARENT,
-    BLENDFUNCTION, AC_SRC_ALPHA, AC_SRC_OVER,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateSolidBrush, DIB_RGB_COLORS,
+    DT_CALCRECT, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW, Ellipse,
+    FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, FW_BOLD, FW_NORMAL,
+    FillRect, GetMonitorInfoW, GetStockObject, HDC, HGDIOBJ, LineTo, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromWindow, MoveToEx, NULL_BRUSH, PS_SOLID, RoundRect, SelectObject,
+    SetBkMode, SetTextColor, TRANSPARENT,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TRACKMOUSEEVENT, TME_LEAVE,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect, LoadCursorW,
-    RegisterClassW, SetCursor, SetWindowPos, ShowWindow, UpdateLayeredWindow,
-    HWND_TOPMOST, IDC_ARROW, IDC_HAND, SWP_NOACTIVATE, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    ULW_ALPHA, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowRect, HWND_TOPMOST,
+    IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassW, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SetCursor, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+use windows::core::w;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -85,7 +88,9 @@ impl TooltipData {
             bundle.floating_bar.producer.clone()
         };
 
-        let net_top = if !snapshot.details.top_net_process_display.is_empty() && snapshot.details.top_net_process_display != "--" {
+        let net_top = if !snapshot.details.top_net_process_display.is_empty()
+            && snapshot.details.top_net_process_display != "--"
+        {
             format!(" (Top: {})", snapshot.details.top_net_process_display)
         } else {
             "".to_string()
@@ -97,10 +102,7 @@ impl TooltipData {
         };
         let net_line = format!(
             "{}: ↑ {:.1} Mbps  ↓ {:.1} Mbps{}",
-            net_lbl,
-            snapshot.network.upload_mbps,
-            snapshot.network.download_mbps,
-            net_top
+            net_lbl, snapshot.network.upload_mbps, snapshot.network.download_mbps, net_top
         );
 
         let total_mb = snapshot.network.total_bytes_session as f64 / (1024.0 * 1024.0);
@@ -119,7 +121,9 @@ impl TooltipData {
             adapter_lbl, snapshot.network.adapter_name, session_lbl, total_mb
         );
 
-        let cpu_top = if !snapshot.details.top_process_display.is_empty() && snapshot.details.top_process_display != "--" {
+        let cpu_top = if !snapshot.details.top_process_display.is_empty()
+            && snapshot.details.top_process_display != "--"
+        {
             format!(" (Top: {})", snapshot.details.top_process_display)
         } else {
             "".to_string()
@@ -162,14 +166,24 @@ impl TooltipData {
             &bundle.monitor.tooltip_vram
         };
         let fallback_vram = format!("{}: --", vram_lbl);
-        let gpu_vram = snapshot.details.vram_display.as_deref().unwrap_or(&fallback_vram);
-        let gpu_val = snapshot.gpu.usage_percent.map(|v| format!("{:.0}%", v)).unwrap_or_else(|| "--%".to_string());
+        let gpu_vram = snapshot
+            .details
+            .vram_display
+            .as_deref()
+            .unwrap_or(&fallback_vram);
+        let gpu_val = snapshot
+            .gpu
+            .usage_percent
+            .map(|v| format!("{:.0}%", v))
+            .unwrap_or_else(|| "--%".to_string());
         let gpu_lbl = if bundle.monitor.tooltip_gpu.is_empty() {
             "独 立 显 卡"
         } else {
             &bundle.monitor.tooltip_gpu
         };
-        let gpu_top = if !snapshot.gpu.top_process_display.is_empty() && snapshot.gpu.top_process_display != "--" {
+        let gpu_top = if !snapshot.gpu.top_process_display.is_empty()
+            && snapshot.gpu.top_process_display != "--"
+        {
             format!(" (Top: {})", snapshot.gpu.top_process_display)
         } else {
             "".to_string()
@@ -191,7 +205,9 @@ impl TooltipData {
         } else {
             &bundle.monitor.tooltip_write
         };
-        let disk_top = if !snapshot.details.top_disk_process_display.is_empty() && snapshot.details.top_disk_process_display != "--" {
+        let disk_top = if !snapshot.details.top_disk_process_display.is_empty()
+            && snapshot.details.top_disk_process_display != "--"
+        {
             format!(" (Top: {})", snapshot.details.top_disk_process_display)
         } else {
             "".to_string()
@@ -212,12 +228,27 @@ impl TooltipData {
         let hours = (total_secs / 3600) % 24;
         let minutes = (total_secs / 60) % 60;
 
-        let d_unit = if bundle.monitor.tooltip_days.is_empty() { "天" } else { &bundle.monitor.tooltip_days };
-        let h_unit = if bundle.monitor.tooltip_hours.is_empty() { "小时" } else { &bundle.monitor.tooltip_hours };
-        let m_unit = if bundle.monitor.tooltip_minutes.is_empty() { "分" } else { &bundle.monitor.tooltip_minutes };
+        let d_unit = if bundle.monitor.tooltip_days.is_empty() {
+            "天"
+        } else {
+            &bundle.monitor.tooltip_days
+        };
+        let h_unit = if bundle.monitor.tooltip_hours.is_empty() {
+            "小时"
+        } else {
+            &bundle.monitor.tooltip_hours
+        };
+        let m_unit = if bundle.monitor.tooltip_minutes.is_empty() {
+            "分"
+        } else {
+            &bundle.monitor.tooltip_minutes
+        };
 
         let uptime_val = if days > 0 {
-            format!("{}{} {}{} {}{}", days, d_unit, hours, h_unit, minutes, m_unit)
+            format!(
+                "{}{} {}{} {}{}",
+                days, d_unit, hours, h_unit, minutes, m_unit
+            )
         } else if hours > 0 {
             format!("{}{} {}{}", hours, h_unit, minutes, m_unit)
         } else {
@@ -232,13 +263,34 @@ impl TooltipData {
         let uptime_line = format!("{}: {}", uptime_lbl, uptime_val);
 
         let mut lines = vec![
-            TooltipLine { icon: MetricIconKind::NetworkAdapter, text: adapter_line },
-            TooltipLine { icon: MetricIconKind::NetworkSpeed, text: net_line },
-            TooltipLine { icon: MetricIconKind::Cpu, text: cpu_line },
-            TooltipLine { icon: MetricIconKind::Memory, text: mem_line },
-            TooltipLine { icon: MetricIconKind::Gpu, text: gpu_line },
-            TooltipLine { icon: MetricIconKind::Disk, text: disk_line },
-            TooltipLine { icon: MetricIconKind::Uptime, text: uptime_line },
+            TooltipLine {
+                icon: MetricIconKind::NetworkAdapter,
+                text: adapter_line,
+            },
+            TooltipLine {
+                icon: MetricIconKind::NetworkSpeed,
+                text: net_line,
+            },
+            TooltipLine {
+                icon: MetricIconKind::Cpu,
+                text: cpu_line,
+            },
+            TooltipLine {
+                icon: MetricIconKind::Memory,
+                text: mem_line,
+            },
+            TooltipLine {
+                icon: MetricIconKind::Gpu,
+                text: gpu_line,
+            },
+            TooltipLine {
+                icon: MetricIconKind::Disk,
+                text: disk_line,
+            },
+            TooltipLine {
+                icon: MetricIconKind::Uptime,
+                text: uptime_line,
+            },
         ];
 
         if let Some(percent) = snapshot.details.battery_percent {
@@ -327,7 +379,14 @@ impl MonitorTooltip {
         self.hwnd
     }
 
-    pub fn show(&mut self, bar_rect: RECT, snapshot: &MetricsSnapshot, lang: &Language, scale: f32, is_dark: bool) {
+    pub fn show(
+        &mut self,
+        bar_rect: RECT,
+        snapshot: &MetricsSnapshot,
+        lang: &Language,
+        scale: f32,
+        is_dark: bool,
+    ) {
         let data = TooltipData::from_snapshot(snapshot, lang);
 
         let ptr = TOOLTIP_INSTANCE.load(Ordering::SeqCst);
@@ -355,33 +414,76 @@ impl MonitorTooltip {
         let (title_w, prod_w, max_w) = unsafe {
             let screen_dc = windows::Win32::Graphics::Gdi::GetDC(None);
             let font_title = CreateFontW(
-                font_title_size, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
-                FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
-                FONT_QUALITY(5), 0, w!("Microsoft YaHei UI"),
+                font_title_size,
+                0,
+                0,
+                0,
+                FW_BOLD.0 as i32,
+                0,
+                0,
+                0,
+                FONT_CHARSET(1),
+                FONT_OUTPUT_PRECISION(0),
+                FONT_CLIP_PRECISION(0),
+                FONT_QUALITY(5),
+                0,
+                w!("Microsoft YaHei UI"),
             );
             let font_prod = CreateFontW(
-                font_prod_size, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-                FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
-                FONT_QUALITY(5), 0, w!("Microsoft YaHei UI"),
+                font_prod_size,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                FONT_CHARSET(1),
+                FONT_OUTPUT_PRECISION(0),
+                FONT_CLIP_PRECISION(0),
+                FONT_QUALITY(5),
+                0,
+                w!("Microsoft YaHei UI"),
             );
             let font_text = CreateFontW(
-                font_text_size, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-                FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
-                FONT_QUALITY(5), 0, w!("Microsoft YaHei UI"),
+                font_text_size,
+                0,
+                0,
+                0,
+                FW_NORMAL.0 as i32,
+                0,
+                0,
+                0,
+                FONT_CHARSET(1),
+                FONT_OUTPUT_PRECISION(0),
+                FONT_CLIP_PRECISION(0),
+                FONT_QUALITY(5),
+                0,
+                w!("Microsoft YaHei UI"),
             );
 
             // 测量标题宽度
             let old_font = SelectObject(screen_dc, HGDIOBJ(font_title.0 as _));
             let mut u16_title: Vec<u16> = data.title.encode_utf16().collect();
             let mut r = RECT::default();
-            let _ = DrawTextW(screen_dc, &mut u16_title, &mut r, DT_CALCRECT | DT_SINGLELINE);
+            let _ = DrawTextW(
+                screen_dc,
+                &mut u16_title,
+                &mut r,
+                DT_CALCRECT | DT_SINGLELINE,
+            );
             let tw = r.right - r.left;
 
             // 测量出品方文字宽度
             let _ = SelectObject(screen_dc, HGDIOBJ(font_prod.0 as _));
             let mut u16_prod: Vec<u16> = data.producer.encode_utf16().collect();
             let mut r_prod = RECT::default();
-            let _ = DrawTextW(screen_dc, &mut u16_prod, &mut r_prod, DT_CALCRECT | DT_SINGLELINE);
+            let _ = DrawTextW(
+                screen_dc,
+                &mut u16_prod,
+                &mut r_prod,
+                DT_CALCRECT | DT_SINGLELINE,
+            );
             let pw = r_prod.right - r_prod.left;
 
             // 测量正文每行宽度
@@ -390,7 +492,12 @@ impl MonitorTooltip {
             for line in &data.lines {
                 let mut u16_line: Vec<u16> = line.text.encode_utf16().collect();
                 let mut r = RECT::default();
-                let _ = DrawTextW(screen_dc, &mut u16_line, &mut r, DT_CALCRECT | DT_SINGLELINE);
+                let _ = DrawTextW(
+                    screen_dc,
+                    &mut u16_line,
+                    &mut r,
+                    DT_CALCRECT | DT_SINGLELINE,
+                );
                 mw = mw.max(r.right - r.left);
             }
 
@@ -412,9 +519,17 @@ impl MonitorTooltip {
         let content_w = total_content_w.max(header_min_w);
 
         // 宽度自适应：最长内容 + 左右内边距 + 安全微间距，最小 430px * scale (保证顶栏排布舒展)
-        let w = (content_w + pad_x * 2 + (16.0 * scale).round() as i32).max((430.0 * scale).round() as i32);
+        let w = (content_w + pad_x * 2 + (16.0 * scale).round() as i32)
+            .max((430.0 * scale).round() as i32);
         let num_seps = (data.lines.len() as i32 - 1).max(0);
-        let h = pad_top + title_h + title_gap + 1 + sep_gap + (data.lines.len() as i32 * line_h) + num_seps + pad_bot;
+        let h = pad_top
+            + title_h
+            + title_gap
+            + 1
+            + sep_gap
+            + (data.lines.len() as i32 * line_h)
+            + num_seps
+            + pad_bot;
 
         inner.width = w;
         inner.height = h;
@@ -456,15 +571,7 @@ impl MonitorTooltip {
         }
 
         unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                w,
-                h,
-                SWP_NOACTIVATE,
-            );
+            let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE);
             inner.render(&data, scale, is_dark);
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
@@ -499,14 +606,8 @@ impl TooltipInner {
         };
 
         let mut bits_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
-        let dib_bitmap = CreateDIBSection(
-            Some(mem_dc),
-            &bmi,
-            DIB_RGB_COLORS,
-            &mut bits_ptr,
-            None,
-            0,
-        );
+        let dib_bitmap =
+            CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0);
 
         if dib_bitmap.is_err() || bits_ptr.is_null() {
             let _ = DeleteDC(mem_dc);
@@ -535,10 +636,30 @@ impl TooltipInner {
         } else {
             COLORREF(0x00D0D0D0)
         });
-        let top_r = RECT { left: 0, top: 0, right: width, bottom: 1 };
-        let bot_r = RECT { left: 0, top: height - 1, right: width, bottom: height };
-        let left_r = RECT { left: 0, top: 0, right: 1, bottom: height };
-        let right_r = RECT { left: width - 1, top: 0, right: width, bottom: height };
+        let top_r = RECT {
+            left: 0,
+            top: 0,
+            right: width,
+            bottom: 1,
+        };
+        let bot_r = RECT {
+            left: 0,
+            top: height - 1,
+            right: width,
+            bottom: height,
+        };
+        let left_r = RECT {
+            left: 0,
+            top: 0,
+            right: 1,
+            bottom: height,
+        };
+        let right_r = RECT {
+            left: width - 1,
+            top: 0,
+            right: width,
+            bottom: height,
+        };
         FillRect(mem_dc, &top_r, border_brush);
         FillRect(mem_dc, &bot_r, border_brush);
         FillRect(mem_dc, &left_r, border_brush);
@@ -548,8 +669,16 @@ impl TooltipInner {
         // 3. 字体设置与文字绘制 (全量采用 Microsoft YaHei UI + ClearType)
         SetBkMode(mem_dc, TRANSPARENT);
 
-        let text_color_title = if is_dark { COLORREF(0x00FFFFFF) } else { COLORREF(0x001A1A1A) };
-        let text_color_body = if is_dark { COLORREF(0x00F0F0F0) } else { COLORREF(0x002B2B2B) };
+        let text_color_title = if is_dark {
+            COLORREF(0x00FFFFFF)
+        } else {
+            COLORREF(0x001A1A1A)
+        };
+        let text_color_body = if is_dark {
+            COLORREF(0x00F0F0F0)
+        } else {
+            COLORREF(0x002B2B2B)
+        };
         let text_color_producer = if is_dark {
             if self.is_hover_producer {
                 COLORREF(0x00FFFFFF) // 悬停纯白高亮
@@ -570,33 +699,80 @@ impl TooltipInner {
         let line_h = (24.0 * scale).round() as i32;
 
         let font_title = CreateFontW(
-            (-14.0 * scale).round() as i32, 0, 0, 0, FW_BOLD.0 as i32, 0, 0, 0,
-            FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
-            FONT_QUALITY(5), 0, w!("Microsoft YaHei UI"),
+            (-14.0 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_BOLD.0 as i32,
+            0,
+            0,
+            0,
+            FONT_CHARSET(1),
+            FONT_OUTPUT_PRECISION(0),
+            FONT_CLIP_PRECISION(0),
+            FONT_QUALITY(5),
+            0,
+            w!("Microsoft YaHei UI"),
         );
 
         let font_prod = CreateFontW(
-            (-12.0 * scale).round() as i32, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
-            FONT_QUALITY(5), 0, w!("Microsoft YaHei UI"),
+            (-12.0 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            FONT_CHARSET(1),
+            FONT_OUTPUT_PRECISION(0),
+            FONT_CLIP_PRECISION(0),
+            FONT_QUALITY(5),
+            0,
+            w!("Microsoft YaHei UI"),
         );
 
         let font_text = CreateFontW(
-            (-12.0 * scale).round() as i32, 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0,
-            FONT_CHARSET(1), FONT_OUTPUT_PRECISION(0), FONT_CLIP_PRECISION(0),
-            FONT_QUALITY(5), 0, w!("Microsoft YaHei UI"),
+            (-12.0 * scale).round() as i32,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            FONT_CHARSET(1),
+            FONT_OUTPUT_PRECISION(0),
+            FONT_CLIP_PRECISION(0),
+            FONT_QUALITY(5),
+            0,
+            w!("Microsoft YaHei UI"),
         );
 
         // 绘制左侧标题
         let old_font = SelectObject(mem_dc, HGDIOBJ(font_title.0 as _));
         SetTextColor(mem_dc, text_color_title);
-        draw_gdi_line(mem_dc, &data.title, pad_x, cur_y, width - pad_x * 2, title_h);
+        draw_gdi_line(
+            mem_dc,
+            &data.title,
+            pad_x,
+            cur_y,
+            width - pad_x * 2,
+            title_h,
+        );
 
         // 绘制右侧出品方文字
         let _ = SelectObject(mem_dc, HGDIOBJ(font_prod.0 as _));
         SetTextColor(mem_dc, text_color_producer);
         let prod_w = self.producer_rect.right - self.producer_rect.left;
-        draw_gdi_line(mem_dc, &data.producer, self.producer_rect.left + 4, cur_y, prod_w, title_h);
+        draw_gdi_line(
+            mem_dc,
+            &data.producer,
+            self.producer_rect.left + 4,
+            cur_y,
+            prod_w,
+            title_h,
+        );
 
         // 悬停时在出品方文字底部绘制精致 1px 下划线
         if self.is_hover_producer {
@@ -621,7 +797,11 @@ impl TooltipInner {
             right: width - pad_x,
             bottom: cur_y + 1,
         };
-        let sep_brush = CreateSolidBrush(if is_dark { COLORREF(0x003D3D3D) } else { COLORREF(0x00E0E0E0) });
+        let sep_brush = CreateSolidBrush(if is_dark {
+            COLORREF(0x003D3D3D)
+        } else {
+            COLORREF(0x00E0E0E0)
+        });
         FillRect(mem_dc, &line_rect, sep_brush);
         let _ = DeleteObject(HGDIOBJ(sep_brush.0 as _));
         cur_y += 1 + (8.0 * scale).round() as i32;
@@ -641,7 +821,9 @@ impl TooltipInner {
         let _ = SelectObject(mem_dc, HGDIOBJ(font_text.0 as _));
         SetTextColor(mem_dc, text_color_body);
         for (i, line) in data.lines.iter().enumerate() {
-            draw_metric_icon(mem_dc, line.icon, pad_x, cur_y, icon_box_w, line_h, scale, is_dark);
+            draw_metric_icon(
+                mem_dc, line.icon, pad_x, cur_y, icon_box_w, line_h, scale, is_dark,
+            );
             let _ = SelectObject(mem_dc, HGDIOBJ(font_text.0 as _));
             SetTextColor(mem_dc, text_color_body);
             draw_gdi_line(mem_dc, &line.text, text_x, cur_y, text_w, line_h);
@@ -678,16 +860,19 @@ impl TooltipInner {
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
 
-        let mut pt_src = POINT { x: 0, y: 0 };
-        let mut sz = SIZE { cx: width, cy: height };
+        let pt_src = POINT { x: 0, y: 0 };
+        let sz = SIZE {
+            cx: width,
+            cy: height,
+        };
 
         let _ = UpdateLayeredWindow(
             self.hwnd,
             Some(screen_dc),
             None,
-            Some(&mut sz),
+            Some(&sz),
             Some(mem_dc),
-            Some(&mut pt_src),
+            Some(&pt_src),
             COLORREF(0),
             Some(&blend),
             ULW_ALPHA,
@@ -708,7 +893,12 @@ unsafe fn draw_gdi_line(hdc: HDC, text: &str, x: i32, y: i32, w: i32, h: i32) {
         right: x + w,
         bottom: y + h,
     };
-    let _ = DrawTextW(hdc, &mut buf, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    let _ = DrawTextW(
+        hdc,
+        &mut buf,
+        &mut rect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+    );
 }
 
 /// 纯 GDI 零资源高性能矢量微图标绘制引擎 (0 外部图片、0 外部字体，像素级 ClearType 几何适配)
@@ -729,25 +919,25 @@ unsafe fn draw_metric_icon(
 
     let color = if is_dark {
         match kind {
-            MetricIconKind::NetworkSpeed => COLORREF(0x00F8BD38),   // 天蓝 (#38BDF8)
+            MetricIconKind::NetworkSpeed => COLORREF(0x00F8BD38), // 天蓝 (#38BDF8)
             MetricIconKind::NetworkAdapter => COLORREF(0x0099D334), // 薄荷绿 (#34D399)
-            MetricIconKind::Cpu => COLORREF(0x00FA8BA7),            // 电光紫 (#A78BFA)
-            MetricIconKind::Memory => COLORREF(0x0024BFFB),         // 琥珀金 (#FBBF24)
-            MetricIconKind::Gpu => COLORREF(0x00B672F4),            // 活力粉 (#F472B6)
-            MetricIconKind::Disk => COLORREF(0x00B8A394),           // 冰蓝 (#94A3B8)
-            MetricIconKind::Uptime => COLORREF(0x00D0D5DD),         // 银灰 (#DDD5D0)
-            MetricIconKind::Power => COLORREF(0x0080DE4A),          // 亮绿 (#4ADE80)
+            MetricIconKind::Cpu => COLORREF(0x00FA8BA7),          // 电光紫 (#A78BFA)
+            MetricIconKind::Memory => COLORREF(0x0024BFFB),       // 琥珀金 (#FBBF24)
+            MetricIconKind::Gpu => COLORREF(0x00B672F4),          // 活力粉 (#F472B6)
+            MetricIconKind::Disk => COLORREF(0x00B8A394),         // 冰蓝 (#94A3B8)
+            MetricIconKind::Uptime => COLORREF(0x00D0D5DD),       // 银灰 (#DDD5D0)
+            MetricIconKind::Power => COLORREF(0x0080DE4A),        // 亮绿 (#4ADE80)
         }
     } else {
         match kind {
-            MetricIconKind::NetworkSpeed => COLORREF(0x00B06602),   // 质感深蓝 (#0266B0)
+            MetricIconKind::NetworkSpeed => COLORREF(0x00B06602), // 质感深蓝 (#0266B0)
             MetricIconKind::NetworkAdapter => COLORREF(0x00457A05), // 深翠绿 (#057A45)
-            MetricIconKind::Cpu => COLORREF(0x0090306B),            // 醇厚紫 (#6B3090)
-            MetricIconKind::Memory => COLORREF(0x000F7AB4),         // 暖金褐 (#B47A0F)
-            MetricIconKind::Gpu => COLORREF(0x007817A8),            // 深品红 (#A81778)
-            MetricIconKind::Disk => COLORREF(0x00645047),           // 深青石 (#475064)
-            MetricIconKind::Uptime => COLORREF(0x00555555),         // 中性灰 (#555555)
-            MetricIconKind::Power => COLORREF(0x00208016),          // 深绿 (#168020)
+            MetricIconKind::Cpu => COLORREF(0x0090306B),          // 醇厚紫 (#6B3090)
+            MetricIconKind::Memory => COLORREF(0x000F7AB4),       // 暖金褐 (#B47A0F)
+            MetricIconKind::Gpu => COLORREF(0x007817A8),          // 深品红 (#A81778)
+            MetricIconKind::Disk => COLORREF(0x00645047),         // 深青石 (#475064)
+            MetricIconKind::Uptime => COLORREF(0x00555555),       // 中性灰 (#555555)
+            MetricIconKind::Power => COLORREF(0x00208016),        // 深绿 (#168020)
         }
     };
 
@@ -777,7 +967,12 @@ unsafe fn draw_metric_icon(
         }
         MetricIconKind::NetworkAdapter => {
             // Wi-Fi 信号/物理网络
-            let dot_r = RECT { left: x0 + 6, top: y0 + 11, right: x0 + 8, bottom: y0 + 13 };
+            let dot_r = RECT {
+                left: x0 + 6,
+                top: y0 + 11,
+                right: x0 + 8,
+                bottom: y0 + 13,
+            };
             FillRect(hdc, &dot_r, brush);
 
             let _ = MoveToEx(hdc, x0 + 4, y0 + 9, None);
@@ -791,7 +986,12 @@ unsafe fn draw_metric_icon(
         MetricIconKind::Cpu => {
             // CPU 芯片外壳与内部微核心
             let _ = RoundRect(hdc, x0 + 3, y0 + 3, x0 + 11, y0 + 11, 2, 2);
-            let core_r = RECT { left: x0 + 6, top: y0 + 6, right: x0 + 8, bottom: y0 + 8 };
+            let core_r = RECT {
+                left: x0 + 6,
+                top: y0 + 6,
+                right: x0 + 8,
+                bottom: y0 + 8,
+            };
             FillRect(hdc, &core_r, brush);
 
             // 四周引脚 Pin
@@ -818,9 +1018,24 @@ unsafe fn draw_metric_icon(
         MetricIconKind::Memory => {
             // RAM 内存条 DIMM
             let _ = RoundRect(hdc, x0 + 1, y0 + 4, x0 + 13, y0 + 11, 2, 2);
-            let c1 = RECT { left: x0 + 3, top: y0 + 6, right: x0 + 5, bottom: y0 + 9 };
-            let c2 = RECT { left: x0 + 6, top: y0 + 6, right: x0 + 8, bottom: y0 + 9 };
-            let c3 = RECT { left: x0 + 9, top: y0 + 6, right: x0 + 11, bottom: y0 + 9 };
+            let c1 = RECT {
+                left: x0 + 3,
+                top: y0 + 6,
+                right: x0 + 5,
+                bottom: y0 + 9,
+            };
+            let c2 = RECT {
+                left: x0 + 6,
+                top: y0 + 6,
+                right: x0 + 8,
+                bottom: y0 + 9,
+            };
+            let c3 = RECT {
+                left: x0 + 9,
+                top: y0 + 6,
+                right: x0 + 11,
+                bottom: y0 + 9,
+            };
             FillRect(hdc, &c1, brush);
             FillRect(hdc, &c2, brush);
             FillRect(hdc, &c3, brush);
@@ -842,7 +1057,12 @@ unsafe fn draw_metric_icon(
             // 存储硬盘盒
             let _ = RoundRect(hdc, x0 + 2, y0 + 2, x0 + 12, y0 + 12, 3, 3);
             let _ = Ellipse(hdc, x0 + 4, y0 + 4, x0 + 10, y0 + 10);
-            let dot = RECT { left: x0 + 9, top: y0 + 9, right: x0 + 11, bottom: y0 + 11 };
+            let dot = RECT {
+                left: x0 + 9,
+                top: y0 + 9,
+                right: x0 + 11,
+                bottom: y0 + 11,
+            };
             FillRect(hdc, &dot, brush);
         }
         MetricIconKind::Uptime => {
@@ -856,7 +1076,12 @@ unsafe fn draw_metric_icon(
         MetricIconKind::Power => {
             // 电池外壳与闪电
             let _ = RoundRect(hdc, x0 + 1, y0 + 4, x0 + 11, y0 + 11, 2, 2);
-            let tip = RECT { left: x0 + 11, top: y0 + 6, right: x0 + 13, bottom: y0 + 9 };
+            let tip = RECT {
+                left: x0 + 11,
+                top: y0 + 6,
+                right: x0 + 13,
+                bottom: y0 + 9,
+            };
             FillRect(hdc, &tip, brush);
             let _ = MoveToEx(hdc, x0 + 7, y0 + 5, None);
             let _ = LineTo(hdc, x0 + 4, y0 + 8);
@@ -973,7 +1198,8 @@ unsafe extern "system" fn tooltip_wnd_proc(
             // 检查鼠标离开后是否在任务栏监控条内，若都不在则隐匿
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
-            let in_bar = if let Some(bar_hwnd) = crate::monitor::window::bar_window::get_bar_hwnd() {
+            let in_bar = if let Some(bar_hwnd) = crate::monitor::window::bar_window::get_bar_hwnd()
+            {
                 let mut r = RECT::default();
                 let _ = GetWindowRect(bar_hwnd, &mut r);
                 pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom
@@ -1006,8 +1232,10 @@ impl Drop for MonitorTooltip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::collector::{CpuMetrics, DetailMetrics, DiskMetrics, GpuMetrics, NetworkSpeed};
     use crate::monitor::collector::memory::MemoryMetrics;
+    use crate::monitor::collector::{
+        CpuMetrics, DetailMetrics, DiskMetrics, GpuMetrics, NetworkSpeed,
+    };
     use crate::monitor::metrics::WaveformBuffer;
 
     fn create_mock_snapshot() -> MetricsSnapshot {
@@ -1070,22 +1298,41 @@ mod tests {
         assert_eq!(data.lines.len(), 8);
 
         assert_eq!(data.lines[0].icon, MetricIconKind::NetworkAdapter);
-        assert!(data.lines[0].text.starts_with("网络接口: MediaTek Wi-Fi 7 MT7925 Wireless LAN Card (本次累计: 0.4 MB)"));
+        assert!(
+            data.lines[0].text.starts_with(
+                "网络接口: MediaTek Wi-Fi 7 MT7925 Wireless LAN Card (本次累计: 0.4 MB)"
+            )
+        );
 
         assert_eq!(data.lines[1].icon, MetricIconKind::NetworkSpeed);
-        assert_eq!(data.lines[1].text, "实时网速: ↑ 0.1 Mbps  ↓ 0.1 Mbps (Top: chrome.exe)");
+        assert_eq!(
+            data.lines[1].text,
+            "实时网速: ↑ 0.1 Mbps  ↓ 0.1 Mbps (Top: chrome.exe)"
+        );
 
         assert_eq!(data.lines[2].icon, MetricIconKind::Cpu);
-        assert_eq!(data.lines[2].text, "处 理 器: 3% (Top: HZBankSecurityInputKz.exe)");
+        assert_eq!(
+            data.lines[2].text,
+            "处 理 器: 3% (Top: HZBankSecurityInputKz.exe)"
+        );
 
         assert_eq!(data.lines[3].icon, MetricIconKind::Memory);
-        assert_eq!(data.lines[3].text, "物 理 内 存: 52% (已用 14.5 GB / 共 27.8 GB)");
+        assert_eq!(
+            data.lines[3].text,
+            "物 理 内 存: 52% (已用 14.5 GB / 共 27.8 GB)"
+        );
 
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);
-        assert_eq!(data.lines[4].text, "独 立 显 卡: 2% (1.4 GB / 4.2 GB) (Top: dwm.exe)");
+        assert_eq!(
+            data.lines[4].text,
+            "独 立 显 卡: 2% (1.4 GB / 4.2 GB) (Top: dwm.exe)"
+        );
 
         assert_eq!(data.lines[5].icon, MetricIconKind::Disk);
-        assert_eq!(data.lines[5].text, "磁 盘 I/O: 2% (读取: 0.5 MB/s, 写入: 0.1 MB/s) (Top: devenv.exe)");
+        assert_eq!(
+            data.lines[5].text,
+            "磁 盘 I/O: 2% (读取: 0.5 MB/s, 写入: 0.1 MB/s) (Top: devenv.exe)"
+        );
 
         assert_eq!(data.lines[6].icon, MetricIconKind::Uptime);
         assert_eq!(data.lines[6].text, "连续运行: 6天 22小时 14分");
@@ -1100,26 +1347,48 @@ mod tests {
         let data = TooltipData::from_snapshot(&snap, &Language::EnUS);
 
         assert_eq!(data.title, "QuickPath Hardware Dashboard");
-        assert_eq!(data.producer, "Produced by Quzhou Yufeng Technology Co., Ltd.");
+        assert_eq!(
+            data.producer,
+            "Produced by Quzhou Yufeng Technology Co., Ltd."
+        );
         assert_eq!(data.lines.len(), 8);
 
         assert_eq!(data.lines[0].icon, MetricIconKind::NetworkAdapter);
-        assert!(data.lines[0].text.starts_with("Adapter: MediaTek Wi-Fi 7 MT7925 Wireless LAN Card (Session: 0.4 MB)"));
+        assert!(
+            data.lines[0].text.starts_with(
+                "Adapter: MediaTek Wi-Fi 7 MT7925 Wireless LAN Card (Session: 0.4 MB)"
+            )
+        );
 
         assert_eq!(data.lines[1].icon, MetricIconKind::NetworkSpeed);
-        assert_eq!(data.lines[1].text, "Network Speed: ↑ 0.1 Mbps  ↓ 0.1 Mbps (Top: chrome.exe)");
+        assert_eq!(
+            data.lines[1].text,
+            "Network Speed: ↑ 0.1 Mbps  ↓ 0.1 Mbps (Top: chrome.exe)"
+        );
 
         assert_eq!(data.lines[2].icon, MetricIconKind::Cpu);
-        assert_eq!(data.lines[2].text, "CPU: 3% (Top: HZBankSecurityInputKz.exe)");
+        assert_eq!(
+            data.lines[2].text,
+            "CPU: 3% (Top: HZBankSecurityInputKz.exe)"
+        );
 
         assert_eq!(data.lines[3].icon, MetricIconKind::Memory);
-        assert_eq!(data.lines[3].text, "RAM: 52% (Used 14.5 GB / Total 27.8 GB)");
+        assert_eq!(
+            data.lines[3].text,
+            "RAM: 52% (Used 14.5 GB / Total 27.8 GB)"
+        );
 
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);
-        assert_eq!(data.lines[4].text, "GPU: 2% (1.4 GB / 4.2 GB) (Top: dwm.exe)");
+        assert_eq!(
+            data.lines[4].text,
+            "GPU: 2% (1.4 GB / 4.2 GB) (Top: dwm.exe)"
+        );
 
         assert_eq!(data.lines[5].icon, MetricIconKind::Disk);
-        assert_eq!(data.lines[5].text, "Disk I/O: 2% (Read: 0.5 MB/s, Write: 0.1 MB/s) (Top: devenv.exe)");
+        assert_eq!(
+            data.lines[5].text,
+            "Disk I/O: 2% (Read: 0.5 MB/s, Write: 0.1 MB/s) (Top: devenv.exe)"
+        );
 
         assert_eq!(data.lines[6].icon, MetricIconKind::Uptime);
         assert_eq!(data.lines[6].text, "Uptime: 6d 22h 14m");

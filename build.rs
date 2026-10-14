@@ -25,8 +25,8 @@ fn main() {
     // 审计报告 P2-03：构建过程**绝不改写源码树**——旧实现直接 `fs::write("app.manifest")`
     // 会弄脏工作区、在只读源码 / 并行工作树 / 打包环境下失败，并可能把旧资源编进产物。
     // 现在源目录只保留模板，所有生成物一律写入 OUT_DIR。
-    let manifest_template = fs::read_to_string(manifest_dir.join("app.manifest"))
-        .expect("读取 app.manifest 模板失败");
+    let manifest_template =
+        fs::read_to_string(manifest_dir.join("app.manifest")).expect("读取 app.manifest 模板失败");
     let patched_manifest: String = manifest_template
         .lines()
         .map(|line| {
@@ -53,7 +53,7 @@ fn main() {
 
     // 4. 动态生成包含中英双语与完整软件元数据的资源脚本（写入 OUT_DIR）
     let rc_content = format!(
-r#"#pragma code_page(65001)
+        r#"#pragma code_page(65001)
 
 #define RT_MANIFEST 24
 1 RT_MANIFEST "app.manifest"

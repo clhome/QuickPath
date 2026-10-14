@@ -4,20 +4,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::System::ProcessStatus::GetModuleFileNameExW;
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::IsWindowEnabled;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetAncestor, GetClassNameW, GetDlgCtrlID, GetSystemMetrics,
-    GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId,
-    IsChild, IsWindow, IsWindowVisible, IsZoomed, ES_READONLY,
-    GA_PARENT, GWL_STYLE, GW_OWNER, SM_CXSCREEN, SM_CYSCREEN, WS_POPUP, WS_VISIBLE,
+    ES_READONLY, EnumChildWindows, GA_PARENT, GW_OWNER, GWL_STYLE, GetAncestor, GetClassNameW,
+    GetDlgCtrlID, GetSystemMetrics, GetWindow, GetWindowLongW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsChild, IsWindow, IsWindowVisible, IsZoomed, SM_CXSCREEN,
+    SM_CYSCREEN, WS_POPUP, WS_VISIBLE,
 };
+use windows::core::BOOL;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogKind {
@@ -121,7 +121,11 @@ fn enforce_log_retention(path: &Path) {
     if let Ok(meta) = std::fs::metadata(&backup) {
         let expired = meta
             .modified()
-            .map(|m| m.elapsed().map(|e| e > DEBUG_LOG_RETENTION).unwrap_or(false))
+            .map(|m| {
+                m.elapsed()
+                    .map(|e| e > DEBUG_LOG_RETENTION)
+                    .unwrap_or(false)
+            })
             .unwrap_or(false);
         if expired {
             let _ = std::fs::remove_file(&backup);
@@ -200,11 +204,7 @@ pub fn log_debug(msg: &str) {
         return;
     };
 
-    let line = format!(
-        "[{}] {}\n",
-        debug_timestamp(),
-        sanitize_debug_message(msg)
-    );
+    let line = format!("[{}] {}\n", debug_timestamp(), sanitize_debug_message(msg));
 
     let _guard = DEBUG_LOG_LOCK
         .lock()
@@ -291,7 +291,9 @@ fn is_visible_dialog_child(dialog_hwnd: HWND, child: HWND) -> bool {
         }
         let mut current = child;
         while current != dialog_hwnd {
-            if current.0.is_null() || (GetWindowLongW(current, GWL_STYLE) as u32 & WS_VISIBLE.0) == 0 {
+            if current.0.is_null()
+                || (GetWindowLongW(current, GWL_STYLE) as u32 & WS_VISIBLE.0) == 0
+            {
                 return false;
             }
             current = GetAncestor(current, GA_PARENT);
@@ -521,10 +523,8 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
                 (is_popup || has_owner)
                     && !is_zoomed
                     && not_full_screen
-                    && width >= 400
-                    && width <= 1600
-                    && height >= 250
-                    && height <= 1100
+                    && (400..=1600).contains(&width)
+                    && (250..=1100).contains(&height)
             } else {
                 false
             }
@@ -540,7 +540,14 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
         if !is_valid {
             log_debug(&format!(
                 "detect_wps REJECT: hwnd=0x{:X} cls='{}' title='{}' w={} h={} kcfd={} qt5_dlg={} 32770={}",
-                hwnd.0 as usize, class_name, window_title, width, height, is_kcfd, is_qt5_dialog, is_32770
+                hwnd.0 as usize,
+                class_name,
+                window_title,
+                width,
+                height,
+                is_kcfd,
+                is_qt5_dialog,
+                is_32770
             ));
             return None;
         }
@@ -566,12 +573,19 @@ fn detect_wps_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<F
 }
 
 /// 探测标准 Win32 (#32770) 文件对话框，兼容现代和经典文件名控件。
-fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Option<FileDialogInfo> {
+fn detect_standard_dialog(
+    raw_hwnd: HWND,
+    pid: u32,
+    process_name: String,
+) -> Option<FileDialogInfo> {
     unsafe {
         let hwnd = find_dialog_root(raw_hwnd);
 
         if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
-            log_debug(&format!("detect_std REJECT: hwnd=0x{:X} not visible", hwnd.0 as usize));
+            log_debug(&format!(
+                "detect_std REJECT: hwnd=0x{:X} not visible",
+                hwnd.0 as usize
+            ));
             return None;
         }
 
@@ -585,7 +599,12 @@ fn detect_standard_dialog(raw_hwnd: HWND, pid: u32, process_name: String) -> Opt
         let file_name_edit = ctx.file_name_edit.map(|(_, edit)| edit);
 
         // 列表与有效文件名 Edit 缺一不可；搜索框、地址栏和未就绪控件不能补足特征。
-        if !is_standard_file_dialog(&class_name, true, ctx.has_list_view, file_name_edit.is_some()) {
+        if !is_standard_file_dialog(
+            &class_name,
+            true,
+            ctx.has_list_view,
+            file_name_edit.is_some(),
+        ) {
             log_debug(&format!(
                 "detect_std REJECT: hwnd=0x{:X} list={} combo={} edits={}",
                 hwnd.0 as usize, ctx.has_list_view, ctx.has_file_name_combo, ctx.edit_count
@@ -625,13 +644,23 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
 
         log_debug(&format!(
             "DETECT_START: raw=0x{:X} pid={} proc='{}' cls='{}' title='{}' | root=0x{:X} r_cls='{}' r_title='{}'",
-            raw_hwnd.0 as usize, pid, process_name, class_name, title, root.0 as usize, root_class, root_title
+            raw_hwnd.0 as usize,
+            pid,
+            process_name,
+            class_name,
+            title,
+            root.0 as usize,
+            root_class,
+            root_title
         ));
 
         // 1. 若为 WPS 进程，严格走 WPS 专属自绘/Qt 对话框探测通道
         if is_wps_process_name(&process_name) {
             if let Some(wps_info) = detect_wps_dialog(raw_hwnd, pid, process_name.clone()) {
-                log_debug(&format!("DETECT_HIT_WPS: hwnd=0x{:X} title='{}' rect={:?}", wps_info.hwnd.0 as usize, wps_info.window_title, wps_info.rect));
+                log_debug(&format!(
+                    "DETECT_HIT_WPS: hwnd=0x{:X} title='{}' rect={:?}",
+                    wps_info.hwnd.0 as usize, wps_info.window_title, wps_info.rect
+                ));
                 return Some(wps_info);
             }
             return None;
@@ -639,7 +668,10 @@ pub fn detect_file_dialog(raw_hwnd: HWND) -> Option<FileDialogInfo> {
 
         // 2. 非 WPS 进程：只走具有列表和有效文件名输入的标准 #32770 对话框通道
         if let Some(std_info) = detect_standard_dialog(raw_hwnd, pid, process_name.clone()) {
-            log_debug(&format!("DETECT_HIT_STD: hwnd=0x{:X} title='{}' rect={:?}", std_info.hwnd.0 as usize, std_info.window_title, std_info.rect));
+            log_debug(&format!(
+                "DETECT_HIT_STD: hwnd=0x{:X} title='{}' rect={:?}",
+                std_info.hwnd.0 as usize, std_info.window_title, std_info.rect
+            ));
             Some(std_info)
         } else {
             None
@@ -687,10 +719,11 @@ unsafe extern "system" fn enum_standard_children_proc(child: HWND, lparam: LPARA
                 has_combo,
                 has_file_name_combo_id,
                 has_address_or_search,
-            ) {
-                if ctx.file_name_edit.is_none_or(|(current, _)| priority < current) {
-                    ctx.file_name_edit = Some((priority, child));
-                }
+            ) && ctx
+                .file_name_edit
+                .is_none_or(|(current, _)| priority < current)
+            {
+                ctx.file_name_edit = Some((priority, child));
             }
         }
 
@@ -713,10 +746,8 @@ unsafe extern "system" fn enum_children_proc(child: HWND, lparam: LPARAM) -> BOO
             || class == "NamespaceTreeControl"
         {
             ctx.has_toolbar_or_breadcrumb = true;
-        } else if class.eq_ignore_ascii_case("Edit") {
-            if IsWindowVisible(child).as_bool() {
-                ctx.edit_hwnds.push(child);
-            }
+        } else if class.eq_ignore_ascii_case("Edit") && IsWindowVisible(child).as_bool() {
+            ctx.edit_hwnds.push(child);
         }
 
         BOOL(1)
@@ -800,18 +831,17 @@ pub fn get_window_process_info(hwnd: HWND) -> (u32, String) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::core::{PCWSTR, w};
     use windows::Win32::Foundation::HINSTANCE;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU,
-        RegisterClassW, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW, WS_CHILD,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU, RegisterClassW, WINDOW_EX_STYLE,
+        WINDOW_STYLE, WNDCLASSW, WS_CHILD,
     };
+    use windows::core::{PCWSTR, w};
 
     struct TestDialog(HWND);
 
@@ -829,9 +859,15 @@ mod tests {
             static REGISTER: std::sync::Once = std::sync::Once::new();
             REGISTER.call_once(|| unsafe {
                 let instance = HINSTANCE(GetModuleHandleW(None).unwrap().0);
-                for class in [w!("DirectUIHWND"), w!("SHELLDLL_DefView"), w!("SysListView32"),
-                    w!("ComboBoxEx32"), w!("ToolbarWindow32"), w!("TestBreadcrumb"), w!("TestSearchBox")]
-                {
+                for class in [
+                    w!("DirectUIHWND"),
+                    w!("SHELLDLL_DefView"),
+                    w!("SysListView32"),
+                    w!("ComboBoxEx32"),
+                    w!("ToolbarWindow32"),
+                    w!("TestBreadcrumb"),
+                    w!("TestSearchBox"),
+                ] {
                     let wc = WNDCLASSW {
                         lpfnWndProc: Some(test_window_proc),
                         hInstance: instance,
@@ -843,20 +879,43 @@ mod tests {
             });
             unsafe {
                 // 真正 #32770 根窗口保持隐藏，测试只枚举自建子树，不操作实际软件。
-                Self(CreateWindowExW(
-                    WINDOW_EX_STYLE(0), w!("#32770"), w!("Open"), WS_POPUP,
-                    0, 0, 640, 480, None, None, None, None,
-                ).unwrap())
+                Self(
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        w!("#32770"),
+                        w!("Open"),
+                        WS_POPUP,
+                        0,
+                        0,
+                        640,
+                        480,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+                )
             }
         }
 
         fn child(&self, parent: HWND, class: PCWSTR, id: i32, style: WINDOW_STYLE) -> HWND {
             unsafe {
                 CreateWindowExW(
-                    WINDOW_EX_STYLE(0), class, w!(""), WS_CHILD | style,
-                    0, 0, 200, 100, Some(parent), Some(HMENU(id as usize as *mut _)),
-                    None, None,
-                ).unwrap()
+                    WINDOW_EX_STYLE(0),
+                    class,
+                    w!(""),
+                    WS_CHILD | style,
+                    0,
+                    0,
+                    200,
+                    100,
+                    Some(parent),
+                    Some(HMENU(id as usize as *mut _)),
+                    None,
+                    None,
+                )
+                .unwrap()
             }
         }
 
@@ -866,15 +925,19 @@ mod tests {
             // 直接取得真实 ComboBox 自动创建的 Edit，包含隐藏组合框情况。
             let mut child = unsafe {
                 windows::Win32::UI::WindowsAndMessaging::GetWindow(
-                    combo, windows::Win32::UI::WindowsAndMessaging::GW_CHILD,
-                ).unwrap()
+                    combo,
+                    windows::Win32::UI::WindowsAndMessaging::GW_CHILD,
+                )
+                .unwrap()
             };
             while get_window_class_name(child) != "Edit" {
                 assert!(!child.0.is_null());
                 child = unsafe {
                     windows::Win32::UI::WindowsAndMessaging::GetWindow(
-                        child, windows::Win32::UI::WindowsAndMessaging::GW_HWNDNEXT,
-                    ).unwrap()
+                        child,
+                        windows::Win32::UI::WindowsAndMessaging::GW_HWNDNEXT,
+                    )
+                    .unwrap()
                 };
             }
             child
@@ -883,7 +946,9 @@ mod tests {
 
     impl Drop for TestDialog {
         fn drop(&mut self) {
-            unsafe { let _ = DestroyWindow(self.0); }
+            unsafe {
+                let _ = DestroyWindow(self.0);
+            }
         }
     }
 
@@ -898,12 +963,21 @@ mod tests {
 
     #[test]
     fn test_file_name_priority_excludes_search_and_address() {
-        assert_eq!(file_name_edit_priority(true, EDT1, false, false, false), Some(0));
+        assert_eq!(
+            file_name_edit_priority(true, EDT1, false, false, false),
+            Some(0)
+        );
         assert_eq!(file_name_edit_priority(true, 0, true, true, false), Some(1));
-        assert_eq!(file_name_edit_priority(true, 0, true, false, false), Some(2));
+        assert_eq!(
+            file_name_edit_priority(true, 0, true, false, false),
+            Some(2)
+        );
         assert_eq!(file_name_edit_priority(true, 0, false, false, false), None);
         assert_eq!(file_name_edit_priority(true, EDT1, true, true, true), None);
-        assert_eq!(file_name_edit_priority(false, EDT1, true, true, false), None);
+        assert_eq!(
+            file_name_edit_priority(false, EDT1, true, true, false),
+            None
+        );
     }
 
     #[test]
@@ -917,8 +991,12 @@ mod tests {
         assert_eq!(ctx.file_name_edit, Some((1, edit)));
         assert_ne!(edit, search);
         assert_eq!(find_dialog_root(edit), dialog.0);
-        assert!(is_standard_file_dialog(&get_window_class_name(dialog.0), true,
-            ctx.has_list_view, ctx.file_name_edit.is_some()));
+        assert!(is_standard_file_dialog(
+            &get_window_class_name(dialog.0),
+            true,
+            ctx.has_list_view,
+            ctx.file_name_edit.is_some()
+        ));
         assert!(detect_standard_dialog(edit, 0, String::new()).is_none());
     }
 
@@ -928,7 +1006,12 @@ mod tests {
         dialog.child(dialog.0, w!("SysListView32"), 0, WS_VISIBLE);
         let edit = dialog.child(dialog.0, w!("Edit"), EDT1, WS_VISIBLE);
         let ctx = collect_standard_children(dialog.0);
-        assert!(is_standard_file_dialog("#32770", true, ctx.has_list_view, ctx.file_name_edit.is_some()));
+        assert!(is_standard_file_dialog(
+            "#32770",
+            true,
+            ctx.has_list_view,
+            ctx.file_name_edit.is_some()
+        ));
         assert_eq!(ctx.file_name_edit, Some((0, edit)));
     }
 
@@ -938,16 +1021,28 @@ mod tests {
         dialog.child(dialog.0, w!("SHELLDLL_DefView"), 0, WS_VISIBLE);
         let combo = dialog.child(dialog.0, w!("ComboBoxEx32"), 0, WS_VISIBLE);
         let fallback = dialog.child(combo, w!("Edit"), 0, WS_VISIBLE);
-        assert_eq!(collect_standard_children(dialog.0).file_name_edit, Some((2, fallback)));
+        assert_eq!(
+            collect_standard_children(dialog.0).file_name_edit,
+            Some((2, fallback))
+        );
         let named_combo = dialog.child(dialog.0, w!("ComboBoxEx32"), CMB13, WS_VISIBLE);
         let named = dialog.child(named_combo, w!("Edit"), 0, WS_VISIBLE);
-        assert_eq!(collect_standard_children(dialog.0).file_name_edit, Some((1, named)));
+        assert_eq!(
+            collect_standard_children(dialog.0).file_name_edit,
+            Some((1, named))
+        );
         let edt1 = dialog.child(dialog.0, w!("Edit"), EDT1, WS_VISIBLE);
-        assert_eq!(collect_standard_children(dialog.0).file_name_edit, Some((0, edt1)));
+        assert_eq!(
+            collect_standard_children(dialog.0).file_name_edit,
+            Some((0, edt1))
+        );
         let ordinary = TestDialog::new();
         ordinary.child(ordinary.0, w!("SysListView32"), 0, WS_VISIBLE);
         let edit = ordinary.combo_edit(ordinary.0, 99, true);
-        assert_eq!(collect_standard_children(ordinary.0).file_name_edit, Some((2, edit)));
+        assert_eq!(
+            collect_standard_children(ordinary.0).file_name_edit,
+            Some((2, edit))
+        );
     }
 
     #[test]
@@ -958,20 +1053,34 @@ mod tests {
         dialog.child(combo, w!("Edit"), 0, WS_VISIBLE);
         let ctx = collect_standard_children(dialog.0);
         assert!(is_file_dialog_title(&get_window_title(dialog.0)));
-        assert!(!is_standard_file_dialog("#32770", true, ctx.has_list_view, ctx.file_name_edit.is_some()));
+        assert!(!is_standard_file_dialog(
+            "#32770",
+            true,
+            ctx.has_list_view,
+            ctx.file_name_edit.is_some()
+        ));
         // 列表加独立普通 Edit 也不足以识别文件名。
         let search_only = TestDialog::new();
         search_only.child(search_only.0, w!("SysListView32"), 0, WS_VISIBLE);
         search_only.child(search_only.0, w!("Edit"), 10, WS_VISIBLE);
         let ctx = collect_standard_children(search_only.0);
-        assert!(!is_standard_file_dialog("#32770", true, ctx.has_list_view, ctx.file_name_edit.is_some()));
+        assert!(!is_standard_file_dialog(
+            "#32770",
+            true,
+            ctx.has_list_view,
+            ctx.file_name_edit.is_some()
+        ));
     }
 
     #[test]
     fn test_hidden_address_and_search_ancestors_are_excluded() {
         let dialog = TestDialog::new();
         dialog.child(dialog.0, w!("DirectUIHWND"), 0, WS_VISIBLE);
-        for class in [w!("ToolbarWindow32"), w!("TestBreadcrumb"), w!("TestSearchBox")] {
+        for class in [
+            w!("ToolbarWindow32"),
+            w!("TestBreadcrumb"),
+            w!("TestSearchBox"),
+        ] {
             let container = dialog.child(dialog.0, class, 0, WS_VISIBLE);
             let combo = dialog.child(container, w!("ComboBoxEx32"), CMB13, WS_VISIBLE);
             dialog.child(combo, w!("Edit"), EDT1, WS_VISIBLE);
@@ -991,8 +1100,15 @@ mod tests {
         assert!(collect_standard_children(dialog.0).file_name_edit.is_none());
         assert!(unsafe { IsWindow(Some(hidden)).as_bool() });
         let disabled = dialog.child(dialog.0, w!("Edit"), EDT1, WS_VISIBLE);
-        unsafe { let _ = EnableWindow(disabled, false); }
-        dialog.child(dialog.0, w!("Edit"), EDT1, WS_VISIBLE | WINDOW_STYLE(ES_READONLY as u32));
+        unsafe {
+            let _ = EnableWindow(disabled, false);
+        }
+        dialog.child(
+            dialog.0,
+            w!("Edit"),
+            EDT1,
+            WS_VISIBLE | WINDOW_STYLE(ES_READONLY as u32),
+        );
         assert!(collect_standard_children(dialog.0).file_name_edit.is_none());
     }
 
@@ -1029,15 +1145,35 @@ mod tests {
 
     #[test]
     fn test_standard_dialog_title_matching() {
-        let titles_hit = ["另存为", "另存为...", "打开", "打开文件", "Save As", "Save as file", "Open", "Open File"];
-        let titles_miss = ["属性", "关于 Notepad3", "确认删除", "设置", "Settings", "Preferences"];
+        let titles_hit = [
+            "另存为",
+            "另存为...",
+            "打开",
+            "打开文件",
+            "Save As",
+            "Save as file",
+            "Open",
+            "Open File",
+        ];
+        let titles_miss = [
+            "属性",
+            "关于 Notepad3",
+            "确认删除",
+            "设置",
+            "Settings",
+            "Preferences",
+        ];
 
         for t in titles_hit {
             assert!(is_file_dialog_title(t), "Should match dialog title: {}", t);
         }
 
         for t in titles_miss {
-            assert!(!is_file_dialog_title(t), "Should NOT match dialog title: {}", t);
+            assert!(
+                !is_file_dialog_title(t),
+                "Should NOT match dialog title: {}",
+                t
+            );
         }
     }
 
@@ -1076,13 +1212,7 @@ mod tests {
         }
 
         // 3. 应当放行的真正另存为/打开对话框标题与空自绘标题
-        let dialog_titles = [
-            "另存为",
-            "打开",
-            "Save As",
-            "Open",
-            "",
-        ];
+        let dialog_titles = ["另存为", "打开", "Save As", "Open", ""];
 
         for title in dialog_titles {
             assert!(
@@ -1118,7 +1248,10 @@ mod debug_log_tests {
             "个人目录不得原样出现: {masked}"
         );
         assert!(!masked.contains("Bob"), "用户名不得原样出现: {masked}");
-        assert!(masked.contains("%USERPROFILE%"), "必须带上目录占位符: {masked}");
+        assert!(
+            masked.contains("%USERPROFILE%"),
+            "必须带上目录占位符: {masked}"
+        );
         assert!(masked.contains("<user>"), "必须带上用户名占位符: {masked}");
     }
 

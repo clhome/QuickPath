@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use super::dopus::get_dopus_folders;
 use super::explorer::get_explorer_folders;
 use super::totalcmd::get_totalcmd_folders;
-use super::tracker::{normalize_path, FolderCandidate};
+use super::tracker::{FolderCandidate, normalize_path};
 use super::xyplorer::get_xyplorer_folders;
 
 /// 调用方在“等一轮后台扫描”上愿意花的时间上限（超过就先用缓存）
@@ -67,10 +67,13 @@ fn scanner() -> &'static Scanner {
 }
 
 fn lock<'a, T>(mutex: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn worker_loop(scanner: &'static Scanner) -> ! {    loop {
+fn worker_loop(scanner: &'static Scanner) -> ! {
+    loop {
         let request = {
             let mut guard = lock(&scanner.request);
             while guard.is_none() {

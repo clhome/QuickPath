@@ -2,9 +2,9 @@
 
 use std::fs;
 use std::path::PathBuf;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
+use windows::core::PCWSTR;
 
 use super::ipc::{self, Manager};
 
@@ -116,11 +116,11 @@ fn find_dopusrt() -> Option<PathBuf> {
 
 /// 读取注册表中的 Directory Opus 安装目录（HKLM 优先，HKCU 兜底；兼容 32 位视图）
 fn registry_install_dir() -> Option<PathBuf> {
-    use windows::core::HSTRING;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
-        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW,
     };
+    use windows::core::HSTRING;
 
     const SUB_KEYS: [&str; 3] = [
         r"SOFTWARE\GPSoftware\Directory Opus",
@@ -166,23 +166,22 @@ fn parse_dopus_xml(xml: &str, hwnd: HWND, results: &mut Vec<DopusFolder>) {
     for line in xml.lines() {
         if line.contains("<path") && line.contains("</path>") {
             let is_active = line.contains("tab_state=\"1\"");
-            if let Some(start) = line.find('>') {
-                if let Some(end) = line.rfind("</path>") {
-                    if start + 1 < end {
-                        let path_str = line[start + 1..end].trim();
-                        if !path_str.is_empty() && std::path::Path::new(path_str).is_dir() {
-                            results.push(DopusFolder {
-                                path: path_str.to_string(),
-                                title: if is_active {
-                                    "Directory Opus (活动标签)".to_string()
-                                } else {
-                                    "Directory Opus".to_string()
-                                },
-                                is_active,
-                                hwnd,
-                            });
-                        }
-                    }
+            if let Some(start) = line.find('>')
+                && let Some(end) = line.rfind("</path>")
+                && start + 1 < end
+            {
+                let path_str = line[start + 1..end].trim();
+                if !path_str.is_empty() && std::path::Path::new(path_str).is_dir() {
+                    results.push(DopusFolder {
+                        path: path_str.to_string(),
+                        title: if is_active {
+                            "Directory Opus (活动标签)".to_string()
+                        } else {
+                            "Directory Opus".to_string()
+                        },
+                        is_active,
+                        hwnd,
+                    });
                 }
             }
         }

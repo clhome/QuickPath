@@ -71,8 +71,8 @@ fn run_schtasks_quiet(args: &[&str]) {
 
 /// 设置或移除开机自启动（规范带双引号包裹并进行写后一致性校验）
 pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;
     let exe_path_str = current_exe.to_string_lossy().to_string();
     // 强制加双引号包裹，彻底解决含空格目录（如 C:\Program Files）开机自启静默失效问题
     let quoted_exe = format!("\"{}\"", exe_path_str);
@@ -135,10 +135,8 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
 pub fn is_autostart_enabled() -> bool {
     // 检查任务计划程序
     let task_exists = match schtasks_command() {
-        Ok(cmd) => {
-            run_bounded_status(cmd, &["/query", "/tn", TASK_NAME], AUTOSTART_TIMEOUT)
-                .unwrap_or(false)
-        }
+        Ok(cmd) => run_bounded_status(cmd, &["/query", "/tn", TASK_NAME], AUTOSTART_TIMEOUT)
+            .unwrap_or(false),
         Err(_) => false,
     };
     if task_exists {
@@ -150,11 +148,11 @@ pub fn is_autostart_enabled() -> bool {
 }
 
 fn set_registry_run(quoted_exe: &str, enable: bool) -> Result<(), String> {
-    use windows::core::HSTRING;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-        HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ,
+        HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey,
+        RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     };
+    use windows::core::HSTRING;
 
     unsafe {
         let sub_key = HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Run");
@@ -175,17 +173,9 @@ fn set_registry_run(quoted_exe: &str, enable: bool) -> Result<(), String> {
 
         if enable {
             let exe_wide: Vec<u16> = quoted_exe.encode_utf16().chain(Some(0)).collect();
-            let slice = std::slice::from_raw_parts(
-                exe_wide.as_ptr() as *const u8,
-                exe_wide.len() * 2,
-            );
-            let set_res = RegSetValueExW(
-                hkey,
-                &value_name,
-                Some(0),
-                REG_SZ,
-                Some(slice),
-            );
+            let slice =
+                std::slice::from_raw_parts(exe_wide.as_ptr() as *const u8, exe_wide.len() * 2);
+            let set_res = RegSetValueExW(hkey, &value_name, Some(0), REG_SZ, Some(slice));
 
             if set_res.is_err() {
                 let _ = RegCloseKey(hkey);
@@ -228,10 +218,10 @@ fn set_registry_run(quoted_exe: &str, enable: bool) -> Result<(), String> {
 }
 
 fn is_registry_run_enabled() -> bool {
-    use windows::core::HSTRING;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE,
+        HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
     };
+    use windows::core::HSTRING;
 
     unsafe {
         let sub_key = HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Run");

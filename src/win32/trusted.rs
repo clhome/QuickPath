@@ -155,12 +155,21 @@ mod tests {
 
     #[test]
     fn test_is_under_root_respects_directory_boundary() {
-        assert!(is_under_root("c:\\program files\\dopus\\dopusrt.exe", "c:\\program files"));
+        assert!(is_under_root(
+            "c:\\program files\\dopus\\dopusrt.exe",
+            "c:\\program files"
+        ));
         assert!(is_under_root("c:\\program files", "c:\\program files"));
         assert!(is_under_root("c:\\windows\\system32\\schtasks.exe", "c:\\"));
         // 目录边界：不得把 C:\Program FilesEvil 当成 Program Files 之内
-        assert!(!is_under_root("c:\\program filesevil\\dopusrt.exe", "c:\\program files"));
-        assert!(!is_under_root("d:\\program files\\x.exe", "c:\\program files"));
+        assert!(!is_under_root(
+            "c:\\program filesevil\\dopusrt.exe",
+            "c:\\program files"
+        ));
+        assert!(!is_under_root(
+            "d:\\program files\\x.exe",
+            "c:\\program files"
+        ));
         assert!(!is_under_root("", "c:\\program files"));
         assert!(!is_under_root("c:\\program files", ""));
     }
@@ -226,8 +235,12 @@ mod tests {
             );
         }
         // 用户目录/相对路径一律不受信
-        assert!(!is_trusted_install_dir(Path::new(r"C:\Users\Public\dopusrt.exe")));
+        assert!(!is_trusted_install_dir(Path::new(
+            r"C:\Users\Public\dopusrt.exe"
+        )));
         assert!(!is_trusted_install_dir(Path::new("dopusrt.exe")));
-        assert!(!is_trusted_install_dir(Path::new(r"C:\ProgramData\evil\dopusrt.exe")));
+        assert!(!is_trusted_install_dir(Path::new(
+            r"C:\ProgramData\evil\dopusrt.exe"
+        )));
     }
 }

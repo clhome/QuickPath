@@ -1,15 +1,14 @@
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-    NOTIFYICONDATAW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetCursorPos, RegisterClassW, SetForegroundWindow,
-    TrackPopupMenu, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+    GetCursorPos, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, RegisterClassW,
+    SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu,
+    WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
+use windows::core::{PCWSTR, w};
 
 pub const WM_USER: u32 = 0x0400;
 pub const WM_TRAY_CALLBACK: u32 = WM_USER + 201;
@@ -57,7 +56,6 @@ impl TrayIcon {
                 _ => return Err("创建托盘消息宿主窗口失败".to_string()),
             };
             let hicon = crate::win32::icon::get_app_icon(true);
-
 
             let mut tip = [0u16; 128];
             let tip_str = "QuickPath - 现代文件对话框智能跟随\0";
@@ -123,22 +121,34 @@ impl TrayIcon {
 
             let hotkey_disp = crate::win32::hotkey::format_hotkey_display(hotkey);
 
-            let str_autoswitch: Vec<u16> = format!("⚡ {}", crate::rules::I18n::tray_toggle_autoswitch(&lang, false))
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
-            let str_autostart: Vec<u16> = format!("🚀 {}", crate::rules::I18n::tray_toggle_autostart(&lang, false))
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
-            let str_monitor: Vec<u16> = format!("📊 {}", crate::rules::I18n::tray_toggle_monitor(&lang, false))
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
-            let str_show: Vec<u16> = format!("📂 {}", crate::rules::I18n::tray_show_candidates(&lang, &hotkey_disp))
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
+            let str_autoswitch: Vec<u16> = format!(
+                "⚡ {}",
+                crate::rules::I18n::tray_toggle_autoswitch(&lang, false)
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+            let str_autostart: Vec<u16> = format!(
+                "🚀 {}",
+                crate::rules::I18n::tray_toggle_autostart(&lang, false)
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+            let str_monitor: Vec<u16> = format!(
+                "📊 {}",
+                crate::rules::I18n::tray_toggle_monitor(&lang, false)
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+            let str_show: Vec<u16> = format!(
+                "📂 {}",
+                crate::rules::I18n::tray_show_candidates(&lang, &hotkey_disp)
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
             let str_settings: Vec<u16> = format!("⚙ {}", crate::rules::I18n::tray_settings(&lang))
                 .encode_utf16()
                 .chain(Some(0))
@@ -148,7 +158,6 @@ impl TrayIcon {
                 .encode_utf16()
                 .chain(Some(0))
                 .collect();
-
 
             let _ = AppendMenuW(
                 hmenu,

@@ -1,15 +1,14 @@
 use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, PostMessageW, EVENT_SYSTEM_FOREGROUND, WINEVENT_OUTOFCONTEXT,
+    EVENT_SYSTEM_FOREGROUND, GetForegroundWindow, PostMessageW, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS,
 };
 
 pub const WM_QUICKPATH_FOREGROUND: u32 = 0x0400 + 101;
 
-static MAIN_THREAD_WINDOW: AtomicPtr<core::ffi::c_void> =
-    AtomicPtr::new(std::ptr::null_mut());
+static MAIN_THREAD_WINDOW: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
 pub struct WinEventHookGuard {
     hook: HWINEVENTHOOK,

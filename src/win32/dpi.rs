@@ -7,11 +7,7 @@ use windows::Win32::UI::HiDpi::GetDpiForWindow;
 pub fn get_window_dpi(hwnd: HWND) -> u32 {
     unsafe {
         let dpi = GetDpiForWindow(hwnd);
-        if dpi == 0 {
-            96
-        } else {
-            dpi
-        }
+        if dpi == 0 { 96 } else { dpi }
     }
 }
 

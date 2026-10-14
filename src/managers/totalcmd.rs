@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use std::path::Path;
-use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, WM_COMMAND};
+use windows::core::PCWSTR;
 
 use super::ipc::{self, Manager};
 
@@ -11,7 +11,8 @@ const CM_COPY_SRC_PATH_TO_CLIP: usize = 2029;
 const CM_COPY_TRG_PATH_TO_CLIP: usize = 2030;
 
 /// TTOTAL_CMD 窗口必须属于以下进程镜像之一，否则视为同类名伪装窗口，不发送协议消息
-const EXPECTED_PROCESS_NAMES: [&str; 3] = ["totalcmd.exe", "totalcmd64.exe", "totalcmd_unicode.exe"];
+const EXPECTED_PROCESS_NAMES: [&str; 3] =
+    ["totalcmd.exe", "totalcmd64.exe", "totalcmd_unicode.exe"];
 
 #[derive(Debug, Clone)]
 pub struct TotalCmdFolder {
@@ -117,7 +118,8 @@ pub fn get_totalcmd_folders() -> Vec<TotalCmdFolder> {
                 break;
             }
 
-            hwnd = FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
+            hwnd =
+                FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null()).unwrap_or_default();
         }
 
         // 扫描完成，立即恢复用户原始剪贴板（恢复失败仅记录，不影响扫描结果）

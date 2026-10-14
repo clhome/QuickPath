@@ -188,7 +188,11 @@ fn atomic_replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn MoveFileExW(lpExistingFileName: *const u16, lpNewFileName: *const u16, dwFlags: u32) -> i32;
+        fn MoveFileExW(
+            lpExistingFileName: *const u16,
+            lpNewFileName: *const u16,
+            dwFlags: u32,
+        ) -> i32;
     }
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x00000001;
@@ -253,13 +257,13 @@ impl AppConfig {
         let standard_path = standard_dir.join("config.json");
 
         // 平滑兼容历史版本可能遗留的旧双层路径：%APPDATA%\QuickPath\QuickPath\config\config.json
-        if !standard_path.exists() {
-            if let Some(old_proj) = directories::ProjectDirs::from("com", "QuickPath", "QuickPath") {
-                let old_path = old_proj.config_dir().join("config.json");
-                if old_path.exists() {
-                    let _ = fs::create_dir_all(&standard_dir);
-                    let _ = fs::copy(&old_path, &standard_path);
-                }
+        if !standard_path.exists()
+            && let Some(old_proj) = directories::ProjectDirs::from("com", "QuickPath", "QuickPath")
+        {
+            let old_path = old_proj.config_dir().join("config.json");
+            if old_path.exists() {
+                let _ = fs::create_dir_all(&standard_dir);
+                let _ = fs::copy(&old_path, &standard_path);
             }
         }
 
@@ -277,26 +281,28 @@ impl AppConfig {
 
         // 1. 尝试读取并解析主配置
         if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
-                    config.apply_migrations_and_sanitize();
-                    return config;
-                }
+            if let Ok(content) = fs::read_to_string(&path)
+                && let Ok(mut config) = serde_json::from_str::<AppConfig>(&content)
+            {
+                config.apply_migrations_and_sanitize();
+                return config;
             }
-            eprintln!("警告: 主配置文件 {:?} 格式异常，尝试从 .bak 备份回退...", path);
+            eprintln!(
+                "警告: 主配置文件 {:?} 格式异常，尝试从 .bak 备份回退...",
+                path
+            );
         }
 
         // 2. 尝试从备份配置恢复
-        if bak_path.exists() {
-            if let Ok(bak_content) = fs::read_to_string(&bak_path) {
-                if let Ok(mut config) = serde_json::from_str::<AppConfig>(&bak_content) {
-                    eprintln!("成功从备份配置文件 {:?} 恢复用户配置！", bak_path);
-                    isolate_corrupted_config(&path);
-                    config.apply_migrations_and_sanitize();
-                    let _ = config.save();
-                    return config;
-                }
-            }
+        if bak_path.exists()
+            && let Ok(bak_content) = fs::read_to_string(&bak_path)
+            && let Ok(mut config) = serde_json::from_str::<AppConfig>(&bak_content)
+        {
+            eprintln!("成功从备份配置文件 {:?} 恢复用户配置！", bak_path);
+            isolate_corrupted_config(&path);
+            config.apply_migrations_and_sanitize();
+            let _ = config.save();
+            return config;
         }
 
         // 3. 容灾隔离并启用默认配置
@@ -418,10 +424,11 @@ mod tests {
             "floating_bar_auto_show": false
         }"#;
 
-        let parsed: AppConfig = serde_json::from_str(minimal_json).expect("必须成功解析缺失字段的旧配置");
+        let parsed: AppConfig =
+            serde_json::from_str(minimal_json).expect("必须成功解析缺失字段的旧配置");
         assert_eq!(parsed.hotkey, "Alt+Q");
-        assert_eq!(parsed.floating_bar_auto_show, false);
-        assert_eq!(parsed.auto_switch_enabled, true); // 自动补齐默认值
+        assert!(!parsed.floating_bar_auto_show);
+        assert!(parsed.auto_switch_enabled); // 自动补齐默认值
         assert_eq!(parsed.schema_version, 1);
     }
 
@@ -432,16 +439,23 @@ mod tests {
         let _ = fs::create_dir_all(&temp_dir);
         set_test_config_path(Some(temp_dir.join("config.json")));
 
-        // 确保用户的设置（关闭悬浮吸附栏、自定义浏览器黑名单）不会被自愈逻辑无理改写
-        let mut config = AppConfig::default();
-        config.floating_bar_auto_show = false;
+        // 确保用户的设置(关闭悬浮吸附栏、自定义浏览器黑名单)不会被自愈逻辑无理改写
+        let mut config = AppConfig {
+            floating_bar_auto_show: false,
+            ..AppConfig::default()
+        };
         config.blacklist_processes.push("chrome.exe".to_string());
 
         config.apply_migrations_and_sanitize();
 
-        assert_eq!(config.floating_bar_auto_show, false, "用户关闭的悬浮栏绝不能被强制开启");
         assert!(
-            config.blacklist_processes.contains(&"chrome.exe".to_string()),
+            !config.floating_bar_auto_show,
+            "用户关闭的悬浮栏绝不能被强制开启"
+        );
+        assert!(
+            config
+                .blacklist_processes
+                .contains(&"chrome.exe".to_string()),
             "用户手动添加的黑名单进程绝不能被删除"
         );
 
@@ -451,13 +465,16 @@ mod tests {
 
     #[test]
     fn test_config_roundtrip_stays_in_isolated_path() {
-        let temp_dir = std::env::temp_dir().join(format!("qp_cfg_roundtrip_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("qp_cfg_roundtrip_{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
         let isolated = temp_dir.join("config.json");
         set_test_config_path(Some(isolated.clone()));
 
-        let mut config = AppConfig::default();
-        config.hotkey = "Alt+Shift+Q".to_string();
+        let mut config = AppConfig {
+            hotkey: "Alt+Shift+Q".to_string(),
+            ..AppConfig::default()
+        };
         config.history_folders.push("C:\\Windows".to_string());
         config.save().expect("隔离路径下保存必须成功");
 
@@ -508,7 +525,8 @@ mod tests {
 
         // 验证旧版 JSON 反序列化时自动补齐 tab_module 默认字段
         let old_json = r#"{"hotkey": "Ctrl+Q"}"#;
-        let parsed: AppConfig = serde_json::from_str(old_json).expect("必须成功解析缺失 tab_module 的旧配置");
+        let parsed: AppConfig =
+            serde_json::from_str(old_json).expect("必须成功解析缺失 tab_module 的旧配置");
         assert!(parsed.tab_module.enabled);
 
         // 验证多语言语言包包含 tab_module 标题与新增分组

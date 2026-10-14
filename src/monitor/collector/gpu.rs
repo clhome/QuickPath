@@ -1,13 +1,13 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use windows::core::w;
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW,
+    PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW, PdhOpenQueryW,
 };
 use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+use windows::core::w;
 
 const PDH_MORE_DATA: u32 = 0x800007D2;
 
@@ -61,12 +61,8 @@ impl GpuCollector {
             }
 
             let mut c = PDH_HCOUNTER::default();
-            let res = PdhAddEnglishCounterW(
-                q,
-                w!("\\GPU Engine(*)\\Utilization Percentage"),
-                0,
-                &mut c,
-            );
+            let res =
+                PdhAddEnglishCounterW(q, w!("\\GPU Engine(*)\\Utilization Percentage"), 0, &mut c);
 
             if res == 0 {
                 self.counter = Some(c);
@@ -154,7 +150,8 @@ impl GpuCollector {
             );
 
             let mut total_usage = 0.0f64;
-            let mut pid_usages: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+            let mut pid_usages: std::collections::HashMap<u32, f64> =
+                std::collections::HashMap::new();
             for item in items {
                 let val = item.FmtValue.Anonymous.doubleValue;
                 if val > 0.0 {
@@ -169,12 +166,10 @@ impl GpuCollector {
             if let Some((&top_pid, &max_val)) = pid_usages
                 .iter()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                && max_val >= 1.0
+                && let Some(name) = get_process_name_by_pid(top_pid)
             {
-                if max_val >= 1.0 {
-                    if let Some(name) = get_process_name_by_pid(top_pid) {
-                        top_process_display = name;
-                    }
-                }
+                top_process_display = name;
             }
 
             let clamped = (total_usage as f32).clamp(0.0, 100.0);

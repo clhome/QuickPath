@@ -1,15 +1,16 @@
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use windows::core::{s, w, HSTRING};
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
+use windows::core::{HSTRING, s, w};
 
 #[repr(C)]
 #[allow(non_snake_case)]
+#[allow(clippy::upper_case_acronyms)]
 struct OSVERSIONINFOEXW {
     dwOSVersionInfoSize: u32,
     dwMajorVersion: u32,
@@ -100,7 +101,11 @@ pub fn format_version_details(ver: &WindowsVersion, is_chinese: bool) -> String 
     };
 
     // 4. 组合最终展示字符串
-    let build_prefix = if is_chinese { "OS 内部版本" } else { "OS Build" };
+    let build_prefix = if is_chinese {
+        "OS 内部版本"
+    } else {
+        "OS Build"
+    };
 
     let mut parts = Vec::new();
     parts.push(os_name.to_string());
@@ -116,7 +121,7 @@ pub fn format_version_details(ver: &WindowsVersion, is_chinese: bool) -> String 
 }
 
 /// 检查当前系统是否满足文件资源管理器多标签页增强要求
-/// 
+///
 /// 最低系统基准：Windows 11 22H2 Build 22621+（具备包含原生 Tabs 的 XAML 架构文件资源管理器）
 pub fn is_tab_module_supported() -> bool {
     if MOCK_TAB_UNSUPPORTED.load(Ordering::Relaxed) {
@@ -140,16 +145,16 @@ fn query_windows_version() -> WindowsVersion {
     // 1. 调用 ntdll::RtlGetVersion 穿透兼容性垫片获取真实内核版本与内部 Build
     unsafe {
         let ntdll_mod = GetModuleHandleW(w!("ntdll.dll"));
-        if let Ok(hmod) = ntdll_mod {
-            if let Some(func_ptr) = GetProcAddress(hmod, s!("RtlGetVersion")) {
-                let rtl_get_version: RtlGetVersionFn = std::mem::transmute(func_ptr);
-                let mut os_info: OSVERSIONINFOEXW = std::mem::zeroed();
-                os_info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOEXW>() as u32;
-                if rtl_get_version(&mut os_info) == 0 {
-                    major = os_info.dwMajorVersion;
-                    minor = os_info.dwMinorVersion;
-                    build = os_info.dwBuildNumber;
-                }
+        if let Ok(hmod) = ntdll_mod
+            && let Some(func_ptr) = GetProcAddress(hmod, s!("RtlGetVersion"))
+        {
+            let rtl_get_version: RtlGetVersionFn = std::mem::transmute(func_ptr);
+            let mut os_info: OSVERSIONINFOEXW = std::mem::zeroed();
+            os_info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOEXW>() as u32;
+            if rtl_get_version(&mut os_info) == 0 {
+                major = os_info.dwMajorVersion;
+                minor = os_info.dwMinorVersion;
+                build = os_info.dwBuildNumber;
             }
         }
     }
@@ -164,7 +169,15 @@ fn query_windows_version() -> WindowsVersion {
         let sub_key = HSTRING::from(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
         let mut hkey = HKEY::default();
 
-        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, &sub_key, Some(0), KEY_QUERY_VALUE, &mut hkey).is_ok() {
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            &sub_key,
+            Some(0),
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        )
+        .is_ok()
+        {
             // 读取 DisplayVersion（如 "24H2", "23H2"）
             if let Some(val) = query_reg_string(hkey, "DisplayVersion") {
                 display_version = val;
@@ -188,12 +201,11 @@ fn query_windows_version() -> WindowsVersion {
             }
 
             // 若 RtlGetVersion 兜底未能获取 build，从注册表补充
-            if build == 0 {
-                if let Some(val) = query_reg_string(hkey, "CurrentBuildNumber") {
-                    if let Ok(b) = val.trim().parse::<u32>() {
-                        build = b;
-                    }
-                }
+            if build == 0
+                && let Some(val) = query_reg_string(hkey, "CurrentBuildNumber")
+                && let Ok(b) = val.trim().parse::<u32>()
+            {
+                build = b;
             }
 
             let _ = RegCloseKey(hkey);
@@ -272,8 +284,14 @@ mod tests {
         assert!(ver.build > 0, "Build should be non-zero");
         let formatted_zh = format_windows_version(true);
         let formatted_en = format_windows_version(false);
-        assert!(formatted_zh.contains("Windows"), "Should format valid zh string");
-        assert!(formatted_en.contains("Windows"), "Should format valid en string");
+        assert!(
+            formatted_zh.contains("Windows"),
+            "Should format valid zh string"
+        );
+        assert!(
+            formatted_en.contains("Windows"),
+            "Should format valid en string"
+        );
     }
 
     #[test]

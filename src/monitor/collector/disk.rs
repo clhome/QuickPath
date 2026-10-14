@@ -1,10 +1,10 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use windows::core::w;
 use windows::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW,
+    PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
+use windows::core::w;
 
 #[derive(Debug, Clone)]
 pub struct DiskMetrics {
@@ -67,12 +67,8 @@ impl DiskCollector {
             let mut c_read = PDH_HCOUNTER::default();
             let mut c_write = PDH_HCOUNTER::default();
 
-            let res_time = PdhAddEnglishCounterW(
-                q,
-                w!("\\PhysicalDisk(_Total)\\% Disk Time"),
-                0,
-                &mut c_time,
-            );
+            let res_time =
+                PdhAddEnglishCounterW(q, w!("\\PhysicalDisk(_Total)\\% Disk Time"), 0, &mut c_time);
             let res_read = PdhAddEnglishCounterW(
                 q,
                 w!("\\PhysicalDisk(_Total)\\Disk Read Bytes/sec"),
@@ -173,7 +169,10 @@ impl DiskCollector {
                 read_mb_s,
                 write_mb_s,
                 display: format!("D: {:2.0}%", activity.round()),
-                tooltip_display: format!("读取: {:.1} MB/s, 写入: {:.1} MB/s", read_mb_s, write_mb_s),
+                tooltip_display: format!(
+                    "读取: {:.1} MB/s, 写入: {:.1} MB/s",
+                    read_mb_s, write_mb_s
+                ),
             }
         }
     }

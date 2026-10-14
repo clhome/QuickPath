@@ -85,7 +85,8 @@ impl NetworkCollector {
         if self.initial_total_octets.is_none() {
             self.initial_total_octets = Some(cur_total);
         }
-        let total_session = cur_total.saturating_sub(self.initial_total_octets.unwrap_or(cur_total));
+        let total_session =
+            cur_total.saturating_sub(self.initial_total_octets.unwrap_or(cur_total));
 
         let last_time = match self.last_sample_time {
             Some(t) => t,

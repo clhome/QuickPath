@@ -2,22 +2,20 @@
 
 use std::thread;
 use std::time::Duration;
-use windows::core::{Interface, BSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomationInvokePattern, TreeScope_Descendants,
     UIA_AutomationIdPropertyId, UIA_InvokePatternId,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    keybd_event, KEYEVENTF_KEYUP, VK_CONTROL,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, VK_CONTROL, keybd_event};
 use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, IsWindow, PostMessageW, SetForegroundWindow, WM_COMMAND,
 };
+use windows::core::{BSTR, Interface};
 
 /// 尝试向 ShellTabWindowClass 发送 Windows 11 Explorer 内部原生创建新 Tab 的 0xA21B 魔法指令
 fn try_magic_command_add_tab(explorer_hwnd: HWND) -> bool {
@@ -33,12 +31,11 @@ fn try_magic_command_add_tab(explorer_hwnd: HWND) -> bool {
             None,
             windows::core::w!("ShellTabWindowClass"),
             None,
-        ) {
-            if !tab_wnd.0.is_null() {
-                // 采用 PostMessageW 异步安全投递，绝不阻塞 UI 消息泵（与 ExplorerTabUtility 架构对齐）
-                let _ = PostMessageW(Some(tab_wnd), WM_COMMAND, WPARAM(0xA21B), LPARAM(0));
-                return true;
-            }
+        ) && !tab_wnd.0.is_null()
+        {
+            // 采用 PostMessageW 异步安全投递，绝不阻塞 UI 消息泵（与 ExplorerTabUtility 架构对齐）
+            let _ = PostMessageW(Some(tab_wnd), WM_COMMAND, WPARAM(0xA21B), LPARAM(0));
+            return true;
         }
     }
     false
@@ -48,25 +45,20 @@ fn try_magic_command_add_tab(explorer_hwnd: HWND) -> bool {
 fn try_uia_add_button(explorer_hwnd: HWND) -> bool {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let uia: Result<IUIAutomation, _> = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
-        if let Ok(uia) = uia {
-            if let Ok(root) = uia.ElementFromHandle(explorer_hwnd) {
-                let auto_id = BSTR::from("AddButton");
-                let var_id = VARIANT::from(auto_id);
-                if let Ok(cond) = uia.CreatePropertyCondition(
-                    UIA_AutomationIdPropertyId,
-                    &var_id,
-                ) {
-                    if let Ok(btn) = root.FindFirst(TreeScope_Descendants, &cond) {
-                        if let Ok(pattern) = btn.GetCurrentPattern(UIA_InvokePatternId) {
-                            if let Ok(inv) = pattern.cast::<IUIAutomationInvokePattern>() {
-                                if inv.Invoke().is_ok() {
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-                }
+        let uia: Result<IUIAutomation, _> =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER);
+        if let Ok(uia) = uia
+            && let Ok(root) = uia.ElementFromHandle(explorer_hwnd)
+        {
+            let auto_id = BSTR::from("AddButton");
+            let var_id = VARIANT::from(auto_id);
+            if let Ok(cond) = uia.CreatePropertyCondition(UIA_AutomationIdPropertyId, &var_id)
+                && let Ok(btn) = root.FindFirst(TreeScope_Descendants, &cond)
+                && let Ok(pattern) = btn.GetCurrentPattern(UIA_InvokePatternId)
+                && let Ok(inv) = pattern.cast::<IUIAutomationInvokePattern>()
+                && inv.Invoke().is_ok()
+            {
+                return true;
             }
         }
     }

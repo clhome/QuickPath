@@ -8,32 +8,32 @@ pub mod tab;
 mod ui;
 mod win32;
 
-use dialog::{detect_file_dialog, inject_path_to_dialog, InjectDone};
+use dialog::{InjectDone, detect_file_dialog, inject_path_to_dialog};
 use managers::WindowTracker;
 use monitor::MonitorManager;
 use rules::AppConfig;
 use ui::tray::{
-    TrayIcon, IDM_EXIT, IDM_OPEN_SETTINGS, IDM_SHOW_CANDIDATES, IDM_TOGGLE_AUTOSTART,
-    IDM_TOGGLE_AUTOSWITCH, IDM_TOGGLE_MONITOR, WM_TRAY_CALLBACK,
+    IDM_EXIT, IDM_OPEN_SETTINGS, IDM_SHOW_CANDIDATES, IDM_TOGGLE_AUTOSTART, IDM_TOGGLE_AUTOSWITCH,
+    IDM_TOGGLE_MONITOR, TrayIcon, WM_TRAY_CALLBACK,
 };
 use ui::{FloatingBar, SettingsWindow};
 use win32::autostart::set_autostart;
-use win32::events::{get_active_foreground_window, WinEventHookGuard, WM_QUICKPATH_FOREGROUND};
+use win32::events::{WM_QUICKPATH_FOREGROUND, WinEventHookGuard, get_active_foreground_window};
 
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::thread;
 use std::time::Duration;
-use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
 };
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::UnregisterHotKey;
+use windows::core::w;
 
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, PostMessageW,
-    PostQuitMessage, RegisterClassW, TranslateMessage, MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, IsWindow, MSG, PostMessageW,
+    PostQuitMessage, RegisterClassW, TranslateMessage, WM_COMMAND, WM_DESTROY, WM_HOTKEY,
     WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
 
@@ -112,12 +112,11 @@ fn main() {
         // 1. 单实例互斥体防护，避免多个 QuickPath 驻留冲突
         let mutex_name = w!("Local\\QuickPath_SingleInstance_Mutex");
         let mutex = CreateMutexW(None, true, mutex_name);
-        if let Ok(_m) = mutex {
-            if windows::Win32::Foundation::GetLastError()
+        if let Ok(_m) = mutex
+            && windows::Win32::Foundation::GetLastError()
                 == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
-            {
-                return;
-            }
+        {
+            return;
         }
 
         // 2. 初始化 COM 库与 GDI+ 环境
@@ -432,10 +431,10 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
     };
 
     // 0. 如果前台窗口是悬浮吸附条自身，直接忽略，避免用户点击或交互时将吸附条误隐藏
-    if let Some(bar) = &state.floating_bar {
-        if bar.hwnd() == fg_hwnd {
-            return;
-        }
+    if let Some(bar) = &state.floating_bar
+        && bar.hwnd() == fg_hwnd
+    {
+        return;
     }
 
     let class_name = dialog::detector::get_window_class_name(fg_hwnd);
@@ -528,7 +527,10 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
 
         crate::dialog::detector::log_debug(&format!(
             "MAIN: Dlg detected! hwnd=0x{:X} title='{}' bar_is_some={} candidates={}",
-            dlg_info.hwnd.0 as usize, dlg_info.window_title, state.floating_bar.is_some(), candidates.len()
+            dlg_info.hwnd.0 as usize,
+            dlg_info.window_title,
+            state.floating_bar.is_some(),
+            candidates.len()
         ));
 
         // 3. 需求 3：无论何时打开文件对话框，悬浮吸附条均直接自动展示！
@@ -563,59 +565,59 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
         }
 
         // 4. 执行自动秒切逻辑 (AutoSwitch)
-        if state.config.auto_switch_enabled {
-            if let Some(target_folder) = state.tracker.get_auto_switch_target(&state.config) {
-                let should_inject = match dlg_info.kind {
-                    dialog::DialogKind::StandardWin32 => dlg_info.file_name_edit_hwnd.is_some(),
-                    dialog::DialogKind::WpsOffice => true,
-                };
+        if state.config.auto_switch_enabled
+            && let Some(target_folder) = state.tracker.get_auto_switch_target(&state.config)
+        {
+            let should_inject = match dlg_info.kind {
+                dialog::DialogKind::StandardWin32 => dlg_info.file_name_edit_hwnd.is_some(),
+                dialog::DialogKind::WpsOffice => true,
+            };
 
-                if should_inject {
-                    let delay_ms = state.config.auto_switch_delay_ms;
-                    let dlg_raw = dlg_info.hwnd.0 as usize;
-                    let edit_raw = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd).0 as usize;
-                    let target = target_folder.clone();
-                    let kind = dlg_info.kind;
-                    let already_retried = state.retried_dialog == Some(dlg_info.hwnd);
-                    let host_raw = HOST_HWND.load(Ordering::SeqCst) as usize;
+            if should_inject {
+                let delay_ms = state.config.auto_switch_delay_ms;
+                let dlg_raw = dlg_info.hwnd.0 as usize;
+                let edit_raw = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd).0 as usize;
+                let target = target_folder.clone();
+                let kind = dlg_info.kind;
+                let already_retried = state.retried_dialog == Some(dlg_info.hwnd);
+                let host_raw = HOST_HWND.load(Ordering::SeqCst) as usize;
 
-                    state.last_switched_dialog = Some(dlg_info.hwnd);
-                    state.last_switched_path = Some(target_folder.clone());
-                    state.config.record_history(&target_folder);
+                state.last_switched_dialog = Some(dlg_info.hwnd);
+                state.last_switched_path = Some(target_folder.clone());
+                state.config.record_history(&target_folder);
 
-                    // 延时秒切，确保宿主应用对话框完成初始化绘制与控件就绪
-                    thread::spawn(move || {
-                        thread::sleep(Duration::from_millis(delay_ms));
+                // 延时秒切，确保宿主应用对话框完成初始化绘制与控件就绪
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(delay_ms));
 
-                        // 注入**真实结果**回调：失败必须回报主线程，否则去重标记会让该对话框永远不再尝试秒切。
-                        // 标准对话框为同步回调；WPS 自绘对话框为异步回调（启动线程不等于注入成功）。
-                        let on_done: InjectDone = Box::new(move |injected| {
-                            if !injected && host_raw != 0 {
-                                unsafe {
-                                    let _ = PostMessageW(
-                                        Some(HWND(host_raw as *mut _)),
-                                        WM_QUICKPATH_INJECT_FAILED,
-                                        WPARAM(dlg_raw),
-                                        LPARAM(if already_retried { 1 } else { 0 }),
-                                    );
-                                }
+                    // 注入**真实结果**回调：失败必须回报主线程，否则去重标记会让该对话框永远不再尝试秒切。
+                    // 标准对话框为同步回调；WPS 自绘对话框为异步回调（启动线程不等于注入成功）。
+                    let on_done: InjectDone = Box::new(move |injected| {
+                        if !injected && host_raw != 0 {
+                            unsafe {
+                                let _ = PostMessageW(
+                                    Some(HWND(host_raw as *mut _)),
+                                    WM_QUICKPATH_INJECT_FAILED,
+                                    WPARAM(dlg_raw),
+                                    LPARAM(if already_retried { 1 } else { 0 }),
+                                );
                             }
-                        });
-
-                        let accepted = inject_path_to_dialog(
-                            HWND(dlg_raw as *mut _),
-                            HWND(edit_raw as *mut _),
-                            &target,
-                            kind,
-                            Some(on_done),
-                        );
-                        if !accepted {
-                            dialog::detector::log_debug(
-                                "MAIN: 注入请求未被受理（对话框已失效或路径非法）",
-                            );
                         }
                     });
-                }
+
+                    let accepted = inject_path_to_dialog(
+                        HWND(dlg_raw as *mut _),
+                        HWND(edit_raw as *mut _),
+                        &target,
+                        kind,
+                        Some(on_done),
+                    );
+                    if !accepted {
+                        dialog::detector::log_debug(
+                            "MAIN: 注入请求未被受理（对话框已失效或路径非法）",
+                        );
+                    }
+                });
             }
         }
     } else {
@@ -629,16 +631,16 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
 
             let is_wps = dialog::detector::is_wps_process_name(&process_name);
             let is_potential_dialog = if is_wps {
-                let is_wps_main = dialog::detector::is_wps_main_window(root_hwnd, &root_class, &root_title)
-                    || dialog::detector::is_wps_main_window(fg_hwnd, &class_name, &fg_title);
-                !is_wps_main && (
-                    root_class == "KcfdFileDialog"
-                    || root_class.contains("Kcfd")
-                    || root_class == "Qt5QWindowIcon"
-                    || class_name == "Qt5QWindowIcon"
-                    || root_class == "#32770"
-                    || class_name == "#32770"
-                )
+                let is_wps_main =
+                    dialog::detector::is_wps_main_window(root_hwnd, &root_class, &root_title)
+                        || dialog::detector::is_wps_main_window(fg_hwnd, &class_name, &fg_title);
+                !is_wps_main
+                    && (root_class == "KcfdFileDialog"
+                        || root_class.contains("Kcfd")
+                        || root_class == "Qt5QWindowIcon"
+                        || class_name == "Qt5QWindowIcon"
+                        || root_class == "#32770"
+                        || class_name == "#32770")
             } else {
                 // 非 WPS 进程：严格仅针对尚未初始化完成的 #32770 窗口进行有界渐进式重试
                 root_class == "#32770" || class_name == "#32770"
@@ -676,12 +678,12 @@ fn on_foreground_window_changed_impl(fg_hwnd: HWND, retry_count: u32) {
         {
             state.refreshed_dialog = None;
         }
-        if let Some(prev) = state.last_switched_dialog {
-            if !unsafe { IsWindow(Some(prev)).as_bool() } {
-                state.last_switched_dialog = None;
-                state.last_switched_path = None;
-                state.retried_dialog = None;
-            }
+        if let Some(prev) = state.last_switched_dialog
+            && !unsafe { IsWindow(Some(prev)).as_bool() }
+        {
+            state.last_switched_dialog = None;
+            state.last_switched_path = None;
+            state.retried_dialog = None;
         }
         if let Some(bar) = &state.floating_bar {
             bar.hide();
@@ -789,9 +791,9 @@ fn handle_wine_to_tab_request(target: HWND) {
 /// 已吞掉 Win+E 但标签接管未成功时的补偿动作：打开一个原生资源管理器窗口。
 /// 使用 System32 绝对路径，绝不使用裸程序名（避免命中 PATH 中的同名程序）。
 fn launch_native_explorer_window() {
-    use windows::core::HSTRING;
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::HSTRING;
 
     let Some(exe) = win32::trusted::system_tool("explorer.exe") else {
         dialog::detector::log_debug("WINE_TO_TAB: 无可信 explorer.exe，无法补偿原生窗口");
@@ -799,14 +801,7 @@ fn launch_native_explorer_window() {
     };
     let file = HSTRING::from(exe.as_os_str());
     unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            &file,
-            None,
-            None,
-            SW_SHOWNORMAL,
-        );
+        ShellExecuteW(None, w!("open"), &file, None, None, SW_SHOWNORMAL);
     }
 }
 
@@ -885,5 +880,3 @@ pub fn update_global_config(new_config: AppConfig) {
         }
     }
 }
-
-

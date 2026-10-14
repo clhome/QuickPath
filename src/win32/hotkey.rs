@@ -2,15 +2,15 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-    MOD_SHIFT, MOD_WIN,
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    UnregisterHotKey,
 };
 
 /// 解析快捷键字符串（如 "Ctrl+Q", "Ctrl+Alt+Space", "F4"）
 /// 返回 (HOT_KEY_MODIFIERS, vk_code)
 pub fn parse_hotkey(hotkey_str: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
     let parts: Vec<&str> = hotkey_str
-        .split(|c| c == '+' || c == '-' || c == ' ')
+        .split(['+', '-', ' '])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
@@ -35,13 +35,13 @@ pub fn parse_hotkey(hotkey_str: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
             "`" | "~" => key_code = Some(0xC0),
             _ => {
                 // F1 - F12
-                if upper.starts_with('F') && upper.len() >= 2 {
-                    if let Ok(num) = upper[1..].parse::<u32>() {
-                        if (1..=12).contains(&num) {
-                            key_code = Some(0x70 + (num - 1));
-                            continue;
-                        }
-                    }
+                if upper.starts_with('F')
+                    && upper.len() >= 2
+                    && let Ok(num) = upper[1..].parse::<u32>()
+                    && (1..=12).contains(&num)
+                {
+                    key_code = Some(0x70 + (num - 1));
+                    continue;
                 }
                 // 单字符 A-Z 或 0-9
                 if upper.len() == 1 {
@@ -61,7 +61,7 @@ pub fn parse_hotkey(hotkey_str: &str) -> Option<(HOT_KEY_MODIFIERS, u32)> {
 /// 格式化快捷键展示字符串，如将 "ctrl+q" 标准化为 "Ctrl + Q"
 pub fn format_hotkey_display(hotkey_str: &str) -> String {
     let parts: Vec<&str> = hotkey_str
-        .split(|c| c == '+' || c == '-' || c == ' ')
+        .split(['+', '-', ' '])
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .collect();
