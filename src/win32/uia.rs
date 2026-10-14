@@ -537,9 +537,32 @@ unsafe fn write_path_and_verify(
             return false;
         }
 
-        // 路径 1：受保护的剪贴板临时注入（快照 + 事务化恢复用户原剪贴板）。
+        // 路径 1（优先）：UIA `ValuePattern::SetValue` —— **完全不经过系统剪贴板**。
+        // 审计需求 `9549648` §3.4.4：「UIA SetValue 可用时优先使用，不经过剪贴板」。
+        // 必须检查返回值 + 回读校验，绝不以“调用过”当成功。
+        match pattern.SetValue(&BSTR::from(target)) {
+            Ok(()) => {
+                if wait_readback_match(pattern, target) {
+                    return true;
+                }
+                log_debug("UIA_INJECT: SetValue 已调用但回读不一致，降级使用剪贴板注入");
+            }
+            Err(err) => {
+                log_debug(&format!(
+                    "UIA_INJECT: SetValue 返回失败({:?})，降级使用剪贴板注入",
+                    err
+                ));
+            }
+        }
+
+        // 路径 2（兜底）：受保护的剪贴板临时注入（统一事务 API + 严格 sequence 归属）。
         // 每次 Ctrl+A / Ctrl+V 之前都重新核验身份、前台与控件焦点；
         // 任一环节不满足即立即中止，绝不把全局按键发给错误窗口。
+        // 归属无法证明（外部改写 / 序列号不可判定 / 事件史不可证明）时，临时写入直接失败，
+        // 闭包不会执行 → **不发送 Ctrl+V**，也不发送后续 Enter。
+        if !ctx.ready("剪贴板兜底注入") {
+            return false;
+        }
         let mut sequence_ok = false;
         let clipboard_result =
             crate::win32::clipboard::with_temporary_clipboard_text(target, || {
@@ -562,23 +585,14 @@ unsafe fn write_path_and_verify(
             }
             Err(err) => {
                 log_debug(&format!(
-                    "UIA_INJECT: 剪贴板安全守卫拒绝或恢复失败({:?})，降级使用 UIA SetValue",
+                    "UIA_INJECT: 剪贴板安全守卫拒绝或恢复失败({:?})，本次注入已放弃",
                     err
                 ));
                 false
             }
         };
 
-        if clipboard_injected && wait_readback_match(pattern, target) {
-            return true;
-        }
-
-        // 路径 2：UIA ValuePattern::SetValue（必须检查返回值，绝不以“调用过”当成功）
-        if pattern.SetValue(&BSTR::from(target)).is_err() {
-            log_debug("UIA_INJECT: SetValue 返回失败");
-            return false;
-        }
-        wait_readback_match(pattern, target)
+        clipboard_injected && wait_readback_match(pattern, target)
     }
 }
 
@@ -845,5 +859,52 @@ mod tests {
         assert!(!guarded_input_allowed(true, false, true));
         assert!(!guarded_input_allowed(true, true, false));
         assert!(!guarded_input_allowed(false, false, false));
+    }
+
+    /// 审计需求 `9549648` §3.4.4 / §3.5 用例 6：WPS 写入路径必须优先走 UIA `SetValue`
+    /// （不经过系统剪贴板），且**写入未校验通过时绝不发送后续 Enter**。
+    #[test]
+    fn test_wps_write_path_prefers_setvalue_and_never_enters_on_failure() {
+        const SOURCE: &str = include_str!("uia.rs");
+
+        // 1) `write_path_and_verify` 内部：SetValue 必须排在剪贴板注入之前
+        let start = SOURCE
+            .find("unsafe fn write_path_and_verify")
+            .expect("write_path_and_verify 必须存在");
+        let rest = &SOURCE[start..];
+        let end = rest
+            .find("unsafe fn wait_readback_match")
+            .expect("函数体必须能被切分");
+        let body = &rest[..end];
+        let set_value = body.find("SetValue(").expect("必须保留 UIA SetValue 路径");
+        let clipboard = body
+            .find("with_temporary_clipboard_text")
+            .expect("必须保留剪贴板兜底路径");
+        assert!(
+            set_value < clipboard,
+            "UIA SetValue 必须优先于剪贴板注入（§3.4.4：可用时优先且不经过剪贴板）"
+        );
+
+        // 2) `run_wps_injection` 内部：Enter 必须在写入校验之后，且校验失败必须提前 return
+        let run_start = SOURCE
+            .find("unsafe fn run_wps_injection")
+            .expect("run_wps_injection 必须存在");
+        let run_body = &SOURCE[run_start..];
+        let verify_call = run_body
+            .find("write_path_and_verify(&val_pattern")
+            .expect("必须调用写入校验");
+        let enter = run_body
+            .find("simulate_enter_checked(")
+            .expect("必须存在 Enter 终审");
+        assert!(verify_call < enter, "Enter 绝不能排在写入校验之前");
+        assert!(
+            run_body[verify_call..enter].contains("return false"),
+            "写入校验失败必须提前 return，绝不发送 Enter"
+        );
+        // 剪贴板注入的兜底不允许静默降级成 Enter
+        assert!(
+            body.contains("clipboard_injected && wait_readback_match(pattern, target)"),
+            "剪贴板注入必须经回读校验后才算成功"
+        );
     }
 }

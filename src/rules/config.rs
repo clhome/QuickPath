@@ -59,7 +59,15 @@ pub struct AppConfig {
     /// 适配文件管理器开关
     pub enable_win11_tabs: bool,
     pub enable_dopus: bool,
+    /// Total Commander 自动探测开关。
+    ///
+    /// **默认关闭**（审计需求 `9549648` §2.4 方案 B / §5.1 安全降级条件）：
+    /// TC 的路径回传只能依赖“让管理器把路径写进系统剪贴板”，而系统剪贴板无法提供
+    /// 可靠的更新来源保证。必须在明确理解“探测期间会短暂占用剪贴板”的前提下显式开启。
+    #[serde(default)]
     pub enable_totalcmd: bool,
+    /// XYplorer 自动探测开关。默认关闭，理由同上。
+    #[serde(default)]
     pub enable_xyplorer: bool,
     /// 外观主题：auto（跟随系统）, dark（深色模式）, light（浅色模式）
     pub theme: String,
@@ -172,8 +180,9 @@ impl Default for AppConfig {
             max_history_count: 15,
             enable_win11_tabs: true,
             enable_dopus: true,
-            enable_totalcmd: true,
-            enable_xyplorer: true,
+            // 剪贴板回传通道默认关闭：须用户显式开启（见字段文档）
+            enable_totalcmd: false,
+            enable_xyplorer: false,
             theme: "auto".to_string(),
             monitor: MonitorConfig::default(),
             tab_module: TabModuleConfig::default(),
@@ -326,6 +335,24 @@ impl AppConfig {
             changed = true;
         }
 
+        // 一次性安全迁移（审计需求 `9549648` §2.4 方案 B）：
+        // 历史版本的 TC / XYplorer 自动探测默认开启，而该探测只能让管理器把路径写进
+        // 系统剪贴板 —— 无法证明请求窗口内没有第三方更新。因此把所有存量配置**一次性
+        // 置为关闭**，以后必须用户显式开启才生效（迁移标记保证只执行一次，不会每次
+        // 启动都覆盖用户的选择）。
+        let migration_clipboard_probe = "clipboard_probe_opt_in_1_2_3".to_string();
+        if !self.applied_migrations.contains(&migration_clipboard_probe) {
+            self.applied_migrations
+                .push(migration_clipboard_probe.clone());
+            if self.enable_totalcmd {
+                self.enable_totalcmd = false;
+            }
+            if self.enable_xyplorer {
+                self.enable_xyplorer = false;
+            }
+            changed = true;
+        }
+
         // 仅对非法越界数值进行合理防御性校准（防止手动修改配置输入越界）
         if self.floating_bar_opacity < 40 || self.floating_bar_opacity > 100 {
             self.floating_bar_opacity = 88;
@@ -461,6 +488,50 @@ mod tests {
 
         set_test_config_path(None);
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    /// 审计需求 `9549648` §2.4 方案 B：剪贴板回传探测器（TC / XYplorer）必须**默认关闭**，
+    /// 且存量配置必须被一次性置为关闭；执行后不得再反复覆盖用户后续的显式开启。
+    #[test]
+    fn test_clipboard_probe_defaults_off_and_migrates_once() {
+        let default_cfg = AppConfig::default();
+        assert!(
+            !default_cfg.enable_totalcmd,
+            "Total Commander 自动探测必须默认关闭（只能靠系统剪贴板回传）"
+        );
+        assert!(
+            !default_cfg.enable_xyplorer,
+            "XYplorer 自动探测必须默认关闭（只能靠系统剪贴板回传）"
+        );
+
+        // 存量配置（旧版本默认 true）必须被一次性关掉，并留下迁移标记
+        let mut legacy = AppConfig {
+            enable_totalcmd: true,
+            enable_xyplorer: true,
+            ..AppConfig::default()
+        };
+        legacy.applied_migrations.clear();
+        legacy.apply_migrations_and_sanitize();
+        assert!(
+            !legacy.enable_totalcmd && !legacy.enable_xyplorer,
+            "存量配置必须被迁移为关闭"
+        );
+        assert!(
+            legacy
+                .applied_migrations
+                .iter()
+                .any(|m| m == "clipboard_probe_opt_in_1_2_3"),
+            "必须留下一次性迁移标记"
+        );
+
+        // 迁移只执行一次：用户显式开启后再次规整不得被重新关掉
+        legacy.enable_totalcmd = true;
+        legacy.enable_xyplorer = true;
+        legacy.apply_migrations_and_sanitize();
+        assert!(
+            legacy.enable_totalcmd && legacy.enable_xyplorer,
+            "用户显式开启后不得被每次启动的规整逻辑重新关闭"
+        );
     }
 
     #[test]

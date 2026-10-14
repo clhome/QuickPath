@@ -23,6 +23,15 @@ pub struct XYplorerFolder {
 }
 
 /// 扫描系统中所有运行的 XYplorer 窗口及其打开的路径
+///
+/// **审计需求 `9549648` §2.4 方案 B**：XYplorer 的路径回传只能依赖脚本 `copytext`
+/// （即系统剪贴板），而 `WM_CLIPBOARDUPDATE` 在**处理时**才采样 owner/sequence，
+/// 无法回溯“更新发生瞬间”的历史来源。因此：
+/// - 本探测器**默认关闭**（`AppConfig::enable_xyplorer` 默认 false，存量配置一次性迁移为
+///   关闭），只有用户显式开启才会被后台扫描调用；
+/// - 归属判据已收回 fail-closed：请求窗口内必须**恰好一次**可归因更新，否则事务返回
+///   `AbortedEventHistoryUnprovable`，既不认领结果也不恢复旧快照；
+/// - 不得把“事件环 + 最终 owner”当作“请求期间无第三方更新”的证明。
 pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
     let mut results = Vec::new();
 
@@ -51,8 +60,10 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
             return results;
         }
 
-        // P0 安全守卫：在枚举前开启剪贴板事务（完整快照，含文件列表 CF_HDROP、截图位图等）。
+        // 安全守卫：在枚举前开启剪贴板事务（完整快照，含文件列表 CF_HDROP、截图位图等）。
         // 若剪贴板被占用或关键格式无法保真备份，宁可放弃扫描，绝不破坏用户剪贴板！
+        // 注意：临时清空/写入/恢复全部走统一原子原语（持锁期内复核 sequence），
+        // 切换归属不可证明时一律 fail-closed，绝不用旧快照覆盖用户当前内容。
         let mut tx = match ClipboardTransaction::begin() {
             Ok(tx) => tx,
             Err(_) => return results,
@@ -74,8 +85,9 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
                 continue;
             }
 
-            // 目标来源校验（P0-04 竞态 B）：只认「与目标窗口同进程」的剪贴板更新。
-            // 该窗口的进程镜像已在上方逐窗核对，因此这里的 pid 可信。
+            // 目标窗口进程 id：仅用于**排除**明显的外部来源（非目标进程的更新直接判
+            // `NotOwned`）。**不得**把它当成“请求期间无第三方更新”的证明——处理时采样
+            // 无法回溯历史 owner；真正的 fail-closed 判据在事务内部（请求窗口恰好一次更新）。
             let target_pid = ipc::window_process_id(hwnd);
 
             // 1./2. 依次探测活动窗格与非活动窗格。

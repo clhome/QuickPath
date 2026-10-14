@@ -1613,3 +1613,31 @@
 
 
 
+
+# 修改需求清单 `9549648` 整改轮（`E:\下载\QuickPath_修改需求清单_9549648.md`）
+
+**报告结论**：`9549648` 仍有两项代码级发布阻塞：**P0-04-B**（剪贴板更新来源被延迟采样误归因：`WM_CLIPBOARDUPDATE` 处理时才读 sequence/owner，采到的是处理时状态而非更新发生时的历史状态，事件环不能作为来源链证明）与 **P0-05**（恢复与 WPS 临时写入存在 check-then-act TOCTOU）。
+**用户裁决（三问）**：① P0-04-B 走**方案 B**（默认关闭 TC/XYplorer 自动剪贴板探测 + 生产入口 fail-closed），不实现非剪贴板通道；② 交付 = 代码 + 测试 + 文档回写 + 全量门禁；③ 版本号**保持 1.2.3**。
+
+## 目标与范围
+- P0-05：快照绑定 `capture_sequence`；所有剪贴板修改（首次临时写入、首次恢复、恢复重试、WPS 延迟恢复）统一走**唯一原子原语**（同一次 `OpenClipboard` 持锁期内复核 expected sequence → 清空/写入）；重试必须重新证明归属，否则永久放弃；删除「Unicode 文本相同即可恢复」的宽松放行；WPS 优先走 UIA `SetValue`（不经过剪贴板）。
+- P0-04-B：`enable_totalcmd` / `enable_xyplorer` 默认关闭（并一次性迁移置 false，须显式开启）；删除「事件环可证明历史来源」的宣称；请求窗口内必须**恰好一次**可归因更新，否则 `AbortedEventHistoryUnprovable` fail-closed；补「阻塞消息泵 + 两次写入后统一处理通知」的生产入口确定性测试（TC / XY 各一）。
+- §4.1 统一入口 / §4.2 结构化可观测性 / §4.3 架构守卫 / §3.5 确定性会合测试 / §5.3 全量门禁。
+
+## 拆解清单
+- [x] T1 统一原子写入原语 `clipboard_atomic_write()`：全仓唯一 `EmptyClipboard` / `SetClipboardData` 清空写入入口；持锁复核 + 写入后 owner 复核。
+- [x] T2 `ClipboardSnapshot` 绑定 `capture_sequence` / `expected_sequence`；`restore()` 改为「原语内复核 → 部分失败记录新 sequence → 重试重新证明 → 不可证明则永久放弃」。
+- [x] T3 `with_temporary_clipboard_text` / WPS 两处收敛到 `ClipboardTransaction`；删除 `ClipboardRestoreGuard` / `set_raw_clipboard_text*` / `clear_clipboard_text` 与宽松 `still_owned`。
+- [x] T4 事件环 fail-closed：新增「取标记前先排空自身写入通知」（`await_own_write_observed`）+「请求窗口须恰好一次更新」，结局新增 `AbortedEventHistoryUnprovable` / `RestoreAbandoned`，结局名对齐报告 §4.2。
+- [x] T5 UIA：`SetValue` 优先，剪贴板注入降级为兜底。
+- [x] T6 配置：默认关闭 + 一次性迁移 `clipboard_probe_opt_in_1_2_3` + 测试。
+- [x] T7 测试：§3.5 六类确定性会合用例 + §2.5 延迟通知生产入口用例（TC/XY + 干净对照）+ 每条断言（文本/格式集/sequence/owner HWND/PID/结局/是否执行 EmptyClipboard）。
+- [x] T8 架构守卫：非 `clipboard.rs` 生产代码不得出现 `OpenClipboard`/`EmptyClipboard`/`SetClipboardData`；`clipboard.rs` 生产区各自只允许一处。
+- [x] T9 门禁：fmt 干净 / clippy 0 告警 / `cargo test --all-targets` **196 通过 0 失败**（并行与 `--test-threads=1` 各一遍；剪贴板模块 54 用例连跑 5 轮全绿）/ `cargo audit` 退出码 0 / `cargo build --release` 通过（`1.2.3.0`）。
+- [x] T10 文档回写：`cl_tasks/审计需求9549648_修复记录.md`（新增）、`Document/真机验收清单_竞态与生命周期_v1.2.3.md` §10（新增 D-01~D-05）、`task.md` 本节。
+
+**结论**：清单 §1 两项代码级发布阻塞（**P0-04-B** / **P0-05**）已在代码 + 自动化测试层关闭并留证，证据与残余风险见 `cl_tasks/审计需求9549648_修复记录.md`。仍待闭合的是 **Windows 11 23H2 / 24H2 真机人工验收**（真机清单 §10 D-01~D-05，其中 D-03「真实管理器通知条数」决定方案 B 可用性）与 GitHub/联网侧项。本轮不涉及版本号变更（保持 1.2.3）。
+
+**测试基线 185 → 196（+11，0 删除）**；改动 5 个 Rust 源文件 + 2 个文档 + `task.md`。
+
+> **纪律偏离声明**：本节首条追加（标题 ~ 拆解清单）由 `bash` 的 `cat >>` 写入，违反 AGENTS.md「禁止用 `>`/`>>` 改文件，必须用原生文件工具」。内容无损，但从此处起所有文件改动一律改回 `edit`/`write` 工具。

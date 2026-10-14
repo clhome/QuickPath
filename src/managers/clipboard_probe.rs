@@ -27,10 +27,12 @@ pub struct PanelProbe {
 /// 1. 写前归属校验：第二次及后续写入前，检出外部改写立即返回 `Err`，
 ///    调用方必须中止整轮扫描，绝不覆盖用户刚复制的新内容；
 /// 2. `QuickPath` 自己写入空文本以清空剪贴板（登记序列号与精确文本）；
-/// 3. 请求管理器把路径写入剪贴板；
-/// 4. 记下请求开始标记，并在请求返回后**证明更新来源**才登记序列号：请求期间一旦
-///    出现非 `is_expected_source` 认可的剪贴板更新，立即返回 `Err(NotOwned)`
-///    （审计报告 P0-04 竞态 B，绝不无条件认领最终状态）。
+/// 3. **排空自身写入通知**后才取请求标记：请求窗口的来源判据是「窗口内恰好一次
+///    可归因更新」，若本次临时写入的通知迟到落进窗口，会把合法扫描误判为不可证明；
+/// 4. 请求管理器把路径写入剪贴板；
+/// 5. 在请求返回后**证明更新历史**才登记序列号：请求窗口内出现非目标来源的更新，
+///    或更新数量不为 1 / 状态与当前不符（延迟采样不可归因），一律立即返回 `Err`
+///    （审计需求 `9549648` §2.4 方案 B，绝不无条件认领最终状态）。
 ///
 /// `is_expected_source` 接收剪贴板 owner 的进程 id，返回 `true` 表示该进程就是本次
 /// 请求的目标管理器。管理器实现应传入「目标窗口所属进程 id」的比对闭包。
@@ -45,6 +47,8 @@ where
 {
     tx.ensure_still_owned()?;
     tx.write_owned_text("")?;
+    // 必须先把本次写入自己触发的通知排空，再取标记（见步骤 3）。
+    tx.await_own_write_observed()?;
 
     // 请求前记下事件标记：这之后登记的剪贴板更新都属于本次请求窗口
     let marker = tx.request_marker();
@@ -111,25 +115,37 @@ pub fn log_probe_abort(manager: &str, err: &ClipboardTransactionError) {
 }
 
 /// 剪贴板恢复结局的统一日志（绝不记录真实剪贴板内容，只记结局与原因）。
-/// 保留既有 `CLIPBOARD_RESTORE_FAILED(<manager>)` 日志语义。
+/// 日志只输出结构化状态 + 可选错误码，不含任何路径 / 文本 / HTML / RTF。
 pub fn log_restore_outcome(manager: &str, outcome: &ClipboardTransactionOutcome) {
     match outcome {
-        ClipboardTransactionOutcome::Restored => {}
+        ClipboardTransactionOutcome::Committed => {}
         ClipboardTransactionOutcome::SkippedForeignChange => {
             crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_RESTORE_SKIPPED({}): 检出第三方改写剪贴板，保留用户新内容不覆盖",
+                "CLIPBOARD_RESTORE_SKIPPED({}): SkippedForeignChange，保留用户新内容不覆盖",
                 manager
             ));
         }
-        ClipboardTransactionOutcome::ReadFailed => {
+        ClipboardTransactionOutcome::SkippedUnknownOwner => {
             crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_RESTORE_FAILED({}): 剪贴板归属不可判定（读回/序列号失败），已放弃恢复以避免覆盖",
+                "CLIPBOARD_RESTORE_FAILED({}): SkippedUnknownOwner，归属不可判定已放弃恢复以避免覆盖",
                 manager
             ));
         }
-        ClipboardTransactionOutcome::RestoreFailed(err) => {
+        ClipboardTransactionOutcome::AbortedEventHistoryUnprovable => {
             crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_RESTORE_FAILED({}): {:?}",
+                "CLIPBOARD_PROBE_UNPROVABLE({}): AbortedEventHistoryUnprovable，请求窗口内更新历史不可证明已放弃认领",
+                manager
+            ));
+        }
+        ClipboardTransactionOutcome::RestoreAbandoned => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_RESTORE_ABANDONED({}): RestoreAbandoned，恢复中检出变化已永久放弃该快照",
+                manager
+            ));
+        }
+        ClipboardTransactionOutcome::RestorePartialFailure(err) => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_RESTORE_FAILED({}): RestorePartialFailure({:?})",
                 manager, err
             ));
         }
@@ -158,7 +174,8 @@ mod tests {
             for forbidden in [
                 "ClipboardSnapshot::capture",
                 "ClipboardRestoreGuard::new",
-                "clear_clipboard_text",
+                "EmptyClipboard",
+                "SetClipboardData",
                 "restore_now",
             ] {
                 assert!(

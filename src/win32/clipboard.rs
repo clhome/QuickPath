@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM,
     WPARAM,
@@ -19,7 +19,7 @@ use windows::Win32::System::DataExchange::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
-    GHND, GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
@@ -86,8 +86,9 @@ pub enum RestoreStatus {
     Restored,
     /// 此前已成功恢复过，无需重复操作
     AlreadyRestored,
-    /// 恢复前发现剪贴板已被第三方改写，主动放弃覆盖以保护用户刚复制的新内容
-    SkippedForeignChange,
+    /// 序列号不一致 / owner 不匹配 / 状态不明：**永久放弃**该快照，绝不清空或写入
+    /// （审计需求 `9549648` §3.4.3）
+    Abandoned,
 }
 
 impl std::fmt::Display for ClipboardSafetyError {
@@ -150,6 +151,14 @@ const CLIPBOARD_EVENT_CAPACITY: usize = 64;
 /// `WM_CLIPBOARDUPDATE` 是投递消息，登记可能落后于写入；机器繁忙 / CI runner 较慢时
 /// 需要比“几毫秒”更宽松的预算，否则会把正常的滞后误判为「来源链不可证明」。
 const CLIPBOARD_EVENT_COVER_POLLS: u32 = 200;
+
+/// 「排空自身写入通知」时要求的静默时长：最后一次登记追平自身序列号后，
+/// 仍需连续这么多毫秒没有新通知，才认定本次写入的全部通知都已登记完毕。
+///
+/// 为什么必须排空：请求窗口的来源判据是「窗口内恰好一次可归因更新」；
+/// 若本事务自身那次临时写入的通知迟到、落进请求窗口，就会把合法扫描误判为
+/// 不可证明（fail-closed 的误伤）。实测通知延迟在 0~16ms 量级，故取 5ms 为静默阈值。
+const CLIPBOARD_QUIESCE_MS: u32 = 5;
 
 static CLIPBOARD_EVENTS: Mutex<VecDeque<ClipboardUpdateEvent>> = Mutex::new(VecDeque::new());
 /// 已登记事件总数（即下一个事件的序号）；作为请求开始标记，避免依赖清空环。
@@ -237,6 +246,48 @@ fn clipboard_update_log_covers(sequence: u32) -> bool {
     false
 }
 
+/// 有界等待「本次写入触发的全部通知都已登记且事件环已静默」。
+///
+/// 供 `probe_panel_path` 在**取请求标记之前**调用：只有把自身那次临时写入的通知
+/// 排空，请求窗口里的「恰好一次更新」计数才只统计到第三方的更新。
+fn clipboard_update_log_quiesced(expected_sequence: u32) -> bool {
+    if !clipboard_update_log_covers(expected_sequence) {
+        return false;
+    }
+    let mut last_total = CLIPBOARD_EVENT_TOTAL.load(Ordering::SeqCst);
+    let mut quiet_since = Instant::now();
+    let deadline = Instant::now() + Duration::from_millis(u64::from(CLIPBOARD_QUIESCE_MS) * 8);
+    while Instant::now() < deadline {
+        let total = CLIPBOARD_EVENT_TOTAL.load(Ordering::SeqCst);
+        if total != last_total {
+            last_total = total;
+            quiet_since = Instant::now();
+        } else if quiet_since.elapsed() >= Duration::from_millis(u64::from(CLIPBOARD_QUIESCE_MS)) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    // 静默窗口内一直有新事件：来源无法收敛，判为不可证明（fail-closed）。
+    false
+}
+
+/// 测试期会合点：等待事件环在 `marker` 之后登记到至少 `count` 条事件（超时返回 false）。
+#[cfg(test)]
+fn wait_for_events_after(marker: u64, count: u64, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if CLIPBOARD_EVENT_TOTAL
+            .load(Ordering::SeqCst)
+            .saturating_sub(marker)
+            >= count
+        {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    false
+}
+
 impl std::error::Error for ClipboardSafetyError {}
 
 /// 测试期强制「剪贴板被占用」注入（同进程内无法真实模拟跨进程独占）
@@ -255,10 +306,80 @@ static TEST_FORCE_SEQ_ZERO: std::sync::atomic::AtomicBool =
 static TEST_FORCE_NO_OWNER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// 测试期写入竞态注入：在 `write_owned_text()` 的「写前校验」与「持锁复核」之间执行一次
-/// 注入动作，用于确定性地复现审计报告 P0-04 竞态 A（检查通过后、写入前的外部改写）。
+/// 测试期会合点：在统一原子写入原语**开始之前**执行一次注入动作。
+///
+/// 这是确定性复现「决策通过后、真正持锁复核前发生外部写入」的会合点：
+/// 既覆盖审计报告 P0-04 竞态 A（写入方向），也覆盖清单 9549648 §3.5 的恢复方向。
 #[cfg(test)]
-static TEST_BEFORE_WRITE_RECHECK: Mutex<Option<Box<dyn FnOnce() + Send>>> = Mutex::new(None);
+struct AtomicWriteTestHook {
+    /// 跳过前面这么多次原子写入后再执行（用于「第一次恢复部分失败、第二次重试前」的交错）
+    skip: usize,
+    action: Box<dyn FnOnce() + Send>,
+}
+
+#[cfg(test)]
+static TEST_BEFORE_ATOMIC_WRITE: Mutex<Option<AtomicWriteTestHook>> = Mutex::new(None);
+
+/// 测试注入：安排在下一次（可跳过前 `skip` 次）统一原子写入开始之前执行 `action`。
+#[cfg(test)]
+fn arm_atomic_write_hook(skip: usize, action: impl FnOnce() + Send + 'static) {
+    *TEST_BEFORE_ATOMIC_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AtomicWriteTestHook {
+        skip,
+        action: Box::new(action),
+    });
+}
+
+/// 执行（并消费）原子写入会合点。
+#[cfg(test)]
+fn run_atomic_write_hook() {
+    let mut guard = TEST_BEFORE_ATOMIC_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ready = match guard.as_mut() {
+        None => false,
+        Some(hook) => {
+            if hook.skip > 0 {
+                hook.skip -= 1;
+                false
+            } else {
+                true
+            }
+        }
+    };
+    if !ready {
+        return;
+    }
+    let hook = guard.take();
+    drop(guard);
+    if let Some(hook) = hook {
+        (hook.action)();
+    }
+}
+
+/// 测试期统计：统一原子原语真正执行过多少次 `EmptyClipboard`。
+/// 用于断言「检出外部改写后必须零修改退出」「Drop 不得发生第二次恢复」等。
+#[cfg(test)]
+static TEST_EMPTY_CLIPBOARD_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// owner 消息泵测试会合点：消息泵在此阻塞，直到用例放行。
+///
+/// 用途：确定性复现清单 §2.3「两次剪贴板更新都已发生、通知尚未处理」的交错 ——
+/// 这是 P0-04-B 的核心反例，必须经**真实生产事件采集入口**验证。
+#[cfg(test)]
+struct OwnerPumpBlock {
+    reached_tx: mpsc::Sender<()>,
+    release_rx: Mutex<mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+static TEST_OWNER_PUMP_BLOCK: Mutex<Option<OwnerPumpBlock>> = Mutex::new(None);
+
+/// 测试期专用窗口消息：让 owner 线程在消息泵内部阻塞（`WM_APP + 0x51`）。
+#[cfg(test)]
+const WM_QP_TEST_BLOCK_PUMP: u32 = 0x8000 + 0x51;
 
 /// 带指数退避的剪贴板独占打开函数
 fn open_clipboard_with_retry(hwnd: Option<HWND>, max_retries: u32) -> bool {
@@ -375,6 +496,23 @@ unsafe extern "system" fn clipboard_owner_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
+    // 测试期会合点：按用例指令在消息泵内部阻塞（只影响测试构建）。
+    #[cfg(test)]
+    if msg == WM_QP_TEST_BLOCK_PUMP {
+        let hook = TEST_OWNER_PUMP_BLOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(hook) = hook {
+            let _ = hook.reached_tx.send(());
+            let _ = hook
+                .release_rx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recv_timeout(Duration::from_secs(30));
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
     match msg {
         // 审计报告 R-06：显式退出协议。收到 `WM_CLOSE` 时销毁窗口，`DestroyWindow`
         // 会在同一线程上同步派发 `WM_DESTROY`。
@@ -818,6 +956,10 @@ fn open_clipboard_for_read(max_retries: u32) -> bool {
 }
 
 /// 剪贴板快照数据，存储全量枚举格式的原始内存块副本
+///
+/// 审计需求 `9549648` §3.4.1：快照必须与**捕获时刻的 `capture_sequence`** 绑定，
+/// 否则「捕获 → 清空/写入」与「检查 → 恢复」两处都会出现 check-then-act 窗口
+/// （用户在这两个窗口内复制的新内容会被旧快照静默覆盖）。
 pub struct ClipboardSnapshot {
     /// 各格式数据 (format_id, raw_bytes)
     pub items: Vec<(u32, Vec<u8>)>,
@@ -829,16 +971,17 @@ pub struct ClipboardSnapshot {
     restored_formats: Vec<u32>,
     /// 是否已执行过一次 EmptyClipboard
     emptied: bool,
-    /// 是否因检出第三方改写而主动放弃，一旦放弃不再做任何补救
+    /// 是否已**永久放弃**该快照（外部改写 / 归属不可判定）。一旦放弃不再做任何补救，
+    /// `Drop` 也不得再补写（§3.4.3 第 4 条）。
     abandoned: bool,
-    /// 写入临时内容后的剪贴板序列号（并发覆盖防护）
-    owned_seq: Option<u32>,
-    /// 写入临时内容的精确文本（序列号变化时作为归属终审依据）
+    /// 捕获时（持锁期内）读到的剪贴板序列号；0 表示不可判定（不得自动恢复）
+    capture_sequence: u32,
+    /// 该快照当前在剪贴板上对应的序列号：初值为 `capture_sequence`，
+    /// 本快照每次成功清空/写入后更新为本次写入产生的新序列号。
+    /// 所有清空/写入都必须在持锁期内核对该值（§3.4.2）。
+    expected_sequence: u32,
+    /// 最近一次由本快照写入的精确文本（仅供诊断定位，绝不记入日志）
     owned_text: Option<String>,
-    /// 严格归属模式：仅按序列号判定持有，禁用「序列号变了但文本仍相等即视为持有」的
-    /// fail-open 回退。仅由 `note_temporary_write_strict`（剪贴板事务 API）开启，
-    /// 既有 `ClipboardRestoreGuard` 路径保持原语义不变。
-    strict_ownership: bool,
 }
 
 impl ClipboardSnapshot {
@@ -849,6 +992,11 @@ impl ClipboardSnapshot {
             return Err(ClipboardSafetyError::Busy);
         }
 
+        // 持锁期内读取序列号：此刻无人能修改剪贴板，该值就是**本次捕获内容**的序列号。
+        // （注意 `GetClipboardSequenceNumber` 在 `CloseClipboard` 之后才自增，
+        //  所以持锁期内读到的正是“已存在内容”的序列号。）
+        let capture_sequence = clipboard_sequence_number();
+
         let mut items = Vec::new();
         let mut total_bytes = 0usize;
         let was_empty;
@@ -858,7 +1006,7 @@ impl ClipboardSnapshot {
             if count == 0 {
                 was_empty = true;
                 let _ = CloseClipboard();
-                return Ok(Self::empty(items, was_empty));
+                return Ok(Self::empty(items, was_empty, capture_sequence));
             }
 
             was_empty = false;
@@ -999,10 +1147,10 @@ impl ClipboardSnapshot {
             }
         }
 
-        Ok(Self::empty(items, was_empty))
+        Ok(Self::empty(items, was_empty, capture_sequence))
     }
 
-    fn empty(items: Vec<(u32, Vec<u8>)>, was_empty: bool) -> Self {
+    fn empty(items: Vec<(u32, Vec<u8>)>, was_empty: bool, capture_sequence: u32) -> Self {
         Self {
             items,
             was_empty,
@@ -1010,53 +1158,24 @@ impl ClipboardSnapshot {
             restored_formats: Vec::new(),
             emptied: false,
             abandoned: false,
-            owned_seq: None,
+            capture_sequence,
+            expected_sequence: capture_sequence,
             owned_text: None,
-            strict_ownership: false,
         }
     }
 
-    /// 记录本次向剪贴板写入临时内容后的归属信息（序列号 + 精确文本），
-    /// 供 `restore()` 判断“这份临时内容是否仍归本次操作所有”。
-    pub fn note_temporary_write(&mut self, text: &str, sequence: u32) {
-        self.owned_seq = Some(sequence);
+    /// 捕获时刻（持锁期内）的剪贴板序列号；0 表示不可判定。
+    pub fn capture_sequence(&self) -> u32 {
+        self.capture_sequence
+    }
+
+    /// 把快照绑定到「本进程刚刚写入剪贴板的那个序列号」。
+    ///
+    /// 每次成功清空/写入后都要重新绑定，否则下次恢复会拿过期的期望值去核对。
+    pub fn bind_owned_write(&mut self, text: &str, sequence: u32) {
+        self.expected_sequence = sequence;
         self.owned_text = Some(text.to_string());
     }
-
-    /// 记录临时写入的归属信息，并开启**严格 sequence 判定**（剪贴板事务 API 专用）。
-    ///
-    /// 与 `note_temporary_write` 的唯一区别：序列号变化时不再用「文本相等」兜底，
-    /// 从而满足审计报告 §2.5「用户复制的内容与临时文本恰好相同时仍须按 sequence
-    /// 识别外部改写」。既有守卫路径不得调用本方法，以免既有语义漂移。
-    pub fn note_temporary_write_strict(&mut self, text: &str, sequence: u32) {
-        self.note_temporary_write(text, sequence);
-        self.strict_ownership = true;
-    }
-
-    /// 剪贴板当前是否仍由本次临时写入持有。
-    ///
-    /// 序列号相同 → 期间无人改写，判定为持有；
-    /// 序列号变化 → 再比对 Unicode 文本是否仍精确等于本次注入文本：
-    /// 相等（多为剪贴板管理器附加自有格式）仍视为持有，不等则第三方已写入新内容，
-    /// 此时必须拒绝覆盖，否则会静默吃掉用户刚复制的东西。
-    fn still_owned(&self) -> bool {
-        let (Some(seq), Some(text)) = (self.owned_seq.as_ref(), self.owned_text.as_ref()) else {
-            // 未写入过临时内容（纯快照 → 原样恢复）
-            return true;
-        };
-        if clipboard_sequence_number() == *seq {
-            return true;
-        }
-        // 严格模式（事务 API）：序列号已变即视为外部改写，即便当前文本与本次临时文本
-        // 恰好相等也绝不视为持有（报告 §2.5）。
-        if self.strict_ownership {
-            return false;
-        }
-        // 兼容模式（既有守卫路径，语义不漂移）：文本仍精确相等时视为持有，
-        // 多为剪贴板管理器附加自有格式导致序列号变化。
-        matches!(get_clipboard_text(), Some(cur) if cur == *text)
-    }
-
     /// 尚未成功写回的格式 ID 列表
     fn pending_formats(&self) -> Vec<u32> {
         self.items
@@ -1068,78 +1187,90 @@ impl ClipboardSnapshot {
 
     /// 还原剪贴板至快照状态。
     ///
-    /// 语义保证：
-    /// 1. 逐格式检查 `GlobalAlloc` / `GlobalLock` / `SetClipboardData` 返回值，记录每个格式是否写回成功；
-    /// 2. 只有全部格式成功才返回 `Ok(Restored)` 并置 `restored = true`，失败返回结构化错误；
-    /// 3. 失败只做有限次重试，且重试仅补写未成功格式（不再 EmptyClipboard，避免已恢复格式被清掉）；
-    /// 4. 恢复前校验剪贴板归属，若已被第三方改写则返回 `SkippedForeignChange` 且绝不覆盖。
+    /// 语义保证（审计需求 `9549648` §3.4.2 / §3.4.3）：
+    /// 1. 首次恢复与**每一次重试**都走统一原子原语：在**同一次 `OpenClipboard` 持锁期**
+    ///    内核对该轮期望的 `sequence`，不一致就零修改退出（消除 check-then-act 窗口）；
+    /// 2. 部分格式失败时，记录本次写入产生的新 `sequence`，下一次重试重新持锁核对；
+    /// 3. 序列号不一致 / owner 不匹配 / 状态不明 → **永久放弃**该快照，不清空、不写入，
+    ///    `Drop` 也不得再补写；
+    /// 4. 只有全部格式成功才返回 `Ok(Restored)` 并置 `restored = true`。
     pub fn restore(&mut self) -> Result<RestoreStatus, ClipboardRestoreError> {
         if self.restored {
             return Ok(RestoreStatus::AlreadyRestored);
         }
         if self.abandoned {
-            return Ok(RestoreStatus::SkippedForeignChange);
+            return Ok(RestoreStatus::Abandoned);
         }
-        if !self.still_owned() {
-            // 主动放弃：同时置 restored 让 Drop 不再补救（补救即会覆盖用户新内容）
+        if self.expected_sequence == 0 {
+            // 归属不可判定：绝不用旧快照覆盖当前内容
             self.abandoned = true;
             self.restored = true;
-            return Ok(RestoreStatus::SkippedForeignChange);
+            return Ok(RestoreStatus::Abandoned);
         }
 
+        let mut expected = self.expected_sequence;
         let mut last_error = None;
         for attempt in 0..RESTORE_ATTEMPTS {
             if attempt > 0 {
                 thread::sleep(Duration::from_millis(30 * u64::from(attempt)));
             }
-            match self.restore_attempt() {
-                Ok(true) => {
+
+            let pending = self.pending_formats();
+            if self.emptied && pending.is_empty() {
+                self.restored = true;
+                return Ok(RestoreStatus::Restored);
+            }
+            let empty_first = !self.emptied;
+            let items = &self.items;
+            let result = clipboard_atomic_write(expected, empty_first, || {
+                let mut written = 0usize;
+                let mut failed = Vec::new();
+                for fmt in &pending {
+                    match items.iter().find(|(f, _)| f == fmt) {
+                        Some((_, data)) => {
+                            if write_clipboard_format(*fmt, data) {
+                                written += 1;
+                            } else {
+                                failed.push(*fmt);
+                            }
+                        }
+                        // 理论上不可达（pending 由 items 派生）：保守计为失败
+                        None => failed.push(*fmt),
+                    }
+                }
+                (written, failed)
+            });
+
+            match result {
+                Ok((sequence, _written, failed)) => {
+                    expected = sequence;
+                    self.expected_sequence = sequence;
+                    self.emptied = true;
+                    for fmt in &pending {
+                        if !failed.contains(fmt) {
+                            self.restored_formats.push(*fmt);
+                        }
+                    }
+                    if failed.is_empty() {
+                        self.restored = true;
+                        return Ok(RestoreStatus::Restored);
+                    }
+                    last_error = Some(ClipboardRestoreError::PartialRestore(failed));
+                }
+                Err(AtomicWriteError::NotOwned) | Err(AtomicWriteError::OwnershipUnknown) => {
+                    // 永久放弃：不清空、不写入，Drop 也不得再补写
+                    self.abandoned = true;
                     self.restored = true;
-                    return Ok(RestoreStatus::Restored);
+                    return Ok(RestoreStatus::Abandoned);
                 }
-                Ok(false) => {
-                    last_error = Some(ClipboardRestoreError::PartialRestore(
-                        self.pending_formats(),
-                    ));
+                Err(AtomicWriteError::Busy) => last_error = Some(ClipboardRestoreError::Busy),
+                Err(AtomicWriteError::EmptyFailed) => {
+                    last_error = Some(ClipboardRestoreError::EmptyFailed)
                 }
-                Err(err) => last_error = Some(err),
             }
         }
 
         Err(last_error.unwrap_or(ClipboardRestoreError::Busy))
-    }
-
-    /// 单次恢复尝试：清空（仅首次）后逐格式写回，返回是否全部成功
-    fn restore_attempt(&mut self) -> Result<bool, ClipboardRestoreError> {
-        // 必须是“写路径”：以有效 owner 打开，否则 EmptyClipboard 会把 owner 置空
-        if !open_clipboard_for_write(4) {
-            return Err(ClipboardRestoreError::Busy);
-        }
-
-        unsafe {
-            if !self.emptied {
-                if EmptyClipboard().is_err() {
-                    let _ = CloseClipboard();
-                    return Err(ClipboardRestoreError::EmptyFailed);
-                }
-                self.emptied = true;
-            }
-
-            let mut all_ok = true;
-            for (fmt, data) in &self.items {
-                if self.restored_formats.contains(fmt) {
-                    continue;
-                }
-                if write_clipboard_format(*fmt, data) {
-                    self.restored_formats.push(*fmt);
-                } else {
-                    all_ok = false;
-                }
-            }
-
-            let _ = CloseClipboard();
-            Ok(all_ok)
-        }
     }
 }
 
@@ -1251,53 +1382,24 @@ fn write_clipboard_format_with(format: u32, data: &[u8], ops: &HandleOps) -> boo
     true
 }
 
-/// RAII 守卫：确保离开作用域时无论如何自动执行剪贴板还原
-pub struct ClipboardRestoreGuard {
-    snapshot: Option<ClipboardSnapshot>,
-}
-
-impl ClipboardRestoreGuard {
-    pub fn new(snapshot: ClipboardSnapshot) -> Self {
-        Self {
-            snapshot: Some(snapshot),
-        }
-    }
-
-    /// 记录本次写入临时内容后的归属信息（转发给内部快照）
-    pub fn note_temporary_write(&mut self, text: &str, sequence: u32) {
-        if let Some(ref mut snap) = self.snapshot {
-            snap.note_temporary_write(text, sequence);
-        }
-    }
-
-    /// 显式手动还原
-    pub fn restore_now(&mut self) -> Result<RestoreStatus, ClipboardRestoreError> {
-        match self.snapshot {
-            Some(ref mut snap) => snap.restore(),
-            None => Ok(RestoreStatus::AlreadyRestored),
-        }
-    }
-}
-
-impl Drop for ClipboardRestoreGuard {
-    fn drop(&mut self) {
-        if let Some(mut snap) = self.snapshot.take() {
-            let _ = snap.restore();
-        }
-    }
-}
-
-/// 剪贴板「临时占用事务」的最终结局（恰好四态，供调用方观测与记日志）。
+/// 剪贴板「临时占用事务」的最终结局（结构化状态，供调用方观测与记日志）。
+///
+/// 命名对齐审计需求 `9549648` §4.2，**只记录结构化状态，绝不携带剪贴板正文**。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardTransactionOutcome {
-    /// 用户原剪贴板内容已完整恢复
-    Restored,
+    /// 用户原剪贴板内容已完整恢复（正常提交）
+    Committed,
     /// 检出外部改写（用户/第三方已复制新内容），主动放弃恢复以保护其新内容
     SkippedForeignChange,
     /// 剪贴板归属不可判定（序列号不可读 / 读回失败 / 剪贴板忙），保守放弃恢复
-    ReadFailed,
+    SkippedUnknownOwner,
+    /// 请求窗口内的更新历史不可证明（事件缺失 / 事件数不为 1 / 事件环溢出 / 静默超时）——
+    /// 这是 P0-04-B 的 fail-closed 终止态：**绝不认领**不可证明的第三方写入。
+    AbortedEventHistoryUnprovable,
+    /// 恢复过程中检出外部改写 / owner 不匹配：**永久放弃**该快照（§3.4.3）
+    RestoreAbandoned,
     /// 归属校验通过，但恢复动作本身失败（携带底层错误）
-    RestoreFailed(ClipboardRestoreError),
+    RestorePartialFailure(ClipboardRestoreError),
 }
 
 /// 事务操作失败原因：任一 `Err` 都要求调用方立即停止后续写入（保守退出）。
@@ -1335,13 +1437,15 @@ enum OwnershipState {
 }
 
 /// 剪贴板「临时占用事务」：把「快照 → 清空/写入 → 请求第三方写入 → 读回 → 恢复」
-/// 收口成一套带**严格 sequence 归属校验**的 API（审计报告 P0-03）。
+/// 收口成**单一事务 API**（审计需求 `9549648` §4.1）。所有调用方都不得手工拼装
+/// capture → check → write → restore 流程。
 ///
-/// 与 `ClipboardRestoreGuard`（上一次已验收的守卫路径）并存，语义区别：
+/// 语义：
+/// - 快照与 `capture_sequence` 绑定，首次写入在同一次持锁期内复核该序列号；
 /// - 归属判定严格按 `GetClipboardSequenceNumber`，序列号变化即视为外部改写，
-///   不使用「文本相等仍视为持有」的 fail-open 回退；
-/// - 归属不可判定时保守放弃恢复（`ReadFailed`），绝不用旧快照覆盖当前内容；
-/// - 恢复前与每次写入前都做归属校验，检出外部改写立即返回 `Err` 让调用方停止写入；
+///   **不存在**「文本相等仍视为持有」的 fail-open 回退（§3.4.4）；
+/// - 归属不可判定或事件史不可证明时保守放弃恢复，绝不用旧快照覆盖当前内容；
+/// - 每次写入前重新校验归属，检出外部改写立即返回 `Err` 让调用方停止写入；
 /// - `Drop` 兜底走同一套归属校验，绝不因提前 return 漏恢复或错误覆盖。
 pub struct ClipboardTransaction {
     /// 用户原始剪贴板快照；`take` 后为 `None`（表示已消费于恢复动作）
@@ -1354,23 +1458,31 @@ pub struct ClipboardTransaction {
     lost_ownership: bool,
     /// 是否因序列号/读回不可用导致归属无法判定（一旦置位即保守放弃恢复）
     ownership_unknown: bool,
+    /// 是否因请求窗口内的事件史不可证明而终止认领（P0-04-B fail-closed）
+    event_history_unprovable: bool,
+    /// 是否已进入「永久放弃快照」状态（恢复检出外部改写 / owner 不匹配）
+    abandoned_snapshot: bool,
     /// 最终结局；一旦确定即幂等返回，`Drop` 不会再重复动作
     outcome: Option<ClipboardTransactionOutcome>,
 }
 
 impl ClipboardTransaction {
-    /// 开启事务：完整快照当前剪贴板。快照失败（`Busy` / `BackupIncomplete`）直接返回
-    /// `Err`，绝不触碰剪贴板内容。
+    /// 开启事务：完整快照当前剪贴板（含与 `capture_sequence` 的绑定）。
+    /// 快照失败（`Busy` / `BackupIncomplete`）直接返回 `Err`，绝不触碰剪贴板内容。
     pub fn begin() -> Result<Self, ClipboardSafetyError> {
         let snapshot = ClipboardSnapshot::capture()?;
-        let seq = clipboard_sequence_number();
+        // 期望序列号直接取自**持锁捕获期**读到的值，不再另读一次（否则“捕获”与
+        // “记录基准”之间又会多出一个 check-then-act 窗口）。
+        let capture_sequence = snapshot.capture_sequence();
         Ok(Self {
             snapshot: Some(snapshot),
-            // 序列号不可读（返回 0）时不建立基准，后续写入成功会重新建立
-            owned_seq: (seq != 0).then_some(seq),
+            // 序列号不可读（返回 0）时不建立基准，后续写入一律 fail-closed
+            owned_seq: (capture_sequence != 0).then_some(capture_sequence),
             owned_text: None,
             lost_ownership: false,
-            ownership_unknown: seq == 0,
+            ownership_unknown: capture_sequence == 0,
+            event_history_unprovable: false,
+            abandoned_snapshot: false,
             outcome: None,
         })
     }
@@ -1420,19 +1532,8 @@ impl ClipboardTransaction {
     pub fn write_owned_text(&mut self, text: &str) -> Result<(), ClipboardTransactionError> {
         self.ensure_still_owned()?;
 
-        // 审计报告 P0-04 竞态 A 的确定性测试注入点：在「写前校验」与「持锁复核」之间
-        // 制造一次外部改写，验证持锁复核会 fail-closed（仅测试构建存在）。
-        #[cfg(test)]
-        {
-            let hook = TEST_BEFORE_WRITE_RECHECK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .take();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-
+        // 确定性测试注入点：在「写前校验」与「持锁复核」之间制造一次外部改写，
+        // 验证持锁复核会 fail-closed（注入动作由统一原语开头执行，仅测试构建存在）。
         let Some(expected) = self.owned_seq else {
             self.ownership_unknown = true;
             return Err(ClipboardTransactionError::OwnershipUnknown);
@@ -1465,6 +1566,21 @@ impl ClipboardTransaction {
     /// [`Self::note_observed_owned_text_proven`]。
     pub fn request_marker(&self) -> u64 {
         clipboard_update_marker()
+    }
+
+    /// 排空「本次临时写入」触发的全部 `WM_CLIPBOARDUPDATE` 通知。
+    ///
+    /// **必须在 `request_marker()` 之前调用**：请求窗口的来源判据是「窗口内恰好一次
+    /// 可归因更新」；若本事务自身那次写入的通知迟到并落进请求窗口，就会把合法扫描
+    /// 误判为不可证明（fail-closed 的误伤）。等待有界，超时即判为归属不可证明。
+    pub fn await_own_write_observed(&self) -> Result<(), ClipboardTransactionError> {
+        let Some(sequence) = self.owned_seq else {
+            return Err(ClipboardTransactionError::OwnershipUnknown);
+        };
+        if sequence == 0 || !clipboard_update_log_quiesced(sequence) {
+            return Err(ClipboardTransactionError::OwnershipUnknown);
+        }
+        Ok(())
     }
 
     /// 请求管理器写入路径后调用：只有在**能证明**本次剪贴板更新来自目标管理器时，
@@ -1500,7 +1616,7 @@ impl ClipboardTransaction {
         let acceptable = |pid: u32| pid == own_pid || is_expected_source(pid);
 
         // 序列号未变：无写入发生，内容仍是本事务的临时文本，归属未变。
-        // （事件环仍做防御性核查：出现非目标来源的更新绝不能放过。）
+        // （事件环仍做防御性核查：出现非目标来源的更新绝不得放过。）
         if current == before {
             if let Some(events) = clipboard_updates_since(marker) {
                 for event in &events {
@@ -1515,27 +1631,38 @@ impl ClipboardTransaction {
             // 先等事件链追平当前序列号（`WM_CLIPBOARDUPDATE` 是**投递**消息，登记可能滞后），
             // 再取事件——否则会把「尚未登记」误判为「没有任何事件」。
             if clipboard_updates_since(marker).is_none() {
-                self.ownership_unknown = true;
+                self.event_history_unprovable = true;
                 return Err(ClipboardTransactionError::OwnershipUnknown);
             }
             if !clipboard_update_log_covers(current) {
-                self.ownership_unknown = true;
+                self.event_history_unprovable = true;
                 return Err(ClipboardTransactionError::OwnershipUnknown);
             }
             let Some(events) = clipboard_updates_since(marker) else {
-                self.ownership_unknown = true;
+                self.event_history_unprovable = true;
                 return Err(ClipboardTransactionError::OwnershipUnknown);
             };
-            if events.is_empty() {
-                // 序列号变了却没有任何可归因的更新：来源链不可证明
-                self.ownership_unknown = true;
-                return Err(ClipboardTransactionError::OwnershipUnknown);
-            }
+            // 任何一次非目标来源的更新：直接判为外部改写。
             for event in &events {
                 if !acceptable(event.owner_pid) {
                     self.lost_ownership = true;
                     return Err(ClipboardTransactionError::NotOwned);
                 }
+            }
+            // P0-04-B 核心 fail-closed 规则（审计需求 `9549648` §2.4 方案 B）：
+            //
+            // `WM_CLIPBOARDUPDATE` 在**处理时**才采样 sequence/owner，采到的是处理时
+            // 的当前状态而非「更新发生瞬间」的历史状态。因此事件环**不能**作为完整
+            // 来源链的证明；唯一可保守采纳的情形是：请求窗口内恰好只有一次更新、
+            // 且该次登记的序列号与当前序列号一致（无滞后、无合并）。
+            // 两次更新被延迟处理时会登记两条事件，此时无论如何都不得认领。
+            if events.len() != 1 {
+                self.event_history_unprovable = true;
+                return Err(ClipboardTransactionError::OwnershipUnknown);
+            }
+            if events[0].sequence != current {
+                self.event_history_unprovable = true;
+                return Err(ClipboardTransactionError::OwnershipUnknown);
             }
             let final_owner = clipboard_owner_pid();
             if !acceptable(final_owner) {
@@ -1544,11 +1671,17 @@ impl ClipboardTransaction {
             }
         }
 
-        match get_clipboard_text() {
-            Some(text) => {
+        // 读回文本与序列号必须在**同一次持锁期**内完成，否则「校验的序列号」与
+        // 「读到的文本」可能不是同一份内容（又一个 check-then-act）。
+        match get_clipboard_text_checked() {
+            Some((text, sequence)) if sequence == current => {
                 self.owned_seq = Some(current);
                 self.owned_text = Some(text.clone());
                 Ok(Some(text))
+            }
+            Some(_) => {
+                self.ownership_unknown = true;
+                Err(ClipboardTransactionError::OwnershipUnknown)
             }
             None => {
                 self.ownership_unknown = true;
@@ -1559,126 +1692,128 @@ impl ClipboardTransaction {
 
     /// 最终恢复：先按严格 sequence 校验归属，校验通过才恢复。
     ///
-    /// 结局恰好四态（见 [`ClipboardTransactionOutcome`]）。幂等：重复调用返回同一结局。
+    /// 结局见 [`ClipboardTransactionOutcome`]。幂等：重复调用返回同一结局。
     pub fn restore_if_still_owned(&mut self) -> ClipboardTransactionOutcome {
         if let Some(outcome) = self.outcome.clone() {
             return outcome;
         }
 
-        let outcome = match self.refresh_ownership() {
-            // 被外部改写：绝不 EmptyClipboard、绝不写回旧快照
-            OwnershipState::Lost => ClipboardTransactionOutcome::SkippedForeignChange,
-            // 归属未知：不得用旧快照覆盖当前内容
-            OwnershipState::Unknown => ClipboardTransactionOutcome::ReadFailed,
-            // 归属未变（含管理器超时/窗口退出：剪贴板仍是本事务的临时写入，
-            // 用户原始内容依然安全地被快照保存）→ 正常还回去
-            OwnershipState::Owned => self.perform_restore(),
+        let outcome = if self.event_history_unprovable {
+            // 事件史不可证明（P0-04-B）：绝不认领，也绝不用旧快照覆盖当前内容
+            ClipboardTransactionOutcome::AbortedEventHistoryUnprovable
+        } else {
+            match self.refresh_ownership() {
+                // 被外部改写：绝不 EmptyClipboard、绝不写回旧快照
+                OwnershipState::Lost => ClipboardTransactionOutcome::SkippedForeignChange,
+                // 归属未知：不得用旧快照覆盖当前内容
+                OwnershipState::Unknown => ClipboardTransactionOutcome::SkippedUnknownOwner,
+                // 归属未变（含管理器超时/窗口退出：剪贴板仍是本事务的临时写入，
+                // 用户原始内容依然安全地被快照保存）→ 正常还回去
+                OwnershipState::Owned => self.perform_restore(),
+            }
         };
         self.outcome = Some(outcome.clone());
         outcome
     }
 
-    /// 执行真实恢复：以严格归属模式驱动快照恢复，恢复动作内部再做一次同源 sequence 校验。
+    /// 执行真实恢复：把事务认可的最后序列号交给快照绑定，恢复动作内部在持锁期内复核。
     fn perform_restore(&mut self) -> ClipboardTransactionOutcome {
         let owned = self.owned_seq.zip(self.owned_text.clone());
         let Some(snapshot) = self.snapshot.as_mut() else {
-            return ClipboardTransactionOutcome::Restored;
+            return ClipboardTransactionOutcome::Committed;
         };
         if let Some((seq, text)) = owned {
-            snapshot.note_temporary_write_strict(&text, seq);
+            snapshot.bind_owned_write(&text, seq);
         }
         match snapshot.restore() {
             Ok(RestoreStatus::Restored | RestoreStatus::AlreadyRestored) => {
-                ClipboardTransactionOutcome::Restored
+                ClipboardTransactionOutcome::Committed
             }
-            Ok(RestoreStatus::SkippedForeignChange) => {
-                ClipboardTransactionOutcome::SkippedForeignChange
+            Ok(RestoreStatus::Abandoned) => {
+                // 永久放弃：已由快照置位 abandoned，Drop 不会再补写
+                self.abandoned_snapshot = true;
+                ClipboardTransactionOutcome::RestoreAbandoned
             }
-            Err(err) => ClipboardTransactionOutcome::RestoreFailed(err),
+            Err(err) => ClipboardTransactionOutcome::RestorePartialFailure(err),
         }
     }
 }
 
 impl Drop for ClipboardTransaction {
     fn drop(&mut self) {
-        // 显式恢复已失败过：与既有守卫一致，Drop 再补一次（只补写未成功格式，
-        // 且仍走严格归属校验，被外部改写时绝不过写）。
+        // 显式恢复已遭遇「部分失败」：Drop 再补一次（只补写未成功格式，且仍走严格归属
+        // 校验，被外部改写时绝不过写）。
+        //
+        // 注意：`RestoreAbandoned` / `AbortedEventHistoryUnprovable` / `SkippedForeignChange`
+        // 等终止态**绝不**在此补写（§3.4.3 第 4 条：放弃后 Drop 不得再次补写）。
         if matches!(
             self.outcome,
-            Some(ClipboardTransactionOutcome::RestoreFailed(_))
+            Some(ClipboardTransactionOutcome::RestorePartialFailure(_))
         ) {
             if let Some(snapshot) = self.snapshot.as_mut() {
                 let _ = snapshot.restore();
             }
             return;
         }
-        // RAII 兜底：调用方未显式恢复（如提前 return）时，走完全同一套归属校验
+        // RAII 兜底：调用方未显式恢复（如提前 return）时，走完全同一套归属校验。
+        // 已确定结局时 `restore_if_still_owned` 幂等返回，不会重复动作。
         let _ = self.restore_if_still_owned();
     }
 }
 
-/// 临时向系统剪贴板写入 Unicode 文本，并返回写入后的剪贴板序列号
-fn set_raw_clipboard_text_tracked(text: &str) -> Option<u32> {
-    // 必须是“写路径”：以有效 owner 打开，否则 EmptyClipboard 会把 owner 置空
-    if !open_clipboard_for_write(4) {
-        return None;
-    }
-
-    unsafe {
-        if EmptyClipboard().is_err() {
-            let _ = CloseClipboard();
-            return None;
-        }
-
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-        let bytes = wide.len() * 2;
-        let mut ok = false;
-
-        if let Ok(h) = GlobalAlloc(GHND, bytes)
-            && !h.0.is_null()
-        {
-            let ptr = GlobalLock(h);
-            if ptr.is_null() {
-                let _ = GlobalFree(Some(h));
-            } else {
-                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
-                let _ = GlobalUnlock(h);
-                if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))).is_ok() {
-                    ok = true;
-                } else {
-                    let _ = GlobalFree(Some(h));
-                }
-            }
-        }
-
-        let _ = CloseClipboard();
-        ok.then(clipboard_sequence_number)
-    }
+/// 统一原子写入原语的失败原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtomicWriteError {
+    /// 持锁复核时序列号已变（外部改写）：**零修改**退出
+    NotOwned,
+    /// 序列号不可读（返回 0）：保守失败，零修改
+    OwnershipUnknown,
+    /// 剪贴板打不开（被其他进程占用）
+    Busy,
+    /// `EmptyClipboard` 失败（此时剪贴板内容未被修改）
+    EmptyFailed,
 }
 
-/// 临时向系统剪贴板写入 Unicode 文本
-fn set_raw_clipboard_text(text: &str) -> bool {
-    set_raw_clipboard_text_tracked(text).is_some()
-}
-
-/// 「持锁复核 + 写入」的原子写入原语（审计报告 P0-04 竞态 A）。
+/// **全仓唯一**的剪贴板「清空 + 写入」原子原语（审计需求 `9549648` §3.4.2 / §4.1 / §4.3）。
 ///
-/// 与 `set_raw_clipboard_text_tracked` 的关键区别：复核序列号、`EmptyClipboard`、
-/// `SetClipboardData` 与读取写入后序列号全部位于**同一次 `OpenClipboard` 持锁期**内。
-/// Windows 同一时刻只允许一个窗口打开剪贴板，因此复核通过后到写入完成之间不可能再
-/// 发生第三方写入，check-then-act 的 TOCTOU 窗口被消除。
+/// 语义（所有修改剪贴板内容的路径都必须走这里）：
 ///
-/// - `Ok(seq)`：写入成功，`seq` 是在仍持有剪贴板锁时读到的写入后序列号；
-/// - `Err(NotOwned)`：持锁复核时序列号已变（外部改写），未做任何修改；
-/// - `Err(OwnershipUnknown)`：序列号不可读（返回 0），保守失败；
-/// - `Err(WriteFailed)`：打开剪贴板 / `EmptyClipboard` / `SetClipboardData` 失败。
-fn set_clipboard_text_checked(
-    text: &str,
+/// ```text
+/// OpenClipboard(valid_owner)
+///   -> 在同一次持锁期内读取 current_sequence
+///   -> current_sequence != expected_sequence：关闭并返回 NotOwned，零修改
+///   -> 相等：（可选）EmptyClipboard -> write() 逐格式 SetClipboardData
+///   -> CloseClipboard
+///   -> 读取本次写入后的 sequence 与 owner 进程并复核
+/// ```
+///
+/// Windows 同一时刻只允许一个窗口打开剪贴板，因此持锁复核通过到写入完成之间不可能
+/// 再有第三方写入，check-then-act 的 TOCTOU 窗口被消除（审计报告 P0-04 竞态 A /
+/// 清单 `9549648` P0-05）。
+///
+/// 返回值：`(写入后的序列号, 成功写入的格式数, 失败格式列表)`。
+/// 若本次调用既未清空也未成功写入任何格式，则不要求 owner 复核（内容未被修改）；
+/// 但只要产生了修改（或序列号在关闭后仍与期望不符），写入后的 owner 必须是本进程的
+/// owner 窗口，否则一律 `NotOwned`（绝不把外部改写的序列号误记成自己的）。
+fn clipboard_atomic_write<F>(
     expected_sequence: u32,
-) -> Result<u32, ClipboardTransactionError> {
+    empty_first: bool,
+    write: F,
+) -> Result<(u32, usize, Vec<u32>), AtomicWriteError>
+where
+    F: FnOnce() -> (usize, Vec<u32>),
+{
+    if expected_sequence == 0 {
+        return Err(AtomicWriteError::OwnershipUnknown);
+    }
+
+    // 确定性会合点：在真正持锁之前制造外部写入（仅测试构建存在）。
+    #[cfg(test)]
+    run_atomic_write_hook();
+
     // 必须是“写路径”：以有效 owner 打开，否则 EmptyClipboard 会把 owner 置空
     if !open_clipboard_for_write(4) {
-        return Err(ClipboardTransactionError::WriteFailed);
+        return Err(AtomicWriteError::Busy);
     }
 
     unsafe {
@@ -1686,113 +1821,149 @@ fn set_clipboard_text_checked(
         let current = clipboard_sequence_number();
         if current == 0 {
             let _ = CloseClipboard();
-            return Err(ClipboardTransactionError::OwnershipUnknown);
+            return Err(AtomicWriteError::OwnershipUnknown);
         }
         if current != expected_sequence {
             let _ = CloseClipboard();
-            return Err(ClipboardTransactionError::NotOwned);
+            return Err(AtomicWriteError::NotOwned);
         }
 
-        if EmptyClipboard().is_err() {
-            let _ = CloseClipboard();
-            return Err(ClipboardTransactionError::WriteFailed);
-        }
-
-        let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-        let bytes = wide.len() * 2;
-        let mut ok = false;
-
-        if let Ok(h) = GlobalAlloc(GHND, bytes)
-            && !h.0.is_null()
-        {
-            let ptr = GlobalLock(h);
-            if ptr.is_null() {
-                let _ = GlobalFree(Some(h));
-            } else {
-                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
-                let _ = GlobalUnlock(h);
-                if SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))).is_ok() {
-                    ok = true;
-                } else {
-                    let _ = GlobalFree(Some(h));
-                }
+        if empty_first {
+            #[cfg(test)]
+            TEST_EMPTY_CLIPBOARD_CALLS.fetch_add(1, Ordering::SeqCst);
+            if EmptyClipboard().is_err() {
+                let _ = CloseClipboard();
+                return Err(AtomicWriteError::EmptyFailed);
             }
         }
+
+        let (written, failed) = write();
 
         // 序列号在 `CloseClipboard` 之后才自增（实测：持锁期间读到的仍是写入前的值），
         // 因此必须在关闭后读取；否则会把写入前的旧序列号登记成自己的，
         // 导致后续归属校验误判为「外部改写」。
         let _ = CloseClipboard();
 
-        if !ok {
-            return Err(ClipboardTransactionError::WriteFailed);
-        }
         let after = clipboard_sequence_number();
         if after == 0 {
-            return Err(ClipboardTransactionError::OwnershipUnknown);
+            return Err(AtomicWriteError::OwnershipUnknown);
         }
-        // 归属复核：本次写入的 owner 必须是本进程的 owner 窗口。若在 `CloseClipboard` 与
-        // 此处之间的极窄窗口内被外部改写，owner 校验会立即发现（而不是把对方的序列号
-        // 误认成自己写的）；更晚的改写由后续 `refresh_ownership` 的序列号比对发现。
-        if clipboard_owner_pid() != std::process::id() {
-            return Err(ClipboardTransactionError::NotOwned);
+
+        if empty_first || written > 0 || after != expected_sequence {
+            // 归属复核：本次写入的 owner 必须是本进程的 owner 窗口。若在 `CloseClipboard`
+            // 与此处之间的极窄窗口内被外部改写，owner 校验会立即发现。
+            if clipboard_owner_pid() != std::process::id() {
+                return Err(AtomicWriteError::NotOwned);
+            }
         }
-        Ok(after)
+        Ok((after, written, failed))
     }
 }
 
-/// 清空剪贴板文本内容。
-///
-/// 供第三方文件管理器探测使用：每次探测前先清空，
-/// 避免“对端超时/未响应”时把上一次的陈旧路径当成本次结果读回来。
-pub fn clear_clipboard_text() -> bool {
-    set_raw_clipboard_text("")
+/// 向剪贴板写入 Unicode 文本的格式写入闭包，返回 `(成功写入数, 失败格式列表)`。
+fn write_unicode_text_payload(text: &str) -> (usize, Vec<u32>) {
+    let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let mut bytes = Vec::with_capacity(wide.len() * 2);
+    for unit in &wide {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    if write_clipboard_format(CF_UNICODETEXT, &bytes) {
+        (1, Vec::new())
+    } else {
+        (0, vec![CF_UNICODETEXT])
+    }
 }
 
-/// 安全地在受保护的环境下临时使用剪贴板注入文本：
-/// 1. 尝试完整快照当前剪贴板（含文件列表 CF_HDROP、位图、文本等）；
-/// 2. 若快照失败（被占/不可保真），直接返回 Err，绝不修改剪贴板；
-/// 3. 设置临时文本并登记归属（序列号 + 精确文本），执行物理操作闭包；
-/// 4. 闭包结束后（无论成功或提前早退）立即还原，Drop 阶段还会再做一次补救；
-/// 5. 恢复失败向上传播为 `RestoreFailed`，调用方不得据此认为“已无损还原”。
+/// 「持锁复核 + 写入」的临时文本原子写入。
+///
+/// 走 [`clipboard_atomic_write`]：复核序列号、`EmptyClipboard`、`SetClipboardData` 与读取
+/// 写入后序列号全部位于**同一次 `OpenClipboard` 持锁期**内（审计报告 P0-04 竞态 A）。
+///
+/// - `Ok(seq)`：写入成功，`seq` 是本次写入产生的序列号；
+/// - `Err(NotOwned)`：持锁复核时序列号已变（外部改写），未做任何修改；
+/// - `Err(OwnershipUnknown)`：序列号不可读（返回 0）或剪贴板忙，保守失败；
+/// - `Err(WriteFailed)`：打开剪贴板 / `EmptyClipboard` / `SetClipboardData` 失败。
+fn set_clipboard_text_checked(
+    text: &str,
+    expected_sequence: u32,
+) -> Result<u32, ClipboardTransactionError> {
+    match clipboard_atomic_write(expected_sequence, true, || write_unicode_text_payload(text)) {
+        Ok((sequence, _written, failed)) => {
+            if failed.is_empty() {
+                Ok(sequence)
+            } else {
+                // 已清空但文本未写进去：剪贴板状态已变且不可控，一律 fail-closed
+                Err(ClipboardTransactionError::WriteFailed)
+            }
+        }
+        Err(AtomicWriteError::NotOwned) => Err(ClipboardTransactionError::NotOwned),
+        Err(AtomicWriteError::OwnershipUnknown) => Err(ClipboardTransactionError::OwnershipUnknown),
+        Err(AtomicWriteError::Busy) | Err(AtomicWriteError::EmptyFailed) => {
+            Err(ClipboardTransactionError::WriteFailed)
+        }
+    }
+}
+
+/// 安全地在受保护的环境下临时使用剪贴板注入文本。
+///
+/// 审计需求 `9549648` §4.1：本函数只是 [`ClipboardTransaction`] 的薄封装，**不再**
+/// 手工拼装 capture → check → write → restore：
+/// 1. 开启事务（完整快照 + `capture_sequence` 绑定；失败则绝不修改剪贴板）；
+/// 2. `write_owned_text` 在统一原子原语的**同一次持锁期**内复核 `capture_sequence`，
+///    不一致就零修改失败（消除「快照完成 → 临时写入」之间的竞态，§3.3）；
+/// 3. 执行物理操作闭包；
+/// 4. 无论成功与否立即按严格 sequence 归属校验恢复（`Drop` 还要再兑底一次）；
+/// 5. 恢复本身失败向上传播为 `RestoreFailed`，调用方不得据此认为“已无损还原”。
 pub fn with_temporary_clipboard_text<R, F>(text: &str, action: F) -> Result<R, ClipboardSafetyError>
 where
     F: FnOnce() -> R,
 {
-    let snapshot = ClipboardSnapshot::capture()?;
-    let mut guard = ClipboardRestoreGuard::new(snapshot);
+    let mut tx = ClipboardTransaction::begin()?;
 
-    let Some(sequence) = set_raw_clipboard_text_tracked(text) else {
-        // 写入失败时，guard drop 会自动恢复原内容
+    if tx.write_owned_text(text).is_err() {
+        // 归属已丢 / 不可判定 / 写入失败：一律零修改放弃，{@code action} 绝不执行。
+        // `tx` 在本行末 drop，Drop 内的归属校验会保持当前内容不变。
         return Err(ClipboardSafetyError::WriteFailed);
-    };
-    guard.note_temporary_write(text, sequence);
+    }
 
     let result = action();
 
-    // 动作执行完毕，立即显式还原，并逐一类别处理三种结局
-    match guard.restore_now() {
-        Ok(RestoreStatus::Restored | RestoreStatus::AlreadyRestored) => {}
-        Ok(RestoreStatus::SkippedForeignChange) => {
-            crate::dialog::detector::log_debug(
-                "CLIPBOARD_RESTORE: 检出第三方已改写剪贴板，放弃覆盖其新内容",
-            );
+    match tx.restore_if_still_owned() {
+        ClipboardTransactionOutcome::Committed => Ok(result),
+        ClipboardTransactionOutcome::RestorePartialFailure(err) => {
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_RESTORE_FAILED: RestorePartialFailure({:?})",
+                err
+            ));
+            Err(ClipboardSafetyError::RestoreFailed(err))
         }
-        Err(err) => {
-            crate::dialog::detector::log_debug(&format!("CLIPBOARD_RESTORE_FAILED: {:?}", err));
-            return Err(ClipboardSafetyError::RestoreFailed(err));
+        outcome => {
+            // 其余均为「已保守放弃覆盖用户当前内容」的结构化终止态，只记状态，
+            // 绝不记剪贴板正文；闭包结果本身仍有效。
+            crate::dialog::detector::log_debug(&format!(
+                "CLIPBOARD_RESTORE_SKIPPED: {:?}",
+                outcome
+            ));
+            Ok(result)
         }
     }
-
-    Ok(result)
 }
 
 /// 安全读取当前剪贴板的纯文本（若剪贴板无纯文本则返回 None）
 pub fn get_clipboard_text() -> Option<String> {
+    get_clipboard_text_checked().map(|(text, _)| text)
+}
+
+/// 读取纯文本并同时返回**同一次持锁期内**读到的剪贴板序列号。
+///
+/// 读回判定绝不能「先读 sequence 再读文本」：那样两次之间可能发生外部写入，
+/// 得到「旧序列号 + 新文本」的错误组合（又一个 check-then-act）。
+fn get_clipboard_text_checked() -> Option<(String, u32)> {
     if !open_clipboard_for_read(4) {
         return None;
     }
     unsafe {
+        let sequence = clipboard_sequence_number();
         let mut result = None;
         if let Ok(h) = GetClipboardData(CF_UNICODETEXT)
             && !h.0.is_null()
@@ -1810,7 +1981,10 @@ pub fn get_clipboard_text() -> Option<String> {
             }
         }
         let _ = CloseClipboard();
-        result
+        if sequence == 0 {
+            return None;
+        }
+        result.map(|text| (text, sequence))
     }
 }
 
@@ -1828,6 +2002,110 @@ mod tests {
         CLIP_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 测试夹具：把纯文本写入剪贴板。
+    ///
+    /// 它不另建一套“旁路”实现，而是走与生产路径**同一个**统一原子原语（只有期望值
+    /// 取“当前序列号”——测试用例串行执行，这个读取窗口无关紧要）。
+    fn set_raw_clipboard_text(text: &str) -> bool {
+        set_raw_clipboard_text_tracked(text).is_some()
+    }
+
+    /// 测试夹具：写入纯文本并返回写入后的序列号（失败 / 归属不可判定时为 None）。
+    fn set_raw_clipboard_text_tracked(text: &str) -> Option<u32> {
+        let expected = clipboard_sequence_number();
+        match clipboard_atomic_write(expected, true, || write_unicode_text_payload(text)) {
+            Ok((sequence, _written, failed)) if failed.is_empty() => Some(sequence),
+            _ => None,
+        }
+    }
+
+    /// 测试夹具：统一原子原语真正执行 `EmptyClipboard` 的累计次数。
+    fn empty_clipboard_calls() -> usize {
+        TEST_EMPTY_CLIPBOARD_CALLS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// 测试夹具：当前剪贴板的完整观测快照（文本 / 格式集 / sequence / owner HWND / owner PID）。
+    ///
+    /// 清单 §3.5 要求每个用例至少断言这些量，故统一封口，避免逐处重写。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ClipboardObservation {
+        text: Option<String>,
+        formats: Vec<u32>,
+        sequence: u32,
+        owner_hwnd: usize,
+        owner_pid: u32,
+    }
+
+    fn observe_clipboard() -> ClipboardObservation {
+        assert!(open_clipboard_for_read(10), "观测必须能只读打开剪贴板");
+        let sequence = clipboard_sequence_number();
+        let owner = unsafe { GetClipboardOwner() }.unwrap_or_default();
+        let owner_hwnd = owner.0 as usize;
+        let mut formats = Vec::new();
+        unsafe {
+            let mut fmt = 0u32;
+            loop {
+                fmt = EnumClipboardFormats(fmt);
+                if fmt == 0 {
+                    break;
+                }
+                formats.push(fmt);
+            }
+        }
+        let text = {
+            let mut out = None;
+            unsafe {
+                if let Ok(h) = GetClipboardData(CF_UNICODETEXT)
+                    && !h.0.is_null()
+                {
+                    let ptr = GlobalLock(HGLOBAL(h.0));
+                    if !ptr.is_null() {
+                        let u16_ptr = ptr as *const u16;
+                        let mut len = 0;
+                        while *u16_ptr.add(len) != 0 {
+                            len += 1;
+                        }
+                        let slice = std::slice::from_raw_parts(u16_ptr, len);
+                        out = Some(String::from_utf16_lossy(slice));
+                        let _ = GlobalUnlock(HGLOBAL(h.0));
+                    }
+                }
+            }
+            out
+        };
+        let _ = unsafe { CloseClipboard() };
+        ClipboardObservation {
+            text,
+            formats,
+            sequence,
+            owner_hwnd,
+            owner_pid: clipboard_owner_pid(),
+        }
+    }
+
+    /// 测试夹具：阻塞 owner 消息泵，返回“放行”句柄。
+    ///
+    /// 用于确定性复现清单 §2.3「两次剪贴板更新均已发生、通知尚未处理」的交错。
+    fn block_owner_pump_for_test() -> mpsc::Sender<()> {
+        let (reached_tx, reached_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        *TEST_OWNER_PUMP_BLOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(OwnerPumpBlock {
+            reached_tx,
+            release_rx: Mutex::new(release_rx),
+        });
+        let owner = clipboard_owner().expect("owner 窗口必须可用");
+        unsafe {
+            PostMessageW(Some(owner), WM_QP_TEST_BLOCK_PUMP, WPARAM(0), LPARAM(0))
+                .expect("阻塞消息必须能投递到 owner 窗口");
+        }
+        reached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner 消息泵必须到达阻塞点");
+        release_tx
     }
 
     #[test]
@@ -2057,8 +2335,9 @@ mod tests {
                 snap.items.iter().any(|(f, _)| *f == CF_UNICODETEXT),
                 "快照必须含 CF_UNICODETEXT，用于验证失败时其它格式不被破坏"
             );
-            // 清掉当前剪贴板，确保后续断言只能来自快照恢复
-            assert!(set_raw_clipboard_text("qp_restore_probe"));
+            // 注意（审计需求 9549648 §3.4.1）：快照与 `capture_sequence` 绑定后，
+            // 不能再「先清掉剪贴板再恢复」——那本身就是一次外部变更，会被判为
+            // `Abandoned`（零修改退出），从而再也验证不到部分失败路径。
 
             {
                 let _inject = FailInjection::enable_with(CF_DIB, op);
@@ -2109,15 +2388,15 @@ mod tests {
         let mut snap = ClipboardSnapshot::capture().expect("文本剪贴板必须可被安全捕获");
         let seq =
             set_raw_clipboard_text_tracked("C:\\TemporaryInjection").expect("写入临时文本必须成功");
-        snap.note_temporary_write("C:\\TemporaryInjection", seq);
+        snap.bind_owned_write("C:\\TemporaryInjection", seq);
 
         // 模拟用户/第三方在恢复前复制了全新内容
         assert!(set_raw_clipboard_text("qp_user_new_content"));
 
         assert_eq!(
             snap.restore(),
-            Ok(RestoreStatus::SkippedForeignChange),
-            "序列号变化且内容不再匹配时必须放弃覆盖"
+            Ok(RestoreStatus::Abandoned),
+            "序列号变化时必须永久放弃覆盖"
         );
         assert_eq!(
             get_clipboard_text().as_deref(),
@@ -2130,6 +2409,10 @@ mod tests {
 
     /// P0-01：`with_temporary_clipboard_text` 必须把恢复失败向上传播，而不是静默返回 Ok。
     /// 分配 / 加锁 / 设置三处故障逐个注入，均不得假报成功。
+    ///
+    /// 注入时机（审计需求 `9549648` §3.4.2）：必须注入在**恢复**那一次原子写入上，
+    /// 而不是临时写入上 —— 否则失败会在“写入临时文本”阶段就短路，验证不到恢复传播。
+    /// 故用原子写入会合点 `skip = 1` 把故障开关安排在第二次原子写入（首次恢复）开头。
     #[test]
     fn test_temporary_clipboard_text_propagates_restore_failure() {
         let _guard = clip_test_lock();
@@ -2137,10 +2420,14 @@ mod tests {
         for op in [FailOp::Set, FailOp::Alloc, FailOp::Lock] {
             assert!(set_raw_clipboard_text("qp_propagate_seed"));
 
-            let inject = FailInjection::enable_with(CF_UNICODETEXT, op);
+            arm_atomic_write_hook(1, move || {
+                TEST_FAIL_MODE.store(op.mode(), std::sync::atomic::Ordering::SeqCst);
+                TEST_FAIL_FORMAT.store(CF_UNICODETEXT, std::sync::atomic::Ordering::SeqCst);
+            });
             let outcome: Result<u32, ClipboardSafetyError> =
                 with_temporary_clipboard_text("C:\\PropagateProbe", || 7);
-            drop(inject);
+            TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+            TEST_FAIL_MODE.store(0, std::sync::atomic::Ordering::SeqCst);
 
             match outcome {
                 Err(ClipboardSafetyError::RestoreFailed(err)) => {
@@ -2228,8 +2515,13 @@ mod tests {
         blob
     }
 
-    /// 用指定字节块占用多个剪贴板格式，并顺带写入一段 Unicode 文本
+    /// 用指定字节块占用多个剪贴板格式，并顺带写入固定测货 Unicode 文本
     fn seed_clipboard_formats(entries: &[(u32, &[u8])]) {
+        seed_clipboard_formats_with_text("qp_multiformat_seed", entries);
+    }
+
+    /// 同上，但可指定随附的 Unicode 文本（用于「字面文本相同、格式不同」的交错用例）
+    fn seed_clipboard_formats_with_text(text: &str, entries: &[(u32, &[u8])]) {
         assert!(
             open_clipboard_for_write(10),
             "测试必须以合法 owner 打开剪贴板"
@@ -2244,10 +2536,7 @@ mod tests {
                 prod_unlock(handle);
                 assert!(prod_set(*format, handle), "格式 {} 必须写回成功", format);
             }
-            let wide: Vec<u16> = "qp_multiformat_seed"
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
+            let wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
             let bytes = wide.len() * 2;
             let handle = prod_alloc(bytes).expect("分配必须成功");
             let ptr = prod_lock(handle);
@@ -2256,6 +2545,32 @@ mod tests {
             assert!(prod_set(CF_UNICODETEXT, handle));
             let _ = CloseClipboard();
         }
+    }
+
+    /// 读取指定剪贴板格式的原始字节（用于断言格式内容未被旧快照覆盖）。
+    fn read_clipboard_format_bytes(format: u32) -> Option<Vec<u8>> {
+        if !open_clipboard_for_read(10) {
+            return None;
+        }
+        let mut out = None;
+        unsafe {
+            if let Ok(h) = GetClipboardData(format)
+                && !h.0.is_null()
+            {
+                let size = GlobalSize(HGLOBAL(h.0));
+                if size > 0 {
+                    let ptr = GlobalLock(HGLOBAL(h.0));
+                    if !ptr.is_null() {
+                        let mut data = vec![0u8; size];
+                        std::ptr::copy_nonoverlapping(ptr as *const u8, data.as_mut_ptr(), size);
+                        let _ = GlobalUnlock(HGLOBAL(h.0));
+                        out = Some(data);
+                    }
+                }
+            }
+            let _ = CloseClipboard();
+        }
+        out
     }
 
     /// 恢复后重新捕获，断言原快照的每个格式字节完全一致
@@ -3165,7 +3480,7 @@ mod tests {
             let outcome = tx.restore_if_still_owned();
             assert_eq!(
                 outcome,
-                ClipboardTransactionOutcome::Restored,
+                ClipboardTransactionOutcome::Committed,
                 "{label}: 无并发改写时必须正常恢复"
             );
             assert_mixed_roundtrip(&before, &format!("{label}: 事务链路"));
@@ -3211,7 +3526,7 @@ mod tests {
             assert!(set_raw_clipboard_text(&current));
             assert_eq!(
                 tx.restore_if_still_owned(),
-                ClipboardTransactionOutcome::ReadFailed,
+                ClipboardTransactionOutcome::SkippedUnknownOwner,
                 "{label}: 归属未知时必须保守放弃恢复"
             );
             assert_eq!(
@@ -3240,7 +3555,7 @@ mod tests {
             assert!(set_raw_clipboard_text(&current));
             assert_eq!(
                 tx.restore_if_still_owned(),
-                ClipboardTransactionOutcome::ReadFailed,
+                ClipboardTransactionOutcome::SkippedUnknownOwner,
                 "{label}"
             );
             assert_eq!(
@@ -3267,7 +3582,7 @@ mod tests {
             assert!(set_raw_clipboard_text(&current));
             assert_eq!(
                 tx.restore_if_still_owned(),
-                ClipboardTransactionOutcome::ReadFailed,
+                ClipboardTransactionOutcome::SkippedUnknownOwner,
                 "{label}"
             );
             assert_eq!(
@@ -3290,7 +3605,7 @@ mod tests {
             let outcome = tx.restore_if_still_owned();
             assert_eq!(
                 outcome,
-                ClipboardTransactionOutcome::Restored,
+                ClipboardTransactionOutcome::Committed,
                 "{label}: 归属未变时必须正常恢复"
             );
             assert_eq!(
@@ -3341,7 +3656,7 @@ mod tests {
             );
 
             let outcome = tx.restore_if_still_owned();
-            assert_eq!(outcome, ClipboardTransactionOutcome::Restored, "{label}");
+            assert_eq!(outcome, ClipboardTransactionOutcome::Committed, "{label}");
             assert_eq!(
                 get_clipboard_text().as_deref(),
                 Some(seed.as_str()),
@@ -3458,21 +3773,21 @@ mod tests {
         {
             let _inject = FailInjection::enable(CF_UNICODETEXT);
             match tx.restore_if_still_owned() {
-                ClipboardTransactionOutcome::RestoreFailed(err) => {
+                ClipboardTransactionOutcome::RestorePartialFailure(err) => {
                     assert!(
                         matches!(err, ClipboardRestoreError::PartialRestore(ref v) if v.contains(&CF_UNICODETEXT)),
                         "恢复失败必须是含 CF_UNICODETEXT 的 PartialRestore，实际 {:?}",
                         err
                     );
                 }
-                other => panic!("期望 RestoreFailed，实际 {:?}", other),
+                other => panic!("期望 RestorePartialFailure，实际 {:?}", other),
             }
         }
 
         // 结局幂等：再次调用不得重新动作
         assert!(matches!(
             tx.restore_if_still_owned(),
-            ClipboardTransactionOutcome::RestoreFailed(_)
+            ClipboardTransactionOutcome::RestorePartialFailure(_)
         ));
 
         let _ = set_raw_clipboard_text("qp_p003_tx_restore_fail_seed");
@@ -3524,11 +3839,9 @@ mod tests {
 
         // 在「写前校验」与「持锁复核」之间注入用户复制（等价竞态 A 的交错）
         let user_text = "qp_p004a_user_copy".to_string();
-        *TEST_BEFORE_WRITE_RECHECK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(move || {
+        arm_atomic_write_hook(0, move || {
             assert!(set_raw_clipboard_text(&user_text));
-        }));
+        });
 
         let err = tx
             .write_owned_text("qp_p004a_second")
@@ -3575,7 +3888,7 @@ mod tests {
         );
         assert_eq!(
             tx.restore_if_still_owned(),
-            ClipboardTransactionOutcome::Restored,
+            ClipboardTransactionOutcome::Committed,
             "归属未变时必须正常恢复"
         );
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_p005_seed"));
@@ -3644,7 +3957,7 @@ mod tests {
         assert_eq!(panel.path.as_deref(), Some(dir.trim_end_matches('\\')));
         assert_eq!(
             tx.restore_if_still_owned(),
-            ClipboardTransactionOutcome::Restored
+            ClipboardTransactionOutcome::Committed
         );
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_p004b_own_seed"));
     }
@@ -3672,7 +3985,7 @@ mod tests {
         assert_eq!(panel.path.as_deref(), Some(dir.trim_end_matches('\\')));
         assert_eq!(
             tx.restore_if_still_owned(),
-            ClipboardTransactionOutcome::Restored
+            ClipboardTransactionOutcome::Committed
         );
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_p004b_ok_seed"));
     }
@@ -3951,7 +4264,7 @@ mod tests {
 
         assert_eq!(
             tx.restore_if_still_owned(),
-            ClipboardTransactionOutcome::Restored,
+            ClipboardTransactionOutcome::Committed,
             "无并发改写时必须正常恢复"
         );
         assert_mixed_roundtrip(&before, "跨进程真实管理器写入后");
@@ -4028,7 +4341,7 @@ mod tests {
         );
         assert_eq!(
             tx.restore_if_still_owned(),
-            ClipboardTransactionOutcome::ReadFailed,
+            ClipboardTransactionOutcome::SkippedUnknownOwner,
             "归属不可判定时必须放弃恢复"
         );
 
@@ -4039,6 +4352,498 @@ mod tests {
             get_clipboard_text().as_deref(),
             Some("qp_p003_busy_original"),
             "真实剪贴板忙时绝不能覆盖用户原有内容"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 审计需求 `9549648` §3.5：P0-05 确定性会合用例
+    //
+    // 全部使用显式会合点（`arm_atomic_write_hook` / 阻塞消息泵 / 通道），不靠 `sleep`
+    // 猜时序；每条断言都覆盖：最终文本、格式集合、sequence、owner HWND、owner PID、
+    // 返回状态，以及是否执行过 `EmptyClipboard`。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// P0-05 §3.5 用例 1：`capture()` 通过后、原子原语获得剪贴板锁之前，外部进程写新内容
+    /// （等价旧的 `still_owned()` 通过 → `restore_attempt()` 拿到锁 的交错）。
+    /// 恢复必须**零修改退出**：不 EmptyClipboard、不写回旧快照的任何一个格式。
+    #[test]
+    fn test_restore_zero_modification_when_foreign_write_precedes_lock() {
+        let _guard = clip_test_lock();
+        let html = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "QuickPathT1Format"
+            ))
+        };
+        assert!(html != 0);
+        seed_clipboard_formats(&[(html, b"t1-old-html")]);
+
+        let mut snap = ClipboardSnapshot::capture().expect("含注册格式的剪贴板必须可安全捕获");
+        let before = observe_clipboard();
+
+        // 在「检查通过」与「真正持锁清空」之间让外部写入发生。
+        // 注意：注入写入自身也会执行一次 EmptyClipboard，故基线在**注入之后**采集。
+        let baseline = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let baseline_hook = baseline.clone();
+        let external = "qp_p005_t1_external".to_string();
+        arm_atomic_write_hook(0, move || {
+            assert!(set_raw_clipboard_text(&external));
+            baseline_hook.store(empty_clipboard_calls(), std::sync::atomic::Ordering::SeqCst);
+        });
+
+        assert_eq!(
+            snap.restore(),
+            Ok(RestoreStatus::Abandoned),
+            "持锁复核检出外部改写必须判为永久放弃"
+        );
+
+        let after = observe_clipboard();
+        assert_eq!(
+            after.text.as_deref(),
+            Some("qp_p005_t1_external"),
+            "外部新内容必须原样保留"
+        );
+        assert_ne!(after.sequence, before.sequence, "sequence 必须反映外部写入");
+        let empty_baseline = baseline.load(std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(empty_baseline, usize::MAX, "会合点必须已执行");
+        assert_eq!(
+            empty_clipboard_calls(),
+            empty_baseline,
+            "放弃路径绝不能执行 EmptyClipboard"
+        );
+        assert!(
+            !after.formats.contains(&html),
+            "旧快照的 HTML 格式绝不得写回"
+        );
+        let _ = set_raw_clipboard_text("qp_p005_t1_cleanup");
+    }
+
+    /// P0-05 §3.5 用例 2：`capture()` 完成、WPS 临时文本写入之前外部进程写入 ——
+    /// 临时写入必须失败（闭包不执行、不发送 Ctrl+V），并保留用户新内容。
+    #[test]
+    fn test_temporary_write_fails_when_foreign_write_precedes_write_lock() {
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_p005_t2_seed"));
+
+        let baseline = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let baseline_hook = baseline.clone();
+        let external = "qp_p005_t2_external".to_string();
+        arm_atomic_write_hook(0, move || {
+            assert!(set_raw_clipboard_text(&external));
+            baseline_hook.store(empty_clipboard_calls(), std::sync::atomic::Ordering::SeqCst);
+        });
+
+        let action_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = action_ran.clone();
+        let outcome: Result<u32, ClipboardSafetyError> =
+            with_temporary_clipboard_text("C:\\p005_t2", move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                7
+            });
+
+        assert_eq!(
+            outcome,
+            Err(ClipboardSafetyError::WriteFailed),
+            "外部改写后临时写入必须明确失败"
+        );
+        assert!(
+            !action_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "临时写入失败时闭包绝不得执行（也就不可能发送 Ctrl+V）"
+        );
+        let after = observe_clipboard();
+        assert_eq!(
+            after.text.as_deref(),
+            Some("qp_p005_t2_external"),
+            "用户新内容必须原样保留"
+        );
+        let empty_baseline = baseline.load(std::sync::atomic::Ordering::SeqCst);
+        assert_ne!(empty_baseline, usize::MAX, "会合点必须已执行");
+        assert_eq!(
+            empty_clipboard_calls(),
+            empty_baseline,
+            "失败路径必须零修改（不得清空剪贴板）"
+        );
+    }
+
+    /// P0-05 §3.5 用例 3：第一次恢复部分失败后、第二次重试前外部进程写入 ——
+    /// 后续绝不得再写入任何格式；快照必须永久放弃，且放弃后 Drop 不得补写。
+    #[test]
+    fn test_restore_retry_reverifies_and_abandons_on_foreign_write() {
+        let _guard = clip_test_lock();
+        let html = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "QuickPathT3Format"
+            ))
+        };
+        seed_clipboard_formats(&[(html, b"t3-html")]);
+        let failure_empty_baseline = empty_clipboard_calls();
+
+        let baseline = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let baseline_hook = baseline.clone();
+        let external = "qp_p005_t3_external".to_string();
+        // 首次恢复（第 1 次原子写入）注入 CF_UNICODETEXT 失败；
+        // 重试（第 2 次原子写入）开头让外部写入发生。
+        let _inject = FailInjection::enable(CF_UNICODETEXT);
+        arm_atomic_write_hook(1, move || {
+            // 会合点里的外部写入本身也是 CF_UNICODETEXT，必须临时撤下故障注入
+            // （否则“外部写入”会被自己的注入弄失败，交错就不成立）。
+            TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
+            assert!(set_raw_clipboard_text(&external));
+            TEST_FAIL_FORMAT.store(CF_UNICODETEXT, std::sync::atomic::Ordering::SeqCst);
+            baseline_hook.store(empty_clipboard_calls(), std::sync::atomic::Ordering::SeqCst);
+        });
+
+        {
+            let mut snap = ClipboardSnapshot::capture().expect("必须可安全捕获");
+            assert_eq!(
+                snap.restore(),
+                Ok(RestoreStatus::Abandoned),
+                "重试前检出外部改写必须永久放弃"
+            );
+            let after = observe_clipboard();
+            assert_eq!(
+                after.text.as_deref(),
+                Some("qp_p005_t3_external"),
+                "外部新内容必须原样保留"
+            );
+            let empty_baseline = baseline.load(std::sync::atomic::Ordering::SeqCst);
+            assert_ne!(empty_baseline, usize::MAX, "会合点必须已执行");
+            // 首次恢复确实清空过一次（+1），会合点里的外部写入自己又清空一次（+1）；
+            // 重试（empty_first=false）与 Drop 绝不得再清空。
+            assert_eq!(
+                empty_baseline,
+                failure_empty_baseline + 2,
+                "只允许首次恢复与会合点注入各一次 EmptyClipboard"
+            );
+            assert_eq!(
+                empty_clipboard_calls(),
+                empty_baseline,
+                "放弃后（含重试与 Drop）绝不得再执行 EmptyClipboard"
+            );
+            assert!(
+                !after.formats.contains(&html),
+                "放弃后不得向用户新剪贴板追加剩余格式"
+            );
+        }
+
+        assert_eq!(
+            empty_clipboard_calls(),
+            baseline.load(std::sync::atomic::Ordering::SeqCst),
+            "snap 已 drop 仍不得补写"
+        );
+        let _ = set_raw_clipboard_text("qp_p005_t3_cleanup");
+    }
+
+    /// P0-05 §3.5 用例 4：用户复制**字面相同**的 Unicode 文本，但 HTML / 自定义格式不同 ——
+    /// 旧快照不得覆盖新格式（已删除「文本相同即可继续恢复」的宽松放行）。
+    #[test]
+    fn test_restore_refuses_same_text_with_different_formats() {
+        let _guard = clip_test_lock();
+        let html = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "QuickPathT4Format"
+            ))
+        };
+        assert!(html != 0);
+
+        seed_clipboard_formats_with_text("qp_p005_t4_text", &[(html, b"t4-old-html")]);
+        let mut snap = ClipboardSnapshot::capture().expect("必须可安全捕获");
+
+        // 临时写入的文本与随后用户复制的文本字面完全相同
+        let seq = set_raw_clipboard_text_tracked("qp_p005_t4_text").expect("临时写入必须成功");
+        snap.bind_owned_write("qp_p005_t4_text", seq);
+
+        // 用户复制：Unicode 文本一模一样，但携带完全不同的 HTML 格式
+        seed_clipboard_formats_with_text("qp_p005_t4_text", &[(html, b"t4-user-html")]);
+
+        assert_eq!(
+            snap.restore(),
+            Ok(RestoreStatus::Abandoned),
+            "字面文本相同也必须按 sequence 判定为外部改写"
+        );
+        let after = observe_clipboard();
+        assert_eq!(after.text.as_deref(), Some("qp_p005_t4_text"));
+        assert_eq!(
+            read_clipboard_format_bytes(html).as_deref(),
+            Some(&b"t4-user-html"[..]),
+            "用户新格式绝不得被旧快照覆盖"
+        );
+    }
+
+    /// P0-05 §3.5 用例 5：事务放弃后触发 `Drop` —— 不得发生第二次恢复。
+    #[test]
+    fn test_transaction_drop_after_abandon_never_writes_again() {
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_p005_t5_seed"));
+
+        let empty_before;
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+            tx.write_owned_text("").expect("临时写入必须成功");
+            // 外部改写 → 放弃恢复
+            assert!(set_raw_clipboard_text("qp_p005_t5_user"));
+            assert_eq!(
+                tx.restore_if_still_owned(),
+                ClipboardTransactionOutcome::SkippedForeignChange,
+                "外部改写必须跳过恢复"
+            );
+            empty_before = empty_clipboard_calls();
+        }
+
+        assert_eq!(
+            empty_clipboard_calls(),
+            empty_before,
+            "放弃后 Drop 绝不得再执行 EmptyClipboard"
+        );
+        let after = observe_clipboard();
+        assert_eq!(
+            after.text.as_deref(),
+            Some("qp_p005_t5_user"),
+            "放弃后 Drop 绝不得覆盖用户新内容"
+        );
+        assert_eq!(
+            after.owner_pid,
+            std::process::id(),
+            "最终 owner 必须是测试进程自己（而不是遗留的悬浮 owner）"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 审计需求 `9549648` §2.5：P0-04-B 延迟处理两次通知的生产入口用例
+    //
+    // 本机未安装 Total Commander / XYplorer（且用户不授权安装），故“管理器写入”
+    // 由**独立 OS 进程**（`Set-Clipboard`）完成；“管理器身份”不参与判定（来源断言
+    // 传 `|_| true` 最宽松闭包），拒绝必须**只能**来自「更新历史不可证明」。
+    // 两条链路调用的都是同一套生产入口：`probe_two_panels` → `probe_panel_path` →
+    // `ClipboardTransaction::note_observed_owned_text_proven`。
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// 阻塞 owner 消息泵 → 用户（外部进程 A）先写 → 管理器（外部进程 B）后写 →
+    /// 两次写入完成后再处理通知。事务必须拒绝认领，不恢复旧快照、不发起第二面板请求。
+    fn delayed_two_notifications_rejects_claim(label: &str, tag: &str) {
+        let dir = make_probe_dir(tag);
+        let seed = format!("qp_p004b_delay_{tag}_seed");
+        assert!(set_raw_clipboard_text(&seed));
+
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+        let second_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_flag = second_called.clone();
+        let probe_dir = dir.clone();
+
+        let err = probe_two_panels(
+            &mut tx,
+            // 最关键的设计：来源判定放到最宽松。若拒绝来自 PID 不匹配，说明判据仍然
+            // 依赖不可靠的“处理时 owner”，本用例就失去了意义。
+            |_| true,
+            move || {
+                let marker = clipboard_update_marker();
+                let release = block_owner_pump_for_test();
+                assert!(
+                    clip_write_from_external_process("qp_p004b_delay_user"),
+                    "{label}: 外部进程用户写入必须成功"
+                );
+                assert!(
+                    clip_write_from_external_process(&probe_dir),
+                    "{label}: 外部进程管理器写入必须成功"
+                );
+                // 两次写入都完成后才放行消息泵，并等两条通知都被登记
+                drop(release);
+                assert!(
+                    wait_for_events_after(marker, 2, Duration::from_secs(10)),
+                    "{label}: 延迟的两条通知必须都被登记"
+                );
+                Some(1)
+            },
+            move || {
+                second_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Some(1)
+            },
+        )
+        .expect_err("延迟处理两次通知时必须拒绝认领");
+
+        assert!(
+            matches!(
+                err,
+                ClipboardTransactionError::OwnershipUnknown | ClipboardTransactionError::NotOwned
+            ),
+            "{label}: 必须是 fail-closed 错误，实际 {:?}",
+            err
+        );
+        assert!(
+            !second_called.load(std::sync::atomic::Ordering::SeqCst),
+            "{label}: 失败路径不得发起第二面板请求"
+        );
+
+        let empty_before = empty_clipboard_calls();
+        let outcome = tx.restore_if_still_owned();
+        assert!(
+            matches!(
+                outcome,
+                ClipboardTransactionOutcome::AbortedEventHistoryUnprovable
+                    | ClipboardTransactionOutcome::SkippedForeignChange
+                    | ClipboardTransactionOutcome::SkippedUnknownOwner
+            ),
+            "{label}: 必须留下结构化终止态，实际 {:?}",
+            outcome
+        );
+        assert_eq!(
+            empty_clipboard_calls(),
+            empty_before,
+            "{label}: 失败路径不得恢复旧快照（不执行 EmptyClipboard）"
+        );
+        let after = observe_clipboard();
+        assert_eq!(
+            after.text.as_deref(),
+            Some(dir.as_str()),
+            "{label}: 不得写回旧快照覆盖当前内容"
+        );
+        assert!(
+            after.sequence != 0,
+            "{label}: 必须能读到有效的剪贴板 sequence"
+        );
+        assert!(
+            after.formats.contains(&CF_UNICODETEXT),
+            "{label}: 当前剪贴板必须仍含管理器写入的文本格式"
+        );
+        // owner HWND/PID 已在 `ClipboardObservation` 中采集；外部进程可能已退出，
+        // 此时 owner 为 NULL（PID 0）——这正是“处理时采样无法回溯历史”的直接证据，
+        // 不能用它做归属证明。
+        assert_eq!(
+            after.owner_hwnd == 0,
+            after.owner_pid == 0,
+            "{label}: owner HWND 与 PID 必须一致（NULL ⇔ 0）"
+        );
+    }
+
+    /// 清单 §2.5 用例 2：同一交错覆盖 Total Commander 链路。
+    #[test]
+    fn test_totalcmd_delayed_two_notifications_rejects_claim() {
+        let _guard = clip_test_lock();
+        delayed_two_notifications_rejects_claim("totalcmd", "p004b_delay_tc");
+    }
+
+    /// 清单 §2.5 用例 2：同一交错覆盖 XYplorer 链路。
+    #[test]
+    fn test_xyplorer_delayed_two_notifications_rejects_claim() {
+        let _guard = clip_test_lock();
+        delayed_two_notifications_rejects_claim("xyplorer", "p004b_delay_xy");
+    }
+
+    /// 清单 §2.5 用例 1 的“干净对照”：同样阻塞消息泵，但只有一次外部写入（无交错），
+    /// 必须正常认领 —— 否则 fail-closed 就成了“永远失败”，反而失去探测价值。
+    #[test]
+    fn test_delayed_single_notification_still_claims() {
+        let _guard = clip_test_lock();
+        let dir = make_probe_dir("p004b_delay_single");
+        assert!(set_raw_clipboard_text("qp_p004b_delay_single_seed"));
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        let probe_dir = dir.clone();
+        let panel = probe_panel_path(
+            &mut tx,
+            |_| true,
+            move || {
+                let marker = clipboard_update_marker();
+                let release = block_owner_pump_for_test();
+                assert!(clip_write_from_external_process(&probe_dir));
+                drop(release);
+                assert!(wait_for_events_after(marker, 1, Duration::from_secs(10)));
+                Some(1)
+            },
+        )
+        .expect("只有一次外部写入时必须能正常认领");
+        assert_eq!(panel.path.as_deref(), Some(dir.as_str()));
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::Committed
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p004b_delay_single_seed")
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 审计需求 `9549648` §4.3：架构守卫
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn collect_rs_files(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// §4.3：阻止生产代码绕过统一原语形成新的 `OpenClipboard -> EmptyClipboard` 路径。
+    ///
+    /// 规则：
+    /// 1. 除 `src/win32/clipboard.rs` 之外，任何源文件不得直接调用剪贴板的清空/写入 Win32 API；
+    /// 2. `clipboard.rs` 生产区（`mod tests` 之前、剔除注释行后）里：
+    ///    `EmptyClipboard(` / `OpenClipboard(` / `SetClipboardData(` 各只允许出现**一处**
+    ///    （分别在 `clipboard_atomic_write` / `open_clipboard_with_retry` / `prod_set`）。
+    #[test]
+    fn test_architecture_guard_single_atomic_clipboard_write_primitive() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let clipboard_path = src_root.join("win32").join("clipboard.rs");
+        let forbidden = ["EmptyClipboard(", "SetClipboardData(", "OpenClipboard("];
+
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(files.len() > 20, "必须能枚举到源码文件");
+        for file in &files {
+            if *file == clipboard_path {
+                continue;
+            }
+            let source = std::fs::read_to_string(file).expect("源码必须可读");
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for needle in forbidden {
+                assert!(
+                    !code.contains(needle),
+                    "{} 不得直接调用 `{}`：必须走统一原子原语",
+                    file.display(),
+                    needle
+                );
+            }
+        }
+
+        let source = std::fs::read_to_string(&clipboard_path).expect("clipboard.rs 必须可读");
+        let production_end = source
+            .find("\nmod tests {")
+            .expect("必须存在测试模块以便切分生产区");
+        let production = source[..production_end]
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            production.matches("EmptyClipboard(").count(),
+            1,
+            "EmptyClipboard 只允许出现在统一原子原语 clipboard_atomic_write 中"
+        );
+        assert_eq!(
+            production.matches("OpenClipboard(").count(),
+            1,
+            "OpenClipboard 只允许出现在 open_clipboard_with_retry 中"
+        );
+        assert_eq!(
+            production.matches("SetClipboardData(").count(),
+            1,
+            "SetClipboardData 只允许出现在 prod_set 中"
+        );
+        assert!(
+            production.contains("fn clipboard_atomic_write<"),
+            "统一原子原语必须存在"
         );
     }
 }
