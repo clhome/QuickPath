@@ -1494,6 +1494,37 @@
 2. **报告 §11 Windows 11 真机验收矩阵未执行**（同上批）。
 3. `state_mut()` 重入非类型安全；COM 被放弃的 STA 线程不可取消。
 
+## 审计报告 v1.2.3 修复轮（2026-10-14，goal mv7fz8i7-avl84i）
+
+**目标**：按 `test/QuickPath_审计评分报告_v1.2.3.md`（审计对象 `5272e83`）逐项修复开放项/观察项；每项一个 subagent + 一个独立 commit；全量门禁每轮跑。
+
+**基线（t0，`5272e83`，工作树干净）**：`cargo fmt --all -- --check` 干净；`cargo clippy --all-targets -- -D warnings` 0 告警；`cargo test --all-targets` 99 通过 0 失败；`cargo build --release` 通过（cargo 1.94.1 / Windows 11）。
+
+**开放项复核（t0，均确认仍成立）**：
+
+- S-02：`src/win32/clipboard.rs:158-181` 注册用 `hinstance`，`CreateWindowExW` 传 `None`。
+- P-04（§7）：`src/managers/scanner.rs:29` 有 400 ms 预算，但无 P50/P95/P99、缓存命中率、generation 丢弃率、预算耗尽/队头阻塞遥测。
+- R-05（§8）：`src/main.rs:61,102,232,259,504` 仍以裸指针 + `Box::from_raw` 传递/回收 `AppState`。
+- §8：`src/tab/com.rs:283-311` worker 重建仅计数告警（`MAX_REBUILDS_ALERT`），无硬上限/退避/降级。
+- §8：`src/win32/clipboard.rs:188` owner 消息泵无退出协议。
+- §9：`src/dialog/detector.rs:177-187` 脱敏仅覆盖 `USERPROFILE`/用户名，未覆盖 UNC、非系统盘与窗口标题。
+- §11 三-3：`.github/workflows/` 仅有 tag 发布通道（`release.yml`），无 PR/push 常规门禁。
+- Authenticode（§11 三-1）：用户决定本轮**不实现**，仅保留注释模板/文档说明。
+
+**任务清单**：
+
+- [x] t0 基线校验（见上）
+- [ ] t1 S-02 `hinstance` 配对 + owner 创建集成测试
+- [ ] t2 剪贴板混合格式往返 + 失败不上报成功测试
+- [ ] t3 移除 `AppState` 裸指针
+- [ ] t4 COM worker 重建上限/退避/降级
+- [ ] t5 owner 线程退出协议
+- [ ] t6 扫描遥测 + P-04
+- [ ] t7 日志脱敏扩展 + 设置页日志入口
+- [ ] t8 常规 CI + Authenticode 文档保留
+- [ ] t9 Win+E 失败分支测试 + 真机验收清单文档化
+- [ ] t10 收口（全量门禁 + 逐项对照 + 清理）
+
 
 
 
