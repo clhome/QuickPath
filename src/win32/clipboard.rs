@@ -3121,4 +3121,277 @@ mod tests {
             "Drop 兜底检出外部改写时绝不覆盖"
         );
     }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 真实运行时 / 跨进程证据（2026-10-14 补；对应整改报告 §5.1 可自动化子集）
+    //
+    // 与前面用例的差别：「管理器写入」与「用户并发复制」均由**独立 OS 进程**完成
+    // （系统自带 `cmd.exe` + `clip.exe`），剪贴板内容与 `GetClipboardSequenceNumber`
+    // 全部是系统真实状态，进程内不 mock 任何剪贴板行为。
+    //
+    // 目的：在本机未安装 Total Commander / XYplorer 的前提下，尽可能逼近报告 §2.6
+    // 第 4 条「真实 Windows 11 上复现两个竞态窗口」。
+    // **仍未覆盖**（必须真机人工执行）：真实 totalcmd.exe / xyplorer.exe 回写路径的时序、
+    // 真实管理器卡顿/假死、人工操作的随机节奏 —— 见 `Document/真机验收清单_竞态与生命周期_v1.2.3.md` §6/§8.2。
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// 用 `powershell` / `pwsh` 的 `Set-Clipboard` 从**独立进程**精确写入剪贴板。
+    ///
+    /// 与 `set_raw_clipboard_text` 的关键区别：写入发生在**另一个进程**，因此
+    /// `GetClipboardSequenceNumber` 的变化来自真实跨进程写，更贴近真实管理器行为。
+    ///
+    /// 为何不用 `cmd echo text|clip`：`echo` 会附加 CRLF，读回文本与预期不符
+    /// （本文件第一版跨进程夹具就是这样被自已绊倒的，断言里能看到 `...user_b\r\n`）。
+    /// `Set-Clipboard -Value` 写入的是精确字符串（已实测：14 字符写入读回 14 字符）。
+    fn clip_write_from_external_process(text: &str) -> bool {
+        use std::process::{Command, Stdio};
+        assert!(
+            !text.contains(['\'', '"', '`', '\n', '\r']),
+            "跨进程写入的探针文本受控，不得包含引号或换行"
+        );
+        let script = format!("Set-Clipboard -Value '{text}'");
+        // PS 5.1 起自带 Set-Clipboard；优先 pwsh，退化到系统自带 powershell
+        for exe in ["pwsh", "powershell"] {
+            let ok = Command::new(exe)
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 报告 §5.1 用例 1（C-06）：跨进程真实复现「第一次管理器写入后、第二次清空前用户复制」——
+    /// 第二次写入必须被拒绝，用户新内容原样保留，最终结局为 `SkippedForeignChange`。
+    #[test]
+    fn test_xproc_case1_user_copy_after_first_manager_write_blocks_second_clear() {
+        let _guard = clip_test_lock();
+        let d1 = make_probe_dir("xproc_case1_src");
+        let d2 = make_probe_dir("xproc_case1_trg");
+
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        // 第一次探测：由独立进程扮演管理器写入真实目录路径
+        let p1 = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
+            clip_write_from_external_process(&d1).then_some(0)
+        })
+        .expect("跨进程管理器写入后的读回必须成功");
+        assert_eq!(
+            p1.path.as_deref(),
+            Some(d1.as_str()),
+            "必须取回真实目录路径"
+        );
+
+        // 竞态窗口：用户在第二次清空之前从独立进程复制了新内容
+        assert!(
+            clip_write_from_external_process("qp_p003_xproc_user_a"),
+            "跨进程并发复制必须成功"
+        );
+
+        // 第二次写入前必须检出外部改写并拒绝
+        let err = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
+            let _ = clip_write_from_external_process(&d2);
+            Some(0)
+        })
+        .expect_err("第二次清空前检出外部改写必须拒绝写入");
+        assert_eq!(err, ClipboardTransactionError::NotOwned, "必须是 NotOwned");
+
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::SkippedForeignChange,
+            "最终结局必须是跳过恢复，绝不写回旧快照"
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p003_xproc_user_a"),
+            "用户跨进程复制的新内容必须原样保留"
+        );
+    }
+
+    /// 报告 §5.1 用例 2（C-07）：跨进程真实复现「最后一次管理器写入后、恢复前用户复制」——
+    /// 恢复阶段必须跳过旧快照。
+    #[test]
+    fn test_xproc_case2_user_copy_after_last_manager_write_skips_restore() {
+        let _guard = clip_test_lock();
+        let d1 = make_probe_dir("xproc_case2_src");
+
+        assert!(
+            clip_write_from_external_process("qp_p003_xproc_case2_seed"),
+            "种子写入必须成功"
+        );
+
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+        let p1 = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
+            clip_write_from_external_process(&d1).then_some(0)
+        })
+        .expect("跨进程管理器写入后的读回必须成功");
+        assert_eq!(p1.path.as_deref(), Some(d1.as_str()));
+
+        // 竞态窗口：最后一次写入之后、恢复之前
+        assert!(
+            clip_write_from_external_process("qp_p003_xproc_user_b"),
+            "跨进程并发复制必须成功"
+        );
+
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::SkippedForeignChange,
+            "恢复前检出外部改写必须跳过恢复"
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p003_xproc_user_b"),
+            "用户新内容必须原样保留（旧快照绝不写回）"
+        );
+    }
+
+    /// 报告 §5.1 C-02：跨进程真实「管理器写入」（会清空剪贴板）之后，六类格式必须逐格式恢复。
+    #[test]
+    fn test_xproc_manager_write_restores_all_seeded_formats() {
+        let _guard = clip_test_lock();
+
+        let html_format = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "HTML Format"
+            ))
+        };
+        let rtf_format = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "Rich Text Format"
+            ))
+        };
+        let custom_format = unsafe {
+            windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
+                "QuickPathMixedFormatProbe"
+            ))
+        };
+        assert!(html_format != 0 && rtf_format != 0 && custom_format != 0);
+
+        let html = "<html><body>QuickPath 跨进程 HTML</body></html>"
+            .as_bytes()
+            .to_vec();
+        let rtf = r"{\rtf1\ansi QuickPath 跨进程 RTF}".as_bytes().to_vec();
+        let custom = b"quickpath-xproc-hglobal-probe".to_vec();
+        let hdrop = hdrop_blob(&[r"C:\QuickPath\x1.txt", r"D:\QuickPath\x2.bin"]);
+        let dib = minimal_dib_blob();
+
+        seed_clipboard_formats(&[
+            (html_format, &html),
+            (rtf_format, &rtf),
+            (custom_format, &custom),
+            (CF_HDROP, &hdrop),
+            (CF_DIB, &dib[..]),
+        ]);
+        let before = ClipboardSnapshot::capture().expect("混合格式剪贴板必须能被安全完整捕获");
+
+        let target = make_probe_dir("xproc_mixed");
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+        let panel = crate::managers::clipboard_probe::probe_panel_path(&mut tx, || {
+            clip_write_from_external_process(&target).then_some(0)
+        })
+        .expect("跨进程管理器写入后的读回必须成功");
+        assert_eq!(
+            panel.path.as_deref(),
+            Some(target.as_str()),
+            "必须取回真实目录"
+        );
+
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::Restored,
+            "无并发改写时必须正常恢复"
+        );
+        assert_mixed_roundtrip(&before, "跨进程真实管理器写入后");
+    }
+
+    /// 报告 §5.1 C-01：真实检查 owner 隐藏窗口存在，且 QuickPath 写入剪贴板时
+    /// `GetClipboardOwner()` 必须就是该 owner 窗口（而不是 NULL）。
+    #[test]
+    fn test_owner_window_is_real_clipboard_owner_during_write() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::DataExchange::GetClipboardOwner;
+
+        let _guard = clip_test_lock();
+        let owner = clipboard_owner().expect("owner 窗口必须可用");
+        assert!(
+            unsafe { IsWindow(Some(owner)).as_bool() },
+            "owner 窗口必须存活"
+        );
+
+        assert!(
+            set_raw_clipboard_text("qp_p003_owner_probe"),
+            "写入必须成功"
+        );
+        let actual = unsafe { GetClipboardOwner() }.expect("写入后必须能取到剪贴板所有者");
+        assert_ne!(actual, HWND::default(), "写入后剪贴板不得无主（NULL）");
+        assert_eq!(
+            actual, owner,
+            "QuickPath 写入剪贴板后 GetClipboardOwner() 必须是我们的 owner 窗口"
+        );
+
+        // 收尾：不把探针文本留给后续用例
+        assert!(set_raw_clipboard_text(""));
+    }
+
+    /// 报告 §5.1 C-03：**真实**剪贴板忙（另一线程真实持有 `OpenClipboard`）时，
+    /// 写入必须失败、结局必须为 `ReadFailed`（放弃恢复），且绝不覆盖用户原有内容。
+    ///
+    /// 与 `test_clipboard_busy_is_reported_and_never_claims_success` 的区别：后者用
+    /// `TEST_FORCE_BUSY` 注入，本用例是真实的系统级占用，无任何注入。
+    #[test]
+    fn test_real_clipboard_busy_never_clobbers() {
+        let _guard = clip_test_lock();
+        assert!(
+            clip_write_from_external_process("qp_p003_busy_original"),
+            "种子写入必须成功"
+        );
+        let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+
+        // 另一线程真实占住剪贴板，一直持有到主线程放行
+        let (locked_tx, locked_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder = thread::spawn(move || {
+            let mut held = false;
+            for _ in 0..300 {
+                if unsafe { OpenClipboard(None) }.is_ok() {
+                    held = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(held, "占用线程必须能打开剪贴板");
+            let _ = locked_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            let _ = unsafe { CloseClipboard() };
+        });
+
+        locked_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("必须观察到剪贴板已被真实占用");
+
+        assert!(
+            tx.write_owned_text("").is_err(),
+            "真实剪贴板忙时临时写入必须失败（不得假成功）"
+        );
+        assert_eq!(
+            tx.restore_if_still_owned(),
+            ClipboardTransactionOutcome::ReadFailed,
+            "归属不可判定时必须放弃恢复"
+        );
+
+        let _ = release_tx.send(());
+        holder.join().expect("占用线程必须正常结束");
+
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p003_busy_original"),
+            "真实剪贴板忙时绝不能覆盖用户原有内容"
+        );
+    }
 }
