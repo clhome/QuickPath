@@ -1,0 +1,16 @@
+# 统一换行符策略（2026-10-14 新增）
+#
+# 背景：本仓库此前**没有** `.gitattributes`，而开发机 `core.autocrlf=true`。后果是
+# git 在检出/回滚文件时会把工作区文件写成 CRLF，与仓库既有约定（源码 UTF-8 无 BOM + LF）
+# 以及其它文件的实际状态（`git ls-files --eol` 多为 `w/lf`）不一致。这已经造成过一次真实
+# 事故：用 `git checkout -- <file>` 回滚变异探针后，文件被悄无声息地转成 CRLF，必须再用
+# `rm` + `git -c core.autocrlf=false checkout` 才能复原（详见 `cl_tasks/整改对照表_v1.2.3.md` §9 O-10）。
+#
+# `text=auto` 让 git 自行识别文本文件并统一以 LF 存储；`eol=lf` 让检出到工作区的内容也是 LF，
+# 从而在任何平台、任何 `core.autocrlf` 设置下行为一致。二进制文件由 `text=auto` 的自动探测
+# 保持二进制（不会做换行转换）。
+#
+# 兼容性说明：本文件不改变任何已入库内容——新增当时仓库索引中的 blob 全部为 LF（83 个）
+# 或二进制/空文件（18 个），不存在 CRLF blob，因此不会产生“全仓重新规范化”的大 diff。
+# 若其他开发者工作区里存在 CRLF 文件，下次检出会自动变为 LF，diff 仍为空（内容等价）。
+* text=auto eol=lf
