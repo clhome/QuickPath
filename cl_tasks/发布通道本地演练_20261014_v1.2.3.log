@@ -1,0 +1,366 @@
+==============================================================================
+本地忠实执行 workflow：.github\workflows\release.yml
+模拟 tag（github.ref_name）= v1.2.3
+shell = pwsh ；cwd = F:\git\gitea20250909\QuickPath
+workflow 文件 sha256 = 421a1402cc0bbc6e5c11f3288bf88e2be162dd94955d12c3cb6bdcdb034bd5b3
+步骤总数 = 12（其中 run: 步骤将被真实执行，uses: 步骤跳过）
+==============================================================================
+
+───── [1/12] 检出代码
+  [跳过] uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683（GitHub Action，本地无法执行）
+
+───── [2/12] 门禁：标签版本与 Cargo.toml 一致
+  [执行] shell=pwsh（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | $tag = "v1.2.3"
+  | # 去掉前导 v，并剥离预发布后缀（与「判定发布通道」步骤同一口径）
+  | $tagVersion = ($tag -replace '^v', '') -replace '(?i)(-rc|-alpha|-beta|-pre).*$', ''
+  | 
+  | if (-not (Test-Path Cargo.toml)) {
+  |   Write-Error "未找到 Cargo.toml，无法校验标签版本"
+  |   exit 1
+  | }
+  | $cargoToml = Get-Content Cargo.toml -Raw
+  | if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+  |   Write-Error "无法从 Cargo.toml 解析 [package] version"
+  |   exit 1
+  | }
+  | $pkgVersion = $Matches[1]
+  | 
+  | if ($tagVersion -ne $pkgVersion) {
+  |   Write-Error "标签版本与 Cargo.toml 不一致：标签 $tag 解析为 $tagVersion，Cargo.toml 为 $pkgVersion"
+  |   exit 1
+  | }
+  | Write-Host "版本一致：标签 $tag，Cargo.toml $pkgVersion"
+  ---- 执行输出 ----
+  > �汾һ�£���ǩ v1.2.3��Cargo.toml 1.2.3
+  [结果] exit=0  用时=0.6s
+
+───── [3/12] 安装固定版本 Rust 工具链
+  [执行] shell=pwsh（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
+  | rustup default 1.94.1
+  | rustc -V
+  | cargo -V
+  ---- 执行输出 ----
+  > 
+  >   1.94.1-x86_64-pc-windows-msvc installed - rustc 1.94.1 (e408947bf 2026-03-25)
+  > 
+  > 
+  >   1.94.1-x86_64-pc-windows-msvc unchanged - rustc 1.94.1 (e408947bf 2026-03-25)
+  > 
+  > rustc 1.94.1 (e408947bf 2026-03-25)
+  > cargo 1.94.1 (29ea6fb6a 2026-03-24)
+  > info: syncing channel updates for 1.94.1-x86_64-pc-windows-msvc
+  > info: latest update on 2026-03-26 for version 1.94.1 (e408947bf 2026-03-25)
+  > info: downloading 5 components
+  > info: checking for self-update (current version: 1.29.0)
+  > info: downloading self-update (new version: 1.29.1)
+  > info: using existing install for 1.94.1-x86_64-pc-windows-msvc
+  > info: default toolchain set to 1.94.1-x86_64-pc-windows-msvc
+  [结果] exit=0  用时=19.2s
+
+───── [4/12] 启用 Rust 编译缓存
+  [跳过] uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3（GitHub Action，本地无法执行）
+
+───── [5/12] 质量门禁：执行单元与集成测试
+  [执行] shell=bash（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | cargo test --all-targets
+  ---- 执行输出 ----
+  > 
+  > running 171 tests
+  > test dialog::detector::debug_log_tests::test_replace_ascii_case_insensitive_keeps_bytes ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_is_case_insensitive ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_is_idempotent ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_masks_long_path_unc ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_keeps_profile_and_username_precedence ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_leaves_plain_text_untouched ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_masks_non_system_drive ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_masks_profile_and_username ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_masks_path_embedded_in_window_title ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_masks_unc_host_and_share ... ok
+  > test dialog::detector::debug_log_tests::test_sanitize_preserves_system_drive_non_user_dirs ... ok
+  > test dialog::detector::tests::test_file_name_priority_excludes_search_and_address ... ok
+  > test dialog::detector::tests::test_is_wps_main_window ... ok
+  > test dialog::detector::tests::test_is_wps_process_name ... ok
+  > test dialog::detector::tests::test_standard_dialog_title_matching ... ok
+  > test dialog::detector::tests::test_debug_mode_switch ... ok
+  > test dialog::detector::tests::test_standard_predicate_requires_ready_controls ... ok
+  > test dialog::injector::tests::test_directory_roots_preserve_absolute_paths ... ok
+  > test dialog::injector::tests::test_restore_preserves_user_input ... ok
+  > test dialog::detector::debug_log_tests::test_remove_log_files_is_idempotent_and_reports_failures ... ok
+  > test dialog::detector::debug_log_tests::test_remove_log_files_deletes_current_and_backup ... ok
+  > test managers::ipc::tests::test_each_enumerated_manager_window_is_verified_against_process_image ... ok
+  > test managers::ipc::tests::test_failure_cooldown_blocks_then_success_clears ... ok
+  > test managers::ipc::tests::test_process_name_matching_is_case_insensitive_and_filename_only ... ok
+  > test dialog::detector::debug_log_tests::test_rotate_log_keeps_single_backup_and_caps_disk_use ... ok
+  > test managers::clipboard_probe::tests::test_managers_delegate_clipboard_handling_to_transaction_probe ... ok
+  > test managers::scanner::tests::test_cache_hit_and_miss_recorded ... ok
+  > test managers::scanner::tests::test_cache_hit_rate_is_zero_without_samples ... ok
+  > test dialog::injector::tests::test_invalid_dialog_edit_is_rejected ... ok
+  > test managers::scanner::tests::test_disabled_managers_never_scan ... ok
+  > test managers::scanner::tests::test_head_of_line_blocked_counted_only_when_worker_busy ... ok
+  > test managers::scanner::tests::test_sample_rings_are_bounded ... ok
+  > test managers::scanner::tests::test_stale_result_served_and_counted ... ok
+  > test managers::scanner::tests::test_worker_scan_percentiles ... ok
+  > test managers::scanner::tests::test_worker_start_gate_retries_after_spawn_failure ... ok
+  > test managers::scanner::tests::test_zero_budget_exhaustion_is_counted ... ok
+  > test managers::scanner::tests::test_zero_budget_returns_without_blocking ... ok
+  > test managers::scanner::tests::test_caller_wait_samples_only_for_nonzero_budget ... ok
+  > test managers::tracker::tests::test_get_all_candidates_is_zero_wait_even_when_source_enabled ... ok
+  > test managers::tracker::tests::test_get_auto_switch_target_is_zero_wait ... ok
+  > test monitor::collector::gpu::tests::test_parse_gpu_pid ... ok
+  > test monitor::window::render::tests::test_metric_status_color_thresholds ... ok
+  > test monitor::window::render::tests::test_network_status_color_thresholds ... ok
+  > test monitor::window::render::tests::test_parse_metric_display ... ok
+  > test monitor::window::render::tests::test_parse_network_display ... ok
+  > test monitor::window::tooltip::tests::test_tooltip_data_en_us ... ok
+  > test monitor::window::tooltip::tests::test_tooltip_data_no_battery_desktop ... ok
+  > test monitor::window::tooltip::tests::test_tooltip_data_vram_fallback ... ok
+  > test monitor::window::tooltip::tests::test_tooltip_data_zh_cn ... ok
+  > test monitor::window::tooltip::tests::test_tooltip_uptime_variations ... ok
+  > test rules::config::tests::test_app_config_missing_fields_defaults ... ok
+  > test rules::config::tests::test_config_roundtrip_stays_in_isolated_path ... ok
+  > test rules::config::tests::test_corrupted_json_isolation_concept ... ok
+  > test rules::config::tests::test_monitor_position_default ... ok
+  > test rules::config::tests::test_tab_module_config_defaults ... ok
+  > 
+  > ���� Ping 127.0.0.1 ���� 32 �ֽڵ�����:
+  > ���� 127.0.0.1 �Ļظ�: �ֽ�=32 ʱ��<1ms TTL=128
+  > test rules::config::tests::test_user_settings_respect ... ok
+  > test rules::i18n::tests::test_dynamic_version_injection ... ok
+  > test rules::i18n::tests::test_floating_producer_i18n ... ok
+  > test rules::i18n::tests::test_monitor_tips_and_abbrev_labels_i18n ... ok
+  > test rules::version::tests::test_app_manifest_version_tracks_single_version_source ... ok
+  > test rules::version::tests::test_cargo_lock_quickpath_version_tracks_single_version_source ... ok
+  > test rules::version::tests::test_readme_badges_track_single_version_source ... ok
+  > test dialog::detector::tests::test_hidden_classic_dialog_accepts_listview_and_edt1 ... ok
+  > test dialog::injector::tests::test_hidden_edit_relationship_and_bounded_messages ... ok
+  > test managers::ipc::tests::test_run_bounded_returns_true_for_fast_child ... ok
+  > test tab::com::tests::test_degrade_backoff_grows_exponentially_with_cap ... ok
+  > test tab::com::tests::test_degraded_dispatch_fails_fast_without_waiting_or_spawning ... ok
+  > test dialog::detector::tests::test_hidden_properties_open_title_is_not_sufficient ... ok
+  > test tab::com::tests::test_half_open_probe_success_recovers_circuit ... ok
+  > test tab::com::tests::test_half_open_probe_failure_returns_to_degraded_with_doubled_backoff ... ok
+  > test tab::com::tests::test_healthy_worker_success_keeps_circuit_closed ... ok
+  > test tab::com::tests::test_is_physical_dir_path ... ok
+  > test tab::com::tests::test_parse_shell_url_standard_files ... ok
+  > test tab::com::tests::test_parse_shell_url_virtual_folders ... ok
+  > test tab::com::tests::test_percentile_handles_empty_and_single_sample ... ok
+  > test tab::com::tests::test_resolve_tab_path_logic ... ok
+  > test tab::com::tests::test_spawn_failure_degrades_without_panic_or_fake_success ... ok
+  > test tab::com::tests::test_stats_percentiles_and_describe ... ok
+  > test tab::com::tests::test_worker_rebuild_counter_accumulates_for_alerting ... ok
+  > test tab::coordinator::tests::test_parse_select_target_from_cmdline ... ok
+  > test tab::coordinator::tests::test_tab_sources_never_use_unbounded_send_message ... ok
+  > test dialog::detector::tests::test_hidden_modern_dialog_selects_filename_not_search ... ok
+  > test tab::hook::tests::test_hook_guard_rejects_occupied_slot_without_disturbing_owner ... ok
+  > test tab::keyboard::tests::test_keyboard_guard_slot_ownership_and_release ... ok
+  > test tab::mouse::tests::test_mouse_guard_rejects_occupied_slot_without_disturbing_owner ... ok
+  > test tab::owner::tests::test_borrow_after_release_fails_and_owner_is_released_once ... ok
+  > test tab::owner::tests::test_double_install_is_rejected_without_leaking ... ok
+  > test tab::owner::tests::test_promote_to_owned_outlives_release ... ok
+  > test tab::select::tests::test_pick_tab_index_ignores_empty_names_and_targets ... ok
+  > test tab::select::tests::test_pick_tab_index_prefers_unique_exact_name ... ok
+  > test tab::select::tests::test_pick_tab_index_same_leaf_uses_com_index_and_needs_path_proof ... ok
+  > test tab::com::tests::test_consecutive_timeouts_trip_circuit_breaker ... ok
+  > test tests::test_format_scan_telemetry_includes_com_stats ... ok
+  > test tests::test_format_scan_telemetry_reports_unavailable_com ... ok
+  > test tab::select::tests::test_sta_worker_source_never_calls_uia ... ok
+  > test tests::wine_to_tab_baseline_unknown_falls_back_without_trying_new_tab ... ok
+  > test tests::wine_to_tab_count_always_unreadable_falls_back_once ... ok
+  > test tests::wine_to_tab_count_increases_after_unreadable_succeeds_without_compensation ... ok
+  > test tests::wine_to_tab_count_increases_immediately_succeeds_without_compensation ... ok
+  > test tests::wine_to_tab_count_never_increases_falls_back_once ... ok
+  > test tests::wine_to_tab_failure_inputs_compensate_exactly_once ... ok
+  > test tests::wine_to_tab_not_accepted_falls_back_once ... ok
+  > test tests::with_state_reads_and_persists_mutation_after_install ... ok
+  > test tests::with_state_reentrant_access_degrades_to_none_without_panic ... ok
+  > test tests::with_state_returns_none_when_empty ... ok
+  > test tests::with_state_take_then_reinstall_is_idempotent ... ok
+  > test dialog::detector::tests::test_hidden_address_and_search_ancestors_are_excluded ... ok
+  > test tests::test_message_pump_result_is_never_judged_with_as_bool ... ok
+  > test ui::settings::tests::test_general_footer_layout_and_hit_ids ... ok
+  > test ui::settings::tests::test_about_os_version_rendering ... ok
+  > test ui::settings::tests::test_log_card_i18n_keys_present_in_both_locales ... ok
+  > test ui::settings::tests::test_tab_module_mock_unsupported_switch ... ok
+  > test ui::settings::tests::test_tab_module_settings_groups_and_tips_i18n ... ok
+  > test ui::settings::tests::test_tab_module_unsupported_multiline_format ... ok
+  > test ui::settings::tests::test_tab_module_unsupported_notices ... ok
+  > test dialog::detector::tests::test_hidden_unready_dialog_requires_usable_edit ... ok
+  > test ui::floating_bar::tests::drop_clears_window_userdata_to_avoid_dangling_read ... ok
+  > test tab::owner::tests::test_release_waits_for_in_flight_borrow ... ok
+  > test dialog::detector::tests::test_hidden_comboboxex_fallback_and_id_priority ... ok
+  > test tab::com::tests::test_dead_worker_channel_is_rebuilt_without_counting_timeout ... ok
+  > test tab::com::tests::test_checked_tab_count_returns_none_when_worker_never_replies ... ok
+  > test dialog::injector::tests::test_unresponsive_test_window_times_out ... ok
+  > test win32::clipboard::tests::test_clipboard_busy_is_reported_and_never_claims_success ... ok
+  > test win32::clipboard::tests::test_clipboard_owner_window_makes_writes_succeed ... ok
+  > test win32::autostart::tests::test_run_bounded_status_reports_exit_code ... ok
+  > test win32::clipboard::tests::test_clipboard_safety_bitmap_dib_preservation ... ok
+  > test win32::clipboard::tests::test_clipboard_safety_temporary_text_and_restore ... ok
+  > test tab::com::tests::test_rebuild_hard_cap_enters_degraded_and_stops_spawning ... ok
+  > test win32::clipboard::tests::test_hdrop_and_registered_format_survive_temporary_text_injection ... ok
+  > test win32::clipboard::tests::test_mixed_formats_survive_temporary_text_injection ... ok
+  > test win32::clipboard::tests::test_owner_class_registration_and_window_creation_share_hinstance ... ok
+  > test win32::autostart::tests::test_run_bounded_status_kills_on_timeout ... ok
+  > test win32::clipboard::tests::test_owner_creation_failure_keeps_clipboard_unchanged ... ok
+  > test monitor::collector::details::tests::test_vram_collector ... ok
+  > test managers::ipc::tests::test_run_bounded_kills_long_running_child ... ok
+  > test win32::clipboard::tests::test_owner_ready_timeout_cancel_races_window_creation_without_orphan ... ok
+  > test win32::clipboard::tests::test_owner_ready_timeout_cancels_and_confirms_thread_exit ... ok
+  > test win32::clipboard::tests::test_owner_ready_timeout_late_ready_after_window_is_reclaimed ... ok
+  > test win32::clipboard::tests::test_owner_shutdown_and_recreate_cycle ... ok
+  > test win32::clipboard::tests::test_owner_shutdown_is_idempotent_when_absent ... ok
+  > test win32::clipboard::tests::test_restore_partial_failure_is_reported_and_retryable ... ok
+  > test win32::clipboard::tests::test_restore_refuses_to_overwrite_newer_user_content ... ok
+  > test win32::clipboard::tests::test_single_format_failure_paths_release_handle ... ok
+  > test win32::clipboard::tests::test_temporary_clipboard_text_propagates_restore_failure ... ok
+  > test win32::clipboard::tests::test_totalcmd_chain_case1_blocks_second_clear_after_user_copy ... ok
+  > test win32::clipboard::tests::test_totalcmd_chain_case2_skips_restore_after_late_user_copy ... ok
+  > test win32::clipboard::tests::test_totalcmd_chain_case3_detects_sequence_change_with_identical_text ... ok
+  > test win32::clipboard::tests::test_totalcmd_chain_case4_restores_mixed_formats ... ok
+  > test win32::trusted::tests::test_is_plain_file_name_rejects_paths ... ok
+  > test win32::trusted::tests::test_is_under_root_respects_directory_boundary ... ok
+  > test win32::trusted::tests::test_normalize_for_compare_unifies_separators_and_prefix ... ok
+  > test win32::trusted::tests::test_system_and_windows_directories_are_inside_trusted_roots ... ok
+  > test win32::trusted::tests::test_system_tool_resolves_real_system_binaries ... ok
+  > test win32::trusted::tests::test_trusted_roots_are_absolute_and_never_user_writable_data_dirs ... ok
+  > test win32::uia::tests::test_guarded_input_requires_all_three_conditions ... ok
+  > test win32::uia::tests::test_normalize_path_text_ignores_case_and_trailing_separator ... ok
+  > test win32::uia::tests::test_paths_equal_accepts_wps_style_value_variants ... ok
+  > test win32::version::tests::test_format_version_variations ... ok
+  > test win32::version::tests::test_get_windows_version ... ok
+  > test win32::version::tests::test_tab_module_supported_logic ... ok
+  > test win32::clipboard::tests::test_totalcmd_chain_case5_never_overwrites_when_ownership_unknown ... ok
+  > test win32::clipboard::tests::test_totalcmd_chain_case6_returns_correct_dirs_and_leaves_no_temp_text ... ok
+  > test win32::clipboard::tests::test_transaction_drop_restores_when_caller_forgets ... ok
+  > test win32::clipboard::tests::test_transaction_drop_skips_restore_after_foreign_change ... ok
+  > test win32::clipboard::tests::test_transaction_reports_restore_failure ... ok
+  > test win32::clipboard::tests::test_xyplorer_chain_case1_blocks_second_clear_after_user_copy ... ok
+  > test win32::clipboard::tests::test_xyplorer_chain_case2_skips_restore_after_late_user_copy ... ok
+  > test win32::clipboard::tests::test_xyplorer_chain_case3_detects_sequence_change_with_identical_text ... ok
+  > test win32::clipboard::tests::test_xyplorer_chain_case4_restores_mixed_formats ... ok
+  > test win32::clipboard::tests::test_xyplorer_chain_case5_never_overwrites_when_ownership_unknown ... ok
+  > test win32::clipboard::tests::test_xyplorer_chain_case6_returns_correct_dirs_and_leaves_no_temp_text ... ok
+  > 
+  > test result: ok. 171 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.29s
+  > 
+  >     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+  >      Running unittests src\main.rs (target\debug\deps\quickpath-856cfbbb24415c3c.exe)
+  [结果] exit=0  用时=7.2s
+
+───── [6/12] 门禁：格式检查
+  [执行] shell=bash（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | cargo fmt --all -- --check
+  ---- 执行输出 ----
+  [结果] exit=0  用时=1.2s
+
+───── [7/12] 门禁：Clippy（0 告警）
+  [执行] shell=bash（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | cargo clippy --all-targets -- -D warnings
+  ---- 执行输出 ----
+  >    Compiling quickpath v1.2.3 (F:\git\gitea20250909\QuickPath)
+  >     Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.36s
+  [结果] exit=0  用时=7.1s
+
+───── [8/12] 门禁：依赖安全审计
+  [执行] shell=pwsh（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | cargo install cargo-audit --locked
+  | cargo audit
+  ---- 执行输出 ----
+  >     Updating crates.io index
+  >      Ignored package `cargo-audit v0.22.2` is already installed, use --force to override
+  >     Fetching advisory database from `https://github.com/RustSec/advisory-db.git`
+  >       Loaded 1310 security advisories (from C:\Users\wzucc\.cargo\advisory-db)
+  >     Updating crates.io index
+  >     Scanning Cargo.lock for vulnerabilities (70 crate dependencies)
+  [结果] exit=0  用时=11.7s
+
+───── [9/12] 编译 Release 版本
+  [执行] shell=bash（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | cargo build --release
+  ---- 执行输出 ----
+  >     Finished `release` profile [optimized] target(s) in 0.25s
+  [结果] exit=0  用时=0.8s
+
+───── [10/12] 判定发布通道（含 -rc/-alpha/-beta/-pre 的标签为预发布）
+  [执行] shell=pwsh（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | $tag = "v1.2.3"
+  | if ($tag -match '(?i)(-rc|-alpha|-beta|-pre)') {
+  |   "prerelease=true" >> $env:GITHUB_OUTPUT
+  | } else {
+  |   "prerelease=false" >> $env:GITHUB_OUTPUT
+  | }
+  ---- 执行输出 ----
+  [结果] exit=0  用时=0.5s
+
+───── [11/12] 整理打包产物与生成 SHA-256 清单
+  [执行] shell=pwsh（本地统一用 pwsh；本 workflow 的 run 步骤全部声明为 pwsh）
+  ---- 步骤脚本原文（未改写）----
+  | $TAG_NAME = "v1.2.3"
+  | New-Item -ItemType Directory -Force -Path "dist"
+  | 
+  | # 复制并生成规范命名的独立 exe
+  | Copy-Item "target/release/quickpath.exe" "dist/QuickPath-$TAG_NAME-x64.exe"
+  | Copy-Item "target/release/quickpath.exe" "dist/QuickPath.exe"
+  | 
+  | # 生成便携压缩包
+  | Compress-Archive -Path "dist/QuickPath.exe" -DestinationPath "dist/QuickPath-$TAG_NAME-windows-x64.zip"
+  | 
+  | # 生成严谨的 SHA-256 校验和清单
+  | #
+  | # 注意：`-Include` 必须配合带通配符的路径或 `-Recurse` 才生效。
+  | # 写成 `-Path "dist"` 时 PowerShell 不会应用 `-Include` 过滤，结果是**一个文件都匹配不到**，
+  | # 于是清单会静默变成空文件（已在本机用 5 组变体实测确认：`-Path "dist"` → 0 命中，
+  | # `-Path "dist\*"` / `-Recurse` → 3 命中）。而报告 §4.3 正是把本清单当作产物字节一致性的
+  | # 兜底校验手段，空清单等于该兜底失效，因此这里既修正过滤写法、又加 fail-closed 守卫。
+  | $artifacts = Get-ChildItem -Path "dist\*" -File -Include "*.exe", "*.zip"
+  | if (-not $artifacts) {
+  |     Write-Error "未能匹配到任何待校验产物（dist 为空或 -Include 未生效），拒绝生成空 SHA-256 清单"
+  |     exit 1
+  | }
+  | $artifacts | ForEach-Object {
+  |     $hash = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLower()
+  |     "$hash  $($_.Name)"
+  | } | Out-File -FilePath "dist/sha256sums.txt" -Encoding ascii
+  ---- 执行输出 ----
+  > 
+  >     Ŀ¼:F:\git\gitea20250909\QuickPath
+  > 
+  > [32;1mMode   [0m[32;1m              LastWriteTime[0m [32;1;3m        Length[0m[32;1m Name[0m
+  > [32;1m----   [0m [32;1m             -------------[0m [32;1m        ------[0m [32;1m----[0m
+  > d----          2026/10/14    14:44                [44;1mdist[0m
+  > 
+  [结果] exit=0  用时=1.0s
+
+───── [12/12] 自动创建 GitHub Release 并上传产物
+  [跳过] uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda（GitHub Action，本地无法执行）
+
+───── [附加] SHA-256 清单独立复算（Python hashlib 第二实现）
+  [清单自校验] OK  QuickPath-v1.2.3-windows-x64.zip  90d4fa842a97d71e1e59a4a142ffd3e30c854428da392bcebec316e9d25bd93a
+  [清单自校验] OK  QuickPath-v1.2.3-x64.exe  5d0ea7a88906219efea076c6929d481ddc85fdcd64d220b9bdb23dc4d71988b8
+  [清单自校验] OK  QuickPath.exe  5d0ea7a88906219efea076c6929d481ddc85fdcd64d220b9bdb23dc4d71988b8
+  [清单自校验] 结论：全部一致
+  dist/ 实际内容：
+    QuickPath-v1.2.3-windows-x64.zip  (833239 bytes)
+    QuickPath-v1.2.3-x64.exe  (1567744 bytes)
+    QuickPath.exe  (1567744 bytes)
+    sha256sums.txt  (273 bytes)
+
+==============================================================================
+总计：真实执行 run: 步骤 9 个；跳过 uses: 步骤 3 个；总用时 49.4s
+跳过的步骤（需真实 GitHub 运行才能验证）：
+  - 检出代码  →  uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+  - 启用 Rust 编译缓存  →  uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3
+  - 自动创建 GitHub Release 并上传产物  →  uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda
+结论：**通过** —— workflow 的全部 run: 步骤按顺序成功；产物与 SHA-256 清单经独立复算一致
+注意：本结果不覆盖 uses: 步骤、Runner 环境差异、Release 资产上传与 environment 审批保护（报告 §3.2 第 7 项）。
+==============================================================================
