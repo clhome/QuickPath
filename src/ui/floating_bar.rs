@@ -6,7 +6,6 @@
 use crate::dialog::{DialogKind, inject_path_to_dialog};
 use crate::managers::FolderCandidate;
 use crate::rules::{I18n, Language};
-use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -22,16 +21,32 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GetSystemMetrics, HWND_TOPMOST,
-    IDC_ARROW, IDC_HAND, LWA_ALPHA, LoadCursorW, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetLayeredWindowAttributes, SetWindowPos,
-    ShowWindow, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-    WNDCLASSW, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetSystemMetrics,
+    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LWA_ALPHA, LoadCursorW, RegisterClassW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor,
+    SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
+    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR, WNDCLASSW,
+    WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
 
-static FLOATING_BAR_INSTANCE: AtomicPtr<FloatingBarState> = AtomicPtr::new(std::ptr::null_mut());
+/// 读取悬浮吸附条实例的**非拥有**指针（存储在窗口私有存储 `GWLP_USERDATA`）。
+/// 实例内存始终由 `FloatingBar` 内的 `Box<FloatingBarState>` 拥有，窗口侧只借用；
+/// 因此窗口过程**绝不**在此 `Box::from_raw` 释放它（否则与 `FloatingBar` 的 drop 双重释放）。
+unsafe fn bar_state(hwnd: HWND) -> *mut FloatingBarState {
+    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FloatingBarState }
+}
+
+/// 写入（`Some`）或清空（`None`）悬浮吸附条实例指针。清空后窗口过程读到 0 即走
+/// 「无实例则跳过」分支，杜绝读取到 `FloatingBar` drop 后已释放的内存。
+unsafe fn set_bar_state(hwnd: HWND, state: Option<&mut FloatingBarState>) {
+    let ptr = match state {
+        Some(state) => std::ptr::from_mut(state),
+        None => std::ptr::null_mut(),
+    };
+    let _ = unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize) };
+}
 
 pub struct FloatingBarState {
     pub hwnd: HWND,
@@ -141,7 +156,7 @@ impl FloatingBar {
                 is_producer_hovered: false,
             });
 
-            FLOATING_BAR_INSTANCE.store(&raw mut *state, Ordering::SeqCst);
+            set_bar_state(hwnd, Some(&mut *state));
 
             Ok(Self { state })
         }
@@ -343,6 +358,18 @@ impl FloatingBar {
     }
 }
 
+impl Drop for FloatingBar {
+    fn drop(&mut self) {
+        // 兜底置空窗口私有存储：`FloatingBarState` 的内存由本结构体的 `Box` 拥有，
+        // 随本 `drop` 返回后立即释放；若不置空，仍存活窗口上的后续消息（`WM_PAINT` /
+        // `WM_SETCURSOR` 等）会读到已释放内存。窗口若已被外部 `DestroyWindow` 销毁，
+        // 则 `WM_NCDESTROY` 已置空，此处再次置空幂等（对无效 `hwnd` 调用无害）。
+        unsafe {
+            set_bar_state(self.state.hwnd, None);
+        }
+    }
+}
+
 unsafe extern "system" fn floating_bar_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -375,7 +402,7 @@ unsafe extern "system" fn floating_bar_wnd_proc(
             LRESULT(0)
         }
         WM_SETCURSOR => {
-            let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+            let state_ptr = unsafe { bar_state(hwnd) };
             if !state_ptr.is_null() {
                 let state = unsafe { &*state_ptr };
                 let cursor_id = if state.is_producer_hovered {
@@ -393,7 +420,7 @@ unsafe extern "system" fn floating_bar_wnd_proc(
         windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
             let new_dpi = (wparam.0 & 0xffff) as u32;
             let scale = (new_dpi as f32 / 96.0).max(1.0);
-            let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+            let state_ptr = unsafe { bar_state(hwnd) };
             if !state_ptr.is_null() {
                 unsafe {
                     let state = &mut *state_ptr;
@@ -407,13 +434,21 @@ unsafe extern "system" fn floating_bar_wnd_proc(
             }
             LRESULT(0)
         }
+        WM_NCDESTROY => {
+            // 窗口销毁兜底置空：实例内存由 `FloatingBar` 的 `Box` 拥有，
+            // 这里只清指针、绝不 `Box::from_raw`（否则与 `FloatingBar` 的 drop 双重释放）。
+            unsafe {
+                set_bar_state(hwnd, None);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_DESTROY => LRESULT(0),
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
 unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
-    let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+    let state_ptr = unsafe { bar_state(hwnd) };
     if state_ptr.is_null() {
         return;
     }
@@ -748,7 +783,7 @@ fn translate_source<'a>(source: &str, lang: &'a Language) -> &'a str {
 }
 
 fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
-    let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+    let state_ptr = unsafe { bar_state(hwnd) };
     if state_ptr.is_null() {
         return;
     }
@@ -813,8 +848,8 @@ fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
     }
 }
 
-fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
-    let state_ptr = FLOATING_BAR_INSTANCE.load(Ordering::SeqCst);
+fn handle_mouse_click(hwnd: HWND, x: i32, y: i32) {
+    let state_ptr = unsafe { bar_state(hwnd) };
     if state_ptr.is_null() {
         return;
     }
@@ -860,6 +895,44 @@ fn handle_mouse_click(_hwnd: HWND, x: i32, y: i32) {
                 let _ = windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(dlg_hwnd);
             }
             inject_path_to_dialog(dlg_hwnd, edit_hwnd, &path, kind, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+    /// 回归守卫（R-05c）：`FloatingBar` 持有 `FloatingBarState` 的所有权，
+    /// 实例 drop 后必须把窗口私有存储 `GWLP_USERDATA` 置空，否则仍存活的窗口
+    /// （本程序退出前不销毁吸附条窗口）在后续 `WM_PAINT`/`WM_SETCURSOR` 里会读到
+    /// 已释放的 `Box` 内部指针。此用例直接观测置空结果。
+    #[test]
+    fn drop_clears_window_userdata_to_avoid_dangling_read() {
+        let bar = FloatingBar::new().expect("创建悬浮吸附条窗口失败");
+        let hwnd = bar.hwnd();
+        assert!(!hwnd.0.is_null(), "FloatingBar::new 必须返回有效 HWND");
+
+        // new() 写入的是非拥有指针，指向 FloatingBar 自己持有的 Box 内部。
+        let stored = unsafe { bar_state(hwnd) };
+        assert!(!stored.is_null(), "new() 必须把实例指针写入 GWLP_USERDATA");
+        assert_eq!(
+            stored,
+            std::ptr::from_ref(&*bar.state).cast_mut(),
+            "窗口侧存的应是非拥有指针（FloatingBar 仍持有 Box）"
+        );
+
+        drop(bar);
+        let after = unsafe { bar_state(hwnd) };
+        assert!(
+            after.is_null(),
+            "FloatingBar drop 后 GWLP_USERDATA 必须置空，杜绝悬垂读取"
+        );
+
+        // 清理：销毁窗口触发 WM_NCDESTROY 兜底置空（此时已为 0，幂等且不 double free）。
+        unsafe {
+            let _ = DestroyWindow(hwnd);
         }
     }
 }
