@@ -93,6 +93,95 @@ fn set_draft_config(cfg: AppConfig) {
     }
 }
 
+/// General Tab 底部区域的悬停/命中 id：渲染、命中测试与点击处理共用同一常量，
+/// 避免新增卡片后出现「点 A 触发 B」的错位。
+const HOVER_ID_DEBUG_CHECKBOX: usize = 50;
+const HOVER_ID_LOG_CARD: usize = 51;
+const HOVER_ID_LOG_CLEAR: usize = 52;
+
+/// 最近一次「清理日志」的结果，用于日志卡片的可见反馈（本项目无 Toast 机制，故内联呈现）。
+static LOG_CLEAR_RESULT: Mutex<Option<bool>> = Mutex::new(None);
+
+/// General Tab「关于卡片」下方区域的几何：日志卡片、清理按钮与调试复选框。
+/// 渲染、命中测试与点击处理共用本函数，确保三者坐标完全一致。
+#[derive(Debug, Clone, Copy)]
+struct GeneralFooterLayout {
+    log_card: RECT,
+    clear_button: RECT,
+    debug_checkbox: RECT,
+}
+
+/// 计算 General Tab 底部布局。`client_bottom` 为窗口客户区底边（与底部按钮同源）。
+fn general_footer_layout(
+    pad_x: i32,
+    card_w: i32,
+    card5_bottom: i32,
+    client_bottom: i32,
+    scale: f32,
+) -> GeneralFooterLayout {
+    let px = |v: f32| (v * scale).round() as i32;
+
+    let btn_top = client_bottom - px(22.0) - px(34.0);
+
+    // 日志卡片：紧贴关于卡片下方
+    let log_top = card5_bottom + px(8.0);
+    let log_card = RECT {
+        left: pad_x,
+        top: log_top,
+        right: pad_x + card_w,
+        bottom: log_top + px(48.0),
+    };
+
+    // 「清理日志」按钮：日志卡片右侧
+    let clear_right = log_card.right - px(16.0);
+    let clear_cy = log_top + px(48.0) / 2;
+    let clear_button = RECT {
+        left: clear_right - px(96.0),
+        top: clear_cy - px(28.0) / 2,
+        right: clear_right,
+        bottom: clear_cy + px(28.0) / 2,
+    };
+
+    // 调试复选框：日志卡片与底部按钮之间的剩余空间居中
+    let debug_cy = log_card.bottom + (btn_top - log_card.bottom) / 2;
+    let debug_checkbox = RECT {
+        left: pad_x,
+        top: debug_cy - px(26.0) / 2,
+        right: pad_x + px(320.0),
+        bottom: debug_cy + px(26.0) / 2,
+    };
+
+    GeneralFooterLayout {
+        log_card,
+        clear_button,
+        debug_checkbox,
+    }
+}
+
+/// 点是否落在矩形内（闭区间，与既有 `>= <=` 命中语义一致）。
+fn rect_contains(rect: &RECT, x: i32, y: i32) -> bool {
+    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
+/// General Tab 底部区域的命中测试（纯函数）：返回悬停 id。
+/// 清理按钮在日志卡片之内，故必须先判按钮再判卡片。
+fn general_footer_hit(x: i32, y: i32, layout: &GeneralFooterLayout) -> Option<usize> {
+    if rect_contains(&layout.clear_button, x, y) {
+        Some(HOVER_ID_LOG_CLEAR)
+    } else if rect_contains(&layout.log_card, x, y) {
+        Some(HOVER_ID_LOG_CARD)
+    } else if rect_contains(&layout.debug_checkbox, x, y) {
+        Some(HOVER_ID_DEBUG_CHECKBOX)
+    } else {
+        None
+    }
+}
+
+/// i18n 文本缺失（空串）时回退到内置默认，避免卡片文案塌陷。
+fn i18n_or_fallback<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.is_empty() { fallback } else { value }
+}
+
 pub struct SettingsWindow {
     hwnd: HWND,
 }
@@ -201,6 +290,10 @@ impl SettingsWindow {
         set_draft_config(current);
         IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
         IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
+        // 重置上次「清理日志」结果，避免下次打开仍显示旧反馈
+        if let Ok(mut result) = LOG_CLEAR_RESULT.lock() {
+            *result = None;
+        }
         if let Ok(mut drag) = DRAG_MODE.lock() {
             *drag = DragMode::None;
         }
@@ -667,24 +760,79 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     hovered,
                 );
 
-                // 卡片 5 下方：排错调试模式复选框（居中排布于关于卡片与底部区域之间）
+                // 卡片 5 下方：日志卡片（展示日志路径与清理入口）与排错调试复选框
                 let card5_bottom = card5_top + about_h;
-                let bottom_pad = (22.0 * scale).round() as i32;
-                let btn_h = (34.0 * scale).round() as i32;
-                let btn_bottom = rect.bottom - bottom_pad;
-                let btn_top = btn_bottom - btn_h;
-                let debug_cy = card5_bottom + (btn_top - card5_bottom) / 2;
-                let debug_h = (26.0 * scale).round() as i32;
-                let debug_top = debug_cy - debug_h / 2;
-                let debug_w = (320.0 * scale).round() as i32;
+                let footer = general_footer_layout(pad_x, card_w, card5_bottom, rect.bottom, scale);
+                let is_chinese = bundle.meta.code.starts_with("zh");
+                let log_path_text = crate::dialog::detector::debug_log_path_display()
+                    .unwrap_or_else(|| {
+                        i18n_or_fallback(
+                            &bundle.settings.log_none,
+                            if is_chinese {
+                                "日志不可用"
+                            } else {
+                                "Log unavailable"
+                            },
+                        )
+                        .to_string()
+                    });
+                let (log_status, log_status_ok) =
+                    match LOG_CLEAR_RESULT.lock().ok().and_then(|r| *r) {
+                        Some(true) => (
+                            i18n_or_fallback(
+                                &bundle.settings.log_cleared,
+                                if is_chinese { "已清理" } else { "Cleared" },
+                            ),
+                            true,
+                        ),
+                        Some(false) => (
+                            i18n_or_fallback(
+                                &bundle.settings.log_clear_failed,
+                                if is_chinese {
+                                    "清理失败"
+                                } else {
+                                    "Clear failed"
+                                },
+                            ),
+                            false,
+                        ),
+                        None => ("", true),
+                    };
+                render_log_card(
+                    hdc,
+                    &footer.log_card,
+                    &footer.clear_button,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    font_small,
+                    i18n_or_fallback(
+                        &bundle.settings.log_title,
+                        if is_chinese { "日志" } else { "Log" },
+                    ),
+                    &log_path_text,
+                    i18n_or_fallback(
+                        &bundle.settings.log_clear,
+                        if is_chinese {
+                            "清理日志"
+                        } else {
+                            "Clear log"
+                        },
+                    ),
+                    log_status,
+                    log_status_ok,
+                    hovered == Some(HOVER_ID_LOG_CARD) || hovered == Some(HOVER_ID_LOG_CLEAR),
+                    hovered == Some(HOVER_ID_LOG_CLEAR),
+                );
+
                 let is_debug = crate::dialog::detector::is_debug_mode_enabled();
-                let is_hov_debug = hovered == Some(50);
+                let is_hov_debug = hovered == Some(HOVER_ID_DEBUG_CHECKBOX);
                 draw_checkbox_item(
                     hdc,
-                    pad_x,
-                    debug_top,
-                    pad_x + debug_w,
-                    debug_top + debug_h,
+                    footer.debug_checkbox.left,
+                    footer.debug_checkbox.top,
+                    footer.debug_checkbox.right,
+                    footer.debug_checkbox.bottom,
                     scale,
                     font_text,
                     &bundle.settings.debug_mode,
@@ -1662,6 +1810,127 @@ unsafe fn render_web_dropdown_layer(
 }
 
 /// 渲染“关于 QuickPath”现代商业软件大卡片
+/// 渲染日志卡片：标题 + 日志路径 + 「清理日志」按钮 + 清理结果状态。
+/// 几何由 `general_footer_layout` 统一给出，与命中测试/点击处理共用。
+unsafe fn render_log_card(
+    hdc: HDC,
+    card: &RECT,
+    clear_button: &RECT,
+    scale: f32,
+    font_title: windows::Win32::Graphics::Gdi::HFONT,
+    font_text: windows::Win32::Graphics::Gdi::HFONT,
+    font_small: windows::Win32::Graphics::Gdi::HFONT,
+    title: &str,
+    path_text: &str,
+    clear_label: &str,
+    status_text: &str,
+    status_ok: bool,
+    is_card_hovered: bool,
+    is_button_hovered: bool,
+) {
+    unsafe {
+        let (bg, border) = if is_card_hovered {
+            (COLORREF(0x002b2b2b), COLORREF(0x004c4c4c))
+        } else {
+            (COLORREF(0x00242424), COLORREF(0x00353535))
+        };
+        draw_fluent_box(
+            hdc,
+            card.left,
+            card.top,
+            card.right,
+            card.bottom,
+            (8.0 * scale).round() as i32,
+            bg,
+            border,
+        );
+
+        let inner_x = card.left + (16.0 * scale).round() as i32;
+        let text_right = clear_button.left - (12.0 * scale).round() as i32;
+
+        // 标题行（右侧留给清理结果状态）
+        SelectObject(hdc, HGDIOBJ(font_title.0 as _));
+        SetTextColor(hdc, COLORREF(0x00f3f3f3));
+        let mut title_buf: Vec<u16> = title.encode_utf16().collect();
+        let mut title_rect = RECT {
+            left: inner_x,
+            top: card.top + (6.0 * scale).round() as i32,
+            right: text_right,
+            bottom: card.top + (25.0 * scale).round() as i32,
+        };
+        DrawTextW(
+            hdc,
+            &mut title_buf,
+            &mut title_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+
+        // 日志路径（小字，超长省略，避免撑破卡片）
+        SelectObject(hdc, HGDIOBJ(font_small.0 as _));
+        SetTextColor(hdc, COLORREF(0x00909090));
+        let mut path_buf: Vec<u16> = path_text.encode_utf16().collect();
+        let mut path_rect = RECT {
+            left: inner_x,
+            top: card.top + (26.0 * scale).round() as i32,
+            right: text_right,
+            bottom: card.bottom - (5.0 * scale).round() as i32,
+        };
+        DrawTextW(
+            hdc,
+            &mut path_buf,
+            &mut path_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+        );
+
+        // 清理结果状态（标题行右侧、按钮左侧）
+        if !status_text.is_empty() {
+            SetTextColor(
+                hdc,
+                if status_ok {
+                    COLORREF(0x0050d268)
+                } else {
+                    COLORREF(0x006868ff)
+                },
+            );
+            let mut status_buf: Vec<u16> = status_text.encode_utf16().collect();
+            let mut status_rect = RECT {
+                left: clear_button.left - (120.0 * scale).round() as i32,
+                top: card.top + (6.0 * scale).round() as i32,
+                right: clear_button.left - (12.0 * scale).round() as i32,
+                bottom: card.top + (25.0 * scale).round() as i32,
+            };
+            DrawTextW(
+                hdc,
+                &mut status_buf,
+                &mut status_rect,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
+
+        // 「清理日志」按钮
+        let btn_bg = if is_button_hovered {
+            COLORREF(0x00444444)
+        } else {
+            COLORREF(0x00323232)
+        };
+        let btn_border = if is_button_hovered {
+            COLORREF(0x00666666)
+        } else {
+            COLORREF(0x00484848)
+        };
+        render_rounded_button(
+            hdc,
+            clear_button,
+            clear_label,
+            font_text,
+            btn_bg,
+            COLORREF(0x00e8e8e8),
+            Some(btn_border),
+            (4.0 * scale).round() as i32,
+        );
+    }
+}
+
 unsafe fn render_about_card(
     hdc: HDC,
     left: i32,
@@ -3459,21 +3728,15 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                         is_pointer = true;
                     }
                 } else {
-                    let card5_bottom = card5_top + about_h;
-                    let bottom_pad = (22.0 * scale).round() as i32;
-                    let btn_h = (34.0 * scale).round() as i32;
-                    let btn_bottom = rect.bottom - bottom_pad;
-                    let btn_top = btn_bottom - btn_h;
-                    let debug_cy = card5_bottom + (btn_top - card5_bottom) / 2;
-                    let debug_h = (26.0 * scale).round() as i32;
-                    let debug_top = debug_cy - debug_h / 2;
-                    let debug_w = (320.0 * scale).round() as i32;
-                    if x >= pad_x
-                        && x <= pad_x + debug_w
-                        && y >= debug_top
-                        && y <= debug_top + debug_h
-                    {
-                        new_hover = Some(50);
+                    let footer = general_footer_layout(
+                        pad_x,
+                        card_w,
+                        card5_top + about_h,
+                        rect.bottom,
+                        scale,
+                    );
+                    if let Some(id) = general_footer_hit(x, y, &footer) {
+                        new_hover = Some(id);
                         is_pointer = true;
                     }
                 }
@@ -3942,20 +4205,23 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                     return;
                 }
             } else {
-                let card5_bottom = card5_top + about_h;
-                let bottom_pad = (22.0 * scale).round() as i32;
-                let btn_h = (34.0 * scale).round() as i32;
-                let btn_bottom = rect.bottom - bottom_pad;
-                let btn_top = btn_bottom - btn_h;
-                let debug_cy = card5_bottom + (btn_top - card5_bottom) / 2;
-                let debug_h = (26.0 * scale).round() as i32;
-                let debug_top = debug_cy - debug_h / 2;
-                let debug_w = (320.0 * scale).round() as i32;
-                if x >= pad_x && x <= pad_x + debug_w && y >= debug_top && y <= debug_top + debug_h
-                {
-                    let cur = crate::dialog::detector::is_debug_mode_enabled();
-                    crate::dialog::detector::set_debug_mode_enabled(!cur);
-                    need_redraw = true;
+                let footer =
+                    general_footer_layout(pad_x, card_w, card5_top + about_h, rect.bottom, scale);
+                match general_footer_hit(x, y, &footer) {
+                    Some(HOVER_ID_LOG_CLEAR) => {
+                        let cleared = crate::dialog::detector::clear_debug_logs();
+                        if let Ok(mut result) = LOG_CLEAR_RESULT.lock() {
+                            *result = Some(cleared);
+                        }
+                        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+                        need_redraw = true;
+                    }
+                    Some(HOVER_ID_DEBUG_CHECKBOX) => {
+                        let cur = crate::dialog::detector::is_debug_mode_enabled();
+                        crate::dialog::detector::set_debug_mode_enabled(!cur);
+                        need_redraw = true;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -4352,5 +4618,85 @@ mod tests {
         assert!(en.tab_module.tips_title.contains("💡"));
         assert!(en.tab_module.tips_line1.contains("Middle-click"));
         assert!(en.tab_module.tips_line2.contains("Ctrl+Tab"));
+    }
+
+    /// 新增日志文案必须在两个语言包中都非空（缺失时由 `i18n_or_fallback` 兜底）。
+    #[test]
+    fn test_log_card_i18n_keys_present_in_both_locales() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+        assert_eq!(zh.settings.log_title, "日志");
+        assert_eq!(zh.settings.log_clear, "清理日志");
+        assert_eq!(zh.settings.log_cleared, "已清理");
+        assert_eq!(zh.settings.log_clear_failed, "清理失败");
+        assert_eq!(zh.settings.log_none, "日志不可用");
+        assert_eq!(en.settings.log_title, "Log");
+        assert_eq!(en.settings.log_clear, "Clear log");
+        assert_eq!(en.settings.log_cleared, "Cleared");
+        assert_eq!(en.settings.log_clear_failed, "Clear failed");
+        assert_eq!(en.settings.log_none, "Log unavailable");
+    }
+
+    /// 日志卡片与调试复选框的几何/命中逻辑（不启动 GUI，纯函数自证）：
+    /// 渲染、命中测试与点击处理共用 `general_footer_layout` + `general_footer_hit`，
+    /// 断言命中 id 与几何布局一致，防止「点 A 触发 B」。
+    #[test]
+    fn test_general_footer_layout_and_hit_ids() {
+        use super::*;
+
+        // 锁定 id 字面值：渲染/命中/点击三处共用这些常量，改动即测试变红。
+        assert_eq!(HOVER_ID_DEBUG_CHECKBOX, 50);
+        assert_eq!(HOVER_ID_LOG_CARD, 51);
+        assert_eq!(HOVER_ID_LOG_CLEAR, 52);
+
+        let scale = 1.0_f32;
+        let pad_x = 28;
+        let card_w = 660 - pad_x * 2;
+        let card5_bottom = 546; // 与 General Tab 卡片几何一致（此处只需可复现输入）
+        let client_bottom = 719;
+        let layout = general_footer_layout(pad_x, card_w, card5_bottom, client_bottom, scale);
+
+        // 几何关系：日志卡片在关于卡片下方、宽度撑满；按钮在卡片内右侧；复选框在卡片与底部按钮之间。
+        assert!(
+            layout.log_card.top >= card5_bottom,
+            "日志卡片不得与关于卡片重叠"
+        );
+        assert_eq!(layout.log_card.left, pad_x);
+        assert_eq!(layout.log_card.right, pad_x + card_w);
+        assert!(layout.clear_button.left > layout.log_card.left);
+        assert!(layout.clear_button.right < layout.log_card.right);
+        assert!(layout.clear_button.top >= layout.log_card.top);
+        assert!(layout.clear_button.bottom <= layout.log_card.bottom);
+        assert!(
+            layout.debug_checkbox.top >= layout.log_card.bottom,
+            "复选框必须在日志卡片之下"
+        );
+        let btn_top = client_bottom - 22 - 34;
+        assert!(
+            layout.debug_checkbox.bottom <= btn_top,
+            "复选框不得压到底部按钮"
+        );
+
+        // 命中：清理按钮中心 → 清理 id；卡片左区 → 卡片 id；复选框中心 → 调试 id；卡片外 → None。
+        let clear_cx = (layout.clear_button.left + layout.clear_button.right) / 2;
+        let clear_cy = (layout.clear_button.top + layout.clear_button.bottom) / 2;
+        assert_eq!(
+            general_footer_hit(clear_cx, clear_cy, &layout),
+            Some(HOVER_ID_LOG_CLEAR)
+        );
+        assert_eq!(
+            general_footer_hit(layout.log_card.left + 10, layout.log_card.top + 10, &layout),
+            Some(HOVER_ID_LOG_CARD)
+        );
+        let dbg_cx = (layout.debug_checkbox.left + layout.debug_checkbox.right) / 2;
+        let dbg_cy = (layout.debug_checkbox.top + layout.debug_checkbox.bottom) / 2;
+        assert_eq!(
+            general_footer_hit(dbg_cx, dbg_cy, &layout),
+            Some(HOVER_ID_DEBUG_CHECKBOX)
+        );
+        assert_eq!(general_footer_hit(pad_x - 1, clear_cy, &layout), None);
+        // 清理按钮与调试开关命中 id 必须不同，否则点清理会误触调试开关。
+        assert_ne!(HOVER_ID_LOG_CLEAR, HOVER_ID_DEBUG_CHECKBOX);
     }
 }

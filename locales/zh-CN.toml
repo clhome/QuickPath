@@ -37,6 +37,11 @@ status_all_ready = "全部适配就绪"
 lang_auto = "自动跟随系统 (中文)"
 debug_mode = "启用调试日志模式 (Debug Logging)"
 debug_mode_desc = "临时排错使用，每次重新打开自动关闭"
+log_title = "日志"
+log_clear = "清理日志"
+log_cleared = "已清理"
+log_clear_failed = "清理失败"
+log_none = "日志不可用"
 
 [about]
 title = "关于 QuickPath"

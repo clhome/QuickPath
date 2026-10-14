@@ -171,6 +171,9 @@ fn replace_ascii_case_insensitive(haystack: &str, needle: &str, replacement: &st
 }
 
 /// 默认脱敏：把用户个人目录与用户名替换为占位符，保留其余可诊断结构。
+///
+/// 顺序不可调换：必须先替换 `USERPROFILE`，才能把 `C:\Users\<me>\...` 整体折叠为
+/// `%USERPROFILE%`，否则后续盘符处理会把系统盘 `C:` 留下形成半脱敏。
 fn sanitize_with(msg: &str, profile: Option<&str>, username: Option<&str>) -> String {
     let mut out = msg.to_string();
     if let Some(profile) = profile.filter(|p| !p.is_empty()) {
@@ -182,11 +185,133 @@ fn sanitize_with(msg: &str, profile: Option<&str>, username: Option<&str>) -> St
     out
 }
 
+/// 解析 UNC 前缀后的主机/共享名，返回 `(host_start, host_end, share_end)`（字节下标）。
+///
+/// 覆盖普通 `\\host\share\...` 与长路径 `\\?\UNC\host\share\...` 两种形态；
+/// 形如 `\\?\C:\...` 的设备路径**不**按 UNC 处理（返回 `None`），交由盘符分支处理。
+fn parse_unc(bytes: &[u8], start: usize) -> Option<(usize, usize, usize)> {
+    // 调用方已确认 `bytes[start..start + 2] == b"\\\\"`。
+    let host_start = if bytes.get(start + 2) == Some(&b'?') && bytes.get(start + 3) == Some(&b'\\')
+    {
+        if bytes.len() < start + 8
+            || !bytes[start + 4..start + 7].eq_ignore_ascii_case(b"UNC")
+            || bytes[start + 7] != b'\\'
+        {
+            return None;
+        }
+        start + 8
+    } else {
+        start + 2
+    };
+
+    let host_end = bytes[host_start..].iter().position(|&b| b == b'\\')? + host_start;
+    if host_end == host_start {
+        return None;
+    }
+    let share_start = host_end + 1;
+    if share_start >= bytes.len() {
+        return None;
+    }
+    let share_end = bytes[share_start..]
+        .iter()
+        .position(|&b| b == b'\\')
+        .map(|pos| pos + share_start)
+        .unwrap_or(bytes.len());
+    if share_end == share_start {
+        return None;
+    }
+    Some((host_start, host_end, share_end))
+}
+
+/// 解析盘符前缀 `X:\` / `x:/`，返回 `(消费到的字节下标, 大写盘符)`。
+///
+/// 盘符前必须是字符串开头或非字母数字字符，避免把 `http://` 中的 `p:/` 误判为盘符。
+fn parse_drive_letter(bytes: &[u8], index: usize) -> Option<(usize, u8)> {
+    let letter = *bytes.get(index)?;
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    if bytes.get(index + 1) != Some(&b':') {
+        return None;
+    }
+    match bytes.get(index + 2) {
+        Some(&b'\\') | Some(&b'/') => {}
+        _ => return None,
+    }
+    if index > 0 && bytes[index - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    Some((index + 2, letter.to_ascii_uppercase()))
+}
+
+/// 路径类脱敏（纯函数，`system_drive` 由调用方注入以便单测）。
+///
+/// | 模式 | 替换 | 理由 |
+/// | --- | --- | --- |
+/// | `\\host\share\...`、`\\?\UNC\host\share\...` | `\\<unc>\<share>\...` | 主机/共享名是网络拓扑标识；保留后续相对目录便于诊断 |
+/// | 非系统盘符 `X:\...`（X ≠ 系统盘） | `%DRIVE_X%:\...` | 盘符可能指向含用户数据的盘；保留相对结构 |
+/// | 系统盘 `C:\...`（含非用户目录） | **保留** | `C:\Windows\...`、`C:\Program Files\...` 是诊断关键信息且不含用户身份；用户目录已由 `%USERPROFILE%`/`<user>` 覆盖 |
+fn sanitize_paths_with(msg: &str, system_drive: Option<&str>) -> String {
+    // 系统盘不可知（环境变量缺失）时按最普遍的 `C:` 处理：宁可保留
+    // `C:\Windows\...` 这类诊断信息，也不要把系统盘整盘抹掉。
+    let system_letter = system_drive
+        .and_then(|drive| drive.trim_start().bytes().next())
+        .filter(|b| b.is_ascii_alphabetic())
+        .map(|b| b.to_ascii_uppercase())
+        .unwrap_or(b'C');
+
+    let bytes = msg.as_bytes();
+    let mut out = String::with_capacity(msg.len());
+    let mut pending = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && bytes.get(i + 1) == Some(&b'\\')
+            && let Some((host_start, _host_end, share_end)) = parse_unc(bytes, i)
+        {
+            out.push_str(&msg[pending..i]);
+            out.push_str(&msg[i..host_start]);
+            out.push_str("<unc>\\<share>");
+            pending = share_end;
+            i = share_end;
+            continue;
+        }
+        if let Some((end, letter)) = parse_drive_letter(bytes, i)
+            && letter != system_letter
+        {
+            out.push_str(&msg[pending..i]);
+            out.push_str(&format!("%DRIVE_{}%:", letter as char));
+            pending = end;
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&msg[pending..]);
+    out
+}
+
+/// 完整脱敏（纯函数）：先做既有的个人目录/用户名替换，再做 UNC 与非系统盘符脱敏。
+fn sanitize_full_with(
+    msg: &str,
+    profile: Option<&str>,
+    username: Option<&str>,
+    system_drive: Option<&str>,
+) -> String {
+    sanitize_paths_with(&sanitize_with(msg, profile, username), system_drive)
+}
+
 /// 读取环境变量后脱敏（生产路径）
 fn sanitize_debug_message(msg: &str) -> String {
     let profile = std::env::var_os("USERPROFILE").map(|v| v.to_string_lossy().to_string());
     let username = std::env::var_os("USERNAME").map(|v| v.to_string_lossy().to_string());
-    sanitize_with(msg, profile.as_deref(), username.as_deref())
+    let system_drive = std::env::var_os("SystemDrive").map(|v| v.to_string_lossy().to_string());
+    sanitize_full_with(
+        msg,
+        profile.as_deref(),
+        username.as_deref(),
+        system_drive.as_deref(),
+    )
 }
 
 /// 写入调试日志。
@@ -222,6 +347,53 @@ pub fn log_debug(msg: &str) {
         .append(true)
         .open(path)
         .and_then(|mut f| f.write_all(line.as_bytes()));
+}
+
+/// 返回当前调试日志文件的绝对路径字符串；日志路径不可用（无任何可写目录）时返回 `None`。
+pub fn debug_log_path_display() -> Option<String> {
+    debug_log_path().map(|path| path.to_string_lossy().into_owned())
+}
+
+/// 删除给定日志文件与其 `.1` 备份；返回无法删除的条目描述（空表示全部成功或本就不存在）。
+fn remove_log_files(path: &Path) -> Vec<String> {
+    let backup = log_backup_path(path);
+    let mut failures = Vec::new();
+    for target in [path, backup.as_path()] {
+        match std::fs::remove_file(target) {
+            Ok(()) => {}
+            // 文件本就不存在视为“已清理”，不算失败（幂等）。
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => failures.push(format!("{} ({})", target.display(), e)),
+        }
+    }
+    failures
+}
+
+/// 清理当前调试日志与 `.1` 备份。
+///
+/// 与 `log_debug` 的「检查大小 → 轮换 → 追加」共用同一把 `DEBUG_LOG_LOCK`，
+/// 因此不会与写入/轮换交错（否则可能删掉刚轮换出的备份，或与追加并发造成残留）。
+/// 失败时输出结构化诊断并返回 `false`，绝不 panic。
+pub fn clear_debug_logs() -> bool {
+    let Some(path) = debug_log_path() else {
+        return false;
+    };
+
+    // 只在锁内做删除，出锁后再写日志：`log_debug` 会再次取同一把锁，持锁调用会自锁。
+    let failures = {
+        let _guard = DEBUG_LOG_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        remove_log_files(path)
+    };
+
+    if failures.is_empty() {
+        // 成功不写日志，避免清理后立刻重建日志文件。
+        true
+    } else {
+        log_debug(&format!("CLEAR_LOG_FAILED: {}", failures.join("; ")));
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1274,6 +1446,176 @@ mod debug_log_tests {
             "备份必须是刚轮换下来的内容（旧备份被覆盖）"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 日志脱敏扩展（UNC / 非系统盘符 / 标题内嵌路径）----
+
+    /// UNC：主机名与共享名替换为占位符，保留后续相对目录便于诊断。
+    #[test]
+    fn test_sanitize_masks_unc_host_and_share() {
+        let out = sanitize_full_with(
+            r"打开 \\fileserver\客户资料\2026\计划.docx 失败",
+            None,
+            None,
+            Some("C:"),
+        );
+        assert!(!out.contains("fileserver"), "UNC 主机名不得原样出现: {out}");
+        assert!(!out.contains("客户资料"), "UNC 共享名不得原样出现: {out}");
+        assert!(
+            out.contains(r"\\<unc>\<share>\2026\计划.docx"),
+            "应保留相对结构: {out}"
+        );
+    }
+
+    /// 长路径 `\\?\UNC\...`：保留前缀，主机/共享名同样替换。
+    #[test]
+    fn test_sanitize_masks_long_path_unc() {
+        let out = sanitize_full_with(
+            r"\\?\UNC\fileserver\share\dir\a.txt",
+            None,
+            None,
+            Some("C:"),
+        );
+        assert_eq!(out, r"\\?\UNC\<unc>\<share>\dir\a.txt");
+    }
+
+    /// 非系统盘符（含小写与正斜杠）：盘符替换为占位符。
+    #[test]
+    fn test_sanitize_masks_non_system_drive() {
+        assert_eq!(
+            sanitize_full_with(r"D:\work\客户资料\plan.docx", None, None, Some("C:")),
+            r"%DRIVE_D%:\work\客户资料\plan.docx"
+        );
+        assert_eq!(
+            sanitize_full_with(r"e:/data/x.txt", None, None, Some("C:")),
+            r"%DRIVE_E%:/data/x.txt"
+        );
+    }
+
+    /// 系统盘上的非用户目录保留（`C:\Windows\...` 是诊断关键信息）。
+    #[test]
+    fn test_sanitize_preserves_system_drive_non_user_dirs() {
+        assert_eq!(
+            sanitize_full_with(
+                r"C:\Windows\System32\drivers\etc\hosts",
+                None,
+                None,
+                Some("C:")
+            ),
+            r"C:\Windows\System32\drivers\etc\hosts"
+        );
+        // 系统盘不可知时按 C: 处理，同样保留。
+        assert_eq!(
+            sanitize_full_with(r"C:\Windows\win.ini", None, None, None),
+            r"C:\Windows\win.ini"
+        );
+    }
+
+    /// 窗口标题内嵌路径必须被覆盖（脱敏作用于整个消息字符串）。
+    #[test]
+    fn test_sanitize_masks_path_embedded_in_window_title() {
+        let out = sanitize_full_with(r"D:\secret\plan.docx - WPS Office", None, None, Some("C:"));
+        assert_eq!(out, r"%DRIVE_D%:\secret\plan.docx - WPS Office");
+        assert!(!out.contains(r"D:\secret"), "标题内路径不得原样出现: {out}");
+    }
+
+    /// 既有行为不回归：`USERPROFILE` → `%USERPROFILE%`，用户名 → `<user>`，且优先于路径处理。
+    #[test]
+    fn test_sanitize_keeps_profile_and_username_precedence() {
+        let out = sanitize_full_with(
+            r"target='C:\Users\Bob\Docs' user=Bob unc=\\srv\share\x drive=D:\x",
+            Some(r"C:\Users\Bob"),
+            Some("Bob"),
+            Some("C:"),
+        );
+        assert!(out.contains("%USERPROFILE%"), "必须带目录占位符: {out}");
+        assert!(out.contains("<user>"), "必须带用户名占位符: {out}");
+        assert!(!out.contains("Bob"), "用户名不得原样出现: {out}");
+        assert!(
+            !out.contains(r"C:\Users\Bob"),
+            "个人目录不得原样出现: {out}"
+        );
+        assert!(!out.contains("srv"), "UNC 主机不得原样出现: {out}");
+        assert!(out.contains(r"%DRIVE_D%:\x"), "非系统盘应带占位符: {out}");
+    }
+
+    /// 大小写混合：盘符、UNC、个人目录的匹配均不区分大小写。
+    #[test]
+    fn test_sanitize_is_case_insensitive() {
+        assert_eq!(
+            sanitize_full_with(
+                r"c:\users\BOB\file.txt",
+                Some(r"C:\Users\Bob"),
+                Some("Bob"),
+                Some("C:")
+            ),
+            r"%USERPROFILE%\file.txt"
+        );
+        assert_eq!(
+            sanitize_full_with(r"\\FileServer\Share\dir", None, None, Some("C:")),
+            r"\\<unc>\<share>\dir"
+        );
+        assert_eq!(
+            sanitize_full_with(r"d:\tmp\x", None, None, Some("C:")),
+            r"%DRIVE_D%:\tmp\x"
+        );
+    }
+
+    /// 幂等：对已脱敏文本再跑一次不产生新变化。
+    #[test]
+    fn test_sanitize_is_idempotent() {
+        let msg = r"a \\fileserver\share\p  b D:\dir\f.txt  c C:\Windows\x  d C:\Users\Bob\y";
+        let once = sanitize_full_with(msg, Some(r"C:\Users\Bob"), Some("Bob"), Some("C:"));
+        let twice = sanitize_full_with(&once, Some(r"C:\Users\Bob"), Some("Bob"), Some("C:"));
+        assert_eq!(once, twice, "脱敏必须幂等: {once} vs {twice}");
+    }
+
+    /// 不含路径的普通文本零改动（含大小写混合的普通词）。
+    #[test]
+    fn test_sanitize_leaves_plain_text_untouched() {
+        let msg = "DETECT_START: hwnd=0x1234 pid=42 title='Save As' user=Bob";
+        assert_eq!(
+            sanitize_full_with(msg, Some(r"C:\Users\Bob"), Some("Bob"), Some("C:")),
+            "DETECT_START: hwnd=0x1234 pid=42 title='Save As' user=<user>"
+        );
+    }
+
+    /// `remove_log_files`：当前文件与 `.1` 备份都被删除。
+    #[test]
+    fn test_remove_log_files_deletes_current_and_backup() {
+        let dir = std::env::temp_dir().join(format!("quickpath_clear_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let path = dir.join(DEBUG_LOG_FILE_NAME);
+        std::fs::write(&path, b"current").expect("写入当前日志");
+        std::fs::write(log_backup_path(&path), b"backup").expect("写入备份");
+
+        let failures = remove_log_files(&path);
+
+        assert!(failures.is_empty(), "正常删除不应失败: {failures:?}");
+        assert!(!path.exists(), "当前日志必须被删除");
+        assert!(!log_backup_path(&path).exists(), "备份必须被删除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `remove_log_files`：文件本就不存在视为成功（幂等）；无法删除时如实上报失败且不 panic。
+    #[test]
+    fn test_remove_log_files_is_idempotent_and_reports_failures() {
+        let dir =
+            std::env::temp_dir().join(format!("quickpath_clear_absent_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录");
+        let path = dir.join(DEBUG_LOG_FILE_NAME);
+
+        assert!(remove_log_files(&path).is_empty(), "缺失文件应视为成功");
+
+        // 用同名目录占位模拟“无法删除”，必须上报失败而不是 panic。
+        std::fs::create_dir_all(&path).expect("创建同名目录");
+        assert!(
+            !remove_log_files(&path).is_empty(),
+            "无法删除时必须上报失败"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

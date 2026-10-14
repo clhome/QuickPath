@@ -116,6 +116,16 @@ pub struct SettingsSection {
     pub debug_mode: String,
     #[serde(default)]
     pub debug_mode_desc: String,
+    #[serde(default)]
+    pub log_title: String,
+    #[serde(default)]
+    pub log_clear: String,
+    #[serde(default)]
+    pub log_cleared: String,
+    #[serde(default)]
+    pub log_clear_failed: String,
+    #[serde(default)]
+    pub log_none: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
