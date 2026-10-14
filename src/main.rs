@@ -268,8 +268,23 @@ fn main() {
         }
 
         // 7. 进入 Win32 标准消息驱动循环
+        //
+        // `GetMessageW` 返回的是三态 `BOOL`：>0 有消息、0 收到 `WM_QUIT`、-1 表示出错。
+        // `BOOL(-1)` 非零，用 `as_bool()` 判真会把错误态当成“有消息”，使宿主循环在消息
+        // 队列出错时无限空转、退出清理永不执行。必须与 `win32/clipboard.rs` 的 owner
+        // 消息泵保持同一套语义：0 或 -1 都退出，-1 额外记一条结构化诊断。
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            let ret = GetMessageW(&mut msg, None, 0, 0);
+            if ret.0 == 0 || ret.0 == -1 {
+                if ret.0 == -1 {
+                    crate::dialog::detector::log_debug(&format!(
+                        "HOST: GetMessageW 返回 -1（err={}），消息循环退出",
+                        windows::Win32::Foundation::GetLastError().0
+                    ));
+                }
+                break;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -1325,6 +1340,48 @@ mod tests {
                 probe.outcome
             );
             assert_eq!(probe.compensate_calls, 1, "{name}: 补偿必须恰好一次");
+        }
+    }
+
+    /// 架构不变式守卫：消息泵**不得**用 `.as_bool()` 判真 `GetMessageW` 的返回值。
+    ///
+    /// `GetMessageW` 的三态 `BOOL`（>0 有消息 / 0 收到 `WM_QUIT` / -1 出错）中 `-1` 非零，
+    /// 判真会把错误态当成“有消息”，让消息泵在队列出错时无限空转、退出清理永不执行。
+    /// 全仓消息泵只有两处（本文件宿主循环、`win32/clipboard.rs` owner 泵，已由 grep 确认），
+    /// 两处都必须显式按 0 / -1 判定。
+    #[test]
+    fn test_message_pump_result_is_never_judged_with_as_bool() {
+        // 探针在运行时拼装，避免本测试源码自身出现连续 token 而自命中
+        let call = concat!("GetMessage", "W");
+        let truthy = concat!(".as_", "bool()");
+        let sources = [
+            ("main.rs", include_str!("main.rs")),
+            ("win32/clipboard.rs", include_str!("win32/clipboard.rs")),
+        ];
+
+        for (name, source) in sources {
+            // 先剔除整行注释，避免架构说明文字本身触发误报
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let mut from = 0usize;
+            while let Some(offset) = code[from..].find(call) {
+                let start = from + offset;
+                // 只检查本条语句（到最近的 `;` 为止），避免跨语句误判
+                let end = code[start..]
+                    .find(';')
+                    .map_or(code.len(), |semi| start + semi);
+                let statement = &code[start..end];
+                assert!(
+                    !statement.contains(truthy),
+                    "{name} 对 {call} 的返回值使用了 {truthy}（三态 BOOL，-1 是错误态，\
+                     判真会让消息泵在错误态死循环）。命中片段：{statement}"
+                );
+                from = end.max(start + call.len());
+            }
         }
     }
 }

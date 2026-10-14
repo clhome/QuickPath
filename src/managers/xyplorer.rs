@@ -40,7 +40,9 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
             return results;
         }
 
-        // 进程镜像核对：只对真正的 XYplorer 窗口发送 WM_COPYDATA
+        // 进程镜像核对：只对真正的 XYplorer 窗口发送 WM_COPYDATA。
+        // 首个命中窗口不可信时整轮放弃并进入冷却；其后的每个枚举窗口在循环内同样单独核对
+        // （同类名伪装窗口可能出现在枚举链的**任意位置**）。
         if !ipc::window_process_matches(hwnd, &EXPECTED_PROCESS_NAMES) {
             crate::dialog::detector::log_debug(
                 "IPC: 命中 ThunderRT6FormDC 类名但进程镜像不符，已跳过（疑似伪装窗口）",
@@ -60,6 +62,18 @@ pub fn get_xyplorer_folders() -> Vec<XYplorerFolder> {
         let mut any_timeout = false;
 
         while !hwnd.0.is_null() {
+            // 逐窗口核对进程镜像（含首个窗口，代价仅为一次轻量进程信息查询）：
+            // 只核对首个窗口会漏掉枚举链中后续的同类名伪装窗口，照样向它投递 WM_COPYDATA。
+            // 命中的伪装窗口一律跳过，绝不投递任何管理器协议消息。
+            if !ipc::window_process_matches(hwnd, &EXPECTED_PROCESS_NAMES) {
+                crate::dialog::detector::log_debug(
+                    "IPC: 命中 ThunderRT6FormDC 类名但进程镜像不符，已跳过（疑似伪装窗口）",
+                );
+                hwnd = FindWindowExW(None, Some(hwnd), class_pcwstr, PCWSTR::null())
+                    .unwrap_or_default();
+                continue;
+            }
+
             // 1. 获取活动窗格路径
             //    事务内部会先清空剪贴板：XY 不响应时绝不会把上一次的陈旧路径当成结果读回来
             match probe_panel_path(&mut tx, || {

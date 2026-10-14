@@ -198,4 +198,47 @@ mod tests {
         let args = vec!["/c".to_string(), "exit".to_string(), "0".to_string()];
         assert!(run_bounded(&cmd, &args), "快速退出的子进程应返回成功");
     }
+
+    /// 架构不变式守卫：进程镜像核对必须**逐窗口**生效。
+    ///
+    /// TC / XY 的探测都是「按窗口类枚举所有同类顶层窗口 → 逐个投递协议消息」，
+    /// 而同类名伪装窗口可能出现在枚举链的**任意位置**。若只核对首个命中窗口，
+    /// 其后的伪装窗口依旧会收到 WM_COMMAND / WM_COPYDATA（破坏报告 P-03 的
+    /// 「不得向同类名伪装窗口发送协议消息」要求）。因此枚举循环内必须存在核对，
+    /// 且在投递（`probe_panel_path`）之前。
+    #[test]
+    fn test_each_enumerated_manager_window_is_verified_against_process_image() {
+        let sources = [
+            ("managers/totalcmd.rs", include_str!("totalcmd.rs")),
+            ("managers/xyplorer.rs", include_str!("xyplorer.rs")),
+        ];
+
+        for (name, source) in sources {
+            // 先剔除整行注释，避免架构说明文字本身触发误报
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let loop_start = code
+                .find("while !hwnd.0.is_null() {")
+                .unwrap_or_else(|| panic!("{name} 必须按窗口类枚举所有同类窗口（未找到枚举循环）"));
+            let body = &code[loop_start..];
+
+            let Some(verify_at) = body.find("window_process_matches") else {
+                panic!(
+                    "{name} 的枚举循环内必须逐个核对进程镜像；\
+                     只核对首个窗口会漏掉后续同类名伪装窗口"
+                );
+            };
+            let Some(send_at) = body.find("probe_panel_path") else {
+                panic!("{name} 的枚举循环内必须通过共享探测函数投递协议消息");
+            };
+            assert!(
+                verify_at < send_at,
+                "{name} 的进程镜像核对必须发生在投递协议消息之前（伪装的同类名窗口不得收到消息）"
+            );
+        }
+    }
 }

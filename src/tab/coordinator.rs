@@ -591,15 +591,19 @@ impl TabCoordinator {
 
         // 尝试 2：0xA221 魔法指令兜底（未公开指令，部分构建有效；
         // COM 枚举序号未必等于视觉标签顺序，因此仅作兜底且必须核验完整路径）
-        unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_COMMAND};
-            let _ = SendMessageW(
-                host_h,
-                WM_COMMAND,
-                Some(WPARAM(0xA221)),
-                Some(LPARAM((tab_idx + 1) as isize)),
-            );
-        }
+        //
+        // 这是**跨进程**投递（目标宿主是 Explorer）：绝不能使用无超时的 `SendMessageW`
+        // —— Explorer 挂起时本工作线程会永久阻塞在此，后面的失败卫兵链
+        //（核验活动标签 → fail-safe 恢复源窗口）永远执行不到，而被抓来的新窗口
+        // 此时已被置为全透明 + 移出屏幕，用户会看到“点了完全没反应”。
+        // 因此统一走 `managers::ipc` 的有界投递（`SendMessageTimeoutW` + `SMTO_ABORTIFHUNG`）。
+        // 超时即视为本次兜底无效，由紧随其后的路径核验与 fail-safe 接管。
+        let _ = crate::managers::ipc::send_message_timeout(
+            host_h,
+            windows::Win32::UI::WindowsAndMessaging::WM_COMMAND,
+            WPARAM(0xA221),
+            LPARAM((tab_idx + 1) as isize),
+        );
         if Self::verify_active_tab_path(com, host_h, folder_path) {
             crate::dialog::detector::log_debug(&format!(
                 "TAB_ACTIVATE: host=0x{:X} target='{}' via=0xA221 idx={} -> ok",
@@ -997,5 +1001,40 @@ mod tests {
             parse_select_target_from_cmdline(cmd_direct2),
             Some(("D:\\WorkSpace".to_string(), None))
         );
+    }
+
+    /// 架构不变式守卫：`tab/` 模块内的投递目标都是**其它进程**的窗口（Explorer）。
+    ///
+    /// 绝对禁止使用无超时的裸 `SendMessageW`：对端挂起时会把调用线程永久拖死，
+    /// 使后续的失败卫兵链（活动标签路径核验 → fail-safe 恢复源窗口）永远执行不到。
+    /// 必须走 `managers::ipc::send_message_timeout`（`SendMessageTimeoutW` +
+    /// `SMTO_ABORTIFHUNG`，有界返回）——报告 P-03 已对同一类调用确立该约束。
+    #[test]
+    fn test_tab_sources_never_use_unbounded_send_message() {
+        let sources = [
+            ("tab/com.rs", include_str!("com.rs")),
+            ("tab/coordinator.rs", include_str!("coordinator.rs")),
+            ("tab/hook.rs", include_str!("hook.rs")),
+            ("tab/keyboard.rs", include_str!("keyboard.rs")),
+            ("tab/mouse.rs", include_str!("mouse.rs")),
+            ("tab/owner.rs", include_str!("owner.rs")),
+            ("tab/select.rs", include_str!("select.rs")),
+            ("tab/uia.rs", include_str!("uia.rs")),
+        ];
+        // 探针在运行时拼装，避免本测试源码自身出现连续 token 而自命中
+        let banned = concat!("SendMessage", "W(");
+
+        for (name, source) in sources {
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !code.contains(banned),
+                "{name} 禁止使用无超时的 {banned}：跨进程投递必须走 \
+                 managers::ipc::send_message_timeout（有界 + SMTO_ABORTIFHUNG）"
+            );
+        }
     }
 }
