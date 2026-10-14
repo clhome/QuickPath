@@ -5,13 +5,16 @@ mod managers;
 mod monitor;
 mod rules;
 pub mod tab;
+mod telemetry;
 mod ui;
 mod win32;
 
 use dialog::{InjectDone, detect_file_dialog, inject_path_to_dialog};
 use managers::WindowTracker;
+use managers::scanner::ScanStatsSnapshot;
 use monitor::MonitorManager;
 use rules::AppConfig;
+use tab::com::ComStatsSnapshot;
 use ui::tray::{
     IDM_EXIT, IDM_OPEN_SETTINGS, IDM_SHOW_CANDIDATES, IDM_TOGGLE_AUTOSTART, IDM_TOGGLE_AUTOSWITCH,
     IDM_TOGGLE_MONITOR, TrayIcon, WM_TRAY_CALLBACK,
@@ -83,6 +86,13 @@ static APP_STATE_REENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
 /// 汇总一条，避免同一时刻高频重入刷屏写盘。
 const APP_STATE_REENTRY_LOG_EVERY: u64 = 100;
 
+/// 前台事件计数：每 `TELEMETRY_LOG_EVERY` 次输出一条聚合遥测（低成本、限频，
+/// 避免在每条消息上做统计与字符串格式化）。
+static FOREGROUND_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+/// 聚合遥测输出频率（每多少次前台事件一条）。
+const TELEMETRY_LOG_EVERY: u64 = 500;
+
 /// 在宿主消息线程内以闭包作用域访问 `AppState`；非宿主线程或已卸载时返回 `None`。
 ///
 /// 闭包持有 `RefCell` 的可变借用。设计约定：正常路径必须避免重入——需要把状态
@@ -126,6 +136,10 @@ pub struct AppState {
     pub retried_dialog: Option<HWND>,
     /// 文件管理器后台扫描的单调世代号：只有仍对应当前前台窗口的结果才会被采纳
     pub manager_scan_generation: u64,
+    /// 过期 generation 丢弃计数：因「世代不匹配或前台窗口已变化」而未采纳的扫描结果。
+    /// 放在 `AppState`（而非 scanner 侧）是因为采纳决策由宿主消息线程依据
+    /// `manager_scan_generation` 与当前前台窗口做出，scanner 无从得知该判定。
+    pub manager_scan_stale_dropped: u64,
     /// 已为哪个对话框补刷过一次候选列表（冷启动补偿只做一次）
     pub refreshed_dialog: Option<HWND>,
     /// 后台文件管理器扫描结果回传通道的接收端（宿主消息线程独占）
@@ -234,6 +248,7 @@ fn main() {
             last_switched_path: None,
             retried_dialog: None,
             manager_scan_generation: 0,
+            manager_scan_stale_dropped: 0,
             refreshed_dialog: None,
             scan_rx,
         };
@@ -309,13 +324,15 @@ unsafe extern "system" fn host_wnd_proc(
                 for payload in payloads {
                     // 只接受“仍对应当前前台窗口”的本次世代结果，
                     // 避免用户已切走后把一个陈旧目录写进追踪器
-                    if payload.generation == generation
-                        && fg_raw == payload.hwnd_raw
-                        && let Some(path) = payload.path
-                    {
-                        state
-                            .tracker
-                            .note_manager_folder(path, HWND(payload.hwnd_raw as *mut _));
+                    if payload.generation == generation && fg_raw == payload.hwnd_raw {
+                        if let Some(path) = payload.path {
+                            state
+                                .tracker
+                                .note_manager_folder(path, HWND(payload.hwnd_raw as *mut _));
+                        }
+                    } else {
+                        // 过期 generation 丢弃：世代不匹配或前台窗口已变化，不再采纳（P-04 遥测）。
+                        state.manager_scan_stale_dropped += 1;
                     }
                 }
             });
@@ -485,7 +502,46 @@ fn on_foreground_window_changed(fg_hwnd: HWND) {
     with_state(|state| on_foreground_window_changed_impl(state, fg_hwnd, 0));
 }
 
+/// 构造一条聚合遥测日志（P-04）：扫描四指标 + 过期 generation 丢弃 + STA COM worker 状态。
+/// 纯函数，便于单测（尤其是 COM 不可用时的行为）。
+fn format_scan_telemetry(
+    scan: &ScanStatsSnapshot,
+    stale_dropped: u64,
+    com: Option<&ComStatsSnapshot>,
+) -> String {
+    let com_part = match com {
+        Some(stats) => stats.describe(),
+        None => "不可用（tab_module 未创建或已停止）".to_string(),
+    };
+    format!(
+        "SCAN_TELEMETRY: {} stale_generation_dropped={} | COM_STA: {}",
+        scan.describe(),
+        stale_dropped,
+        com_part
+    )
+}
+
+/// 输出一条聚合遥测（限频调用）。COM stats 从 `tab_module` 取；实例不存在时如实输出“不可用”。
+fn log_scan_telemetry(state: &AppState) {
+    let scan = managers::scanner::stats();
+    let com = state
+        .tab_module
+        .as_ref()
+        .map(|tab_mod| tab_mod.coordinator().com_manager().stats());
+    crate::dialog::detector::log_debug(&format_scan_telemetry(
+        &scan,
+        state.manager_scan_stale_dropped,
+        com.as_ref(),
+    ));
+}
+
 fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_count: u32) {
+    // P-04 聚合遥测：限频输出（每 500 次前台事件一条），避免在每条消息上做统计与格式化。
+    let event_seq = FOREGROUND_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if event_seq.is_multiple_of(TELEMETRY_LOG_EVERY) {
+        log_scan_telemetry(state);
+    }
+
     // 0. 如果前台窗口是悬浮吸附条自身，直接忽略，避免用户点击或交互时将吸附条误隐藏
     if let Some(bar) = &state.floating_bar
         && bar.hwnd() == fg_hwnd
@@ -946,6 +1002,7 @@ mod tests {
             last_switched_path: None,
             retried_dialog: None,
             manager_scan_generation: 0,
+            manager_scan_stale_dropped: 0,
             refreshed_dialog: None,
             scan_rx: rx,
         }
@@ -1020,5 +1077,37 @@ mod tests {
         assert_eq!(outer, Some(None));
 
         reset_state();
+    }
+
+    /// P-04：COM 不可用时聚合遥测必须如实标注“不可用”，不得伪造数据。
+    #[test]
+    fn test_format_scan_telemetry_reports_unavailable_com() {
+        let scan = managers::scanner::stats();
+        let line = format_scan_telemetry(&scan, 7, None);
+        assert!(line.contains("stale_generation_dropped=7"), "{line}");
+        assert!(line.contains("不可用"), "COM 不可用时必须如实标注：{line}");
+    }
+
+    /// P-04：COM 可用时聚合遥测必须包含重建次数/降级状态与分位。
+    #[test]
+    fn test_format_scan_telemetry_includes_com_stats() {
+        let com = ComStatsSnapshot {
+            requests: 3,
+            timeouts: 1,
+            worker_rebuilds: 2,
+            queue_depth: 0,
+            p50_ms: 1.0,
+            p95_ms: 2.0,
+            p99_ms: 3.0,
+            degraded: true,
+            rebuilds_since_success: 1,
+            skipped_while_degraded: 4,
+            degraded_rounds: 1,
+        };
+        let scan = managers::scanner::stats();
+        let line = format_scan_telemetry(&scan, 0, Some(&com));
+        assert!(line.contains("rebuild=2"), "{line}");
+        assert!(line.contains("degraded=true"), "{line}");
+        assert!(line.contains("p50="), "{line}");
     }
 }

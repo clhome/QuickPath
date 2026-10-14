@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +15,8 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Shell::{IShellFolderViewDual, IShellWindows, IWebBrowser2, ShellWindows};
 use windows::Win32::UI::WindowsAndMessaging::{IsWindow, IsWindowVisible};
 use windows::core::{BSTR, Interface};
+
+use crate::telemetry::{SampleRing, percentile_ms};
 
 #[derive(Debug, Clone)]
 pub struct ShellTabInfo {
@@ -116,8 +117,6 @@ const MAX_REBUILDS_BEFORE_DEGRADE: u64 = 8;
 const DEGRADE_BACKOFF_BASE: Duration = Duration::from_secs(2);
 /// 退避上限：避免指数增长到不可接受的时长（第 6 轮起 64s 被截断为 60s）
 const DEGRADE_BACKOFF_MAX: Duration = Duration::from_secs(60);
-/// 耗时样本环大小
-const LATENCY_SAMPLES: usize = 256;
 /// 每处理多少次请求输出一次埋点汇总
 const STATS_LOG_EVERY: u64 = 500;
 
@@ -177,7 +176,7 @@ struct ComStats {
     worker_rebuilds: AtomicU64,
     skipped_while_degraded: AtomicU64,
     queue_depth: AtomicU64,
-    latencies_us: Mutex<VecDeque<u64>>,
+    latencies_us: SampleRing,
     circuit: Mutex<CircuitState>,
 }
 
@@ -189,16 +188,7 @@ impl ComStats {
     /// 记录一次成功：重置连续超时计数，采样耗时，并按节奏输出埋点
     fn record_success(&self, elapsed: Duration) {
         self.consecutive_timeouts.store(0, Ordering::SeqCst);
-        {
-            let mut samples = self
-                .latencies_us
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if samples.len() >= LATENCY_SAMPLES {
-                samples.pop_front();
-            }
-            samples.push_back(elapsed.as_micros() as u64);
-        }
+        self.latencies_us.record(elapsed);
 
         let requests = self.requests.load(Ordering::SeqCst);
         if requests != 0 && requests.is_multiple_of(STATS_LOG_EVERY) {
@@ -328,14 +318,7 @@ impl ComStats {
     }
 
     fn snapshot(&self) -> ComStatsSnapshot {
-        let mut samples: Vec<u64> = self
-            .latencies_us
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .copied()
-            .collect();
-        samples.sort_unstable();
+        let samples = self.latencies_us.sorted_samples();
         let circuit = *self
             .circuit
             .lock()
@@ -408,14 +391,6 @@ fn degrade_backoff(rounds: u64) -> Duration {
         .saturating_mul(1u64 << shift)
         .min(DEGRADE_BACKOFF_MAX.as_secs());
     Duration::from_secs(secs)
-}
-
-fn percentile_ms(sorted_us: &[u64], percentile: f64) -> f64 {
-    if sorted_us.is_empty() {
-        return 0.0;
-    }
-    let rank = ((percentile / 100.0) * (sorted_us.len() as f64 - 1.0)).round() as usize;
-    sorted_us[rank.min(sorted_us.len() - 1)] as f64 / 1000.0
 }
 
 /// STA 线程上的 Shell COM 管理器。
