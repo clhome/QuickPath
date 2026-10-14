@@ -1527,7 +1527,7 @@
 
 **收口结论（2026-10-14）**：报告 §5 S-02、§7 P-04、§8 R-05/COM worker/owner 线程、§9 日志脱敏、§10 第 1/2/4 条、§11 第二优先级全部 + 第三优先级 2/3 已关闭；§10 第 3/5 条与 §12 真机验收条目已文档化为 `Document/真机验收清单_竞态与生命周期_v1.2.3.md`；Authenticode（§11 三-1）按用户决定仅保留模板。逐项对照表（报告编号 → 修复证据 → 验证结果 → commit hash）见 `cl_tasks/审计报告v1.2.3_修复记录.md`。
 
-**最终门禁（父 agent 独立执行）**：`cargo fmt --all -- --check` 干净；`cargo clippy --all-targets -- -D warnings` 0 告警；`cargo test --all-targets` 99 → **145 通过 0 失败**；`cargo build --release` 通过。`cargo audit` 本机因 GitHub 不可达无法拉取 advisory DB（已装 cargo-audit 0.22.2），该门禁已挂在 CI。
+**最终门禁（父 agent 独立执行）**：`cargo fmt --all -- --check` 干净；`cargo clippy --all-targets -- -D warnings` 0 告警；`cargo test --all-targets` 99 → **145 通过 0 失败**；`cargo build --release` 通过。`cargo audit` 本机因 GitHub 不可达无法拉取 advisory DB（已装 cargo-audit 0.22.2），改用 **OSV 兜底**：`cl_tasks/audit_deps_osv.py` 扫描 `Cargo.lock` 全部 **70 个依赖 → 0 条已知漏洞**（`{"packages_scanned": 70, "vulnerable": {}}`）；该门禁已挂在 CI。
 
 **对报告的两处事实修正**：① S-02 声称的 owner 创建失败在本机 Win11 **不可达**（`hinstance=None` 时 10 个剪贴板用例仍全绿），修复保留但不应视为发布阻塞；② R-05 重构引入的 `with_state` 重入在 `panic = "abort"` 下会 abort，已在下一轮改为 `try_borrow_mut` 降级（R-05b）。
 - t1（S-02，父 agent 已独立复核）：owner 窗口注册/创建 `hinstance` 配对 + `GetModuleHandleW`/`RegisterClassW` 显式错误处理 + 集成回归测试（test 99→100）；门禁：fmt 干净 / clippy 0 告警 / test 100 通过 / build --release 通过。**父 agent 变异复核结论**：把 `CreateWindowExW` 实例参数改回 `None` 后 10 个剪贴板用例仍全绿（`GetLastError=0`、HWND 非空、`IsWindow=true`），即报告 S-02 声称的「创建失败」在本机 Win11 上**不可达**（进程本地窗口类的查找不依赖 `CreateWindowExW` 的 `hinstance`），该修复属与 MSDN 写法一致的健壮性/一致性修复，**不构成发布阻塞**。真实 commit hash 见 t10 对照表（此处不再内联 hash，避免 amend 后失效）
