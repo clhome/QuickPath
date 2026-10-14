@@ -1514,7 +1514,7 @@
 **任务清单**：
 
 - [x] t0 基线校验（见上）
-- [ ] t1 S-02 `hinstance` 配对 + owner 创建集成测试
+- [x] t1 S-02 `hinstance` 配对 + owner 创建集成测试
 - [ ] t2 剪贴板混合格式往返 + 失败不上报成功测试
 - [ ] t3 移除 `AppState` 裸指针
 - [ ] t4 COM worker 重建上限/退避/降级
@@ -1524,6 +1524,7 @@
 - [ ] t8 常规 CI + Authenticode 文档保留
 - [ ] t9 Win+E 失败分支测试 + 真机验收清单文档化
 - [ ] t10 收口（全量门禁 + 逐项对照 + 清理）
+- t1（S-02，父 agent 已独立复核）：owner 窗口注册/创建 `hinstance` 配对 + `GetModuleHandleW`/`RegisterClassW` 显式错误处理 + 集成回归测试（test 99→100）；门禁：fmt 干净 / clippy 0 告警 / test 100 通过 / build --release 通过。**父 agent 变异复核结论**：把 `CreateWindowExW` 实例参数改回 `None` 后 10 个剪贴板用例仍全绿（`GetLastError=0`、HWND 非空、`IsWindow=true`），即报告 S-02 声称的「创建失败」在本机 Win11 上**不可达**（进程本地窗口类的查找不依赖 `CreateWindowExW` 的 `hinstance`），该修复属与 MSDN 写法一致的健壮性/一致性修复，**不构成发布阻塞**。真实 commit hash 见 t10 对照表（此处不再内联 hash，避免 amend 后失效）
 
 
 

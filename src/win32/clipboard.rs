@@ -4,7 +4,9 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::thread;
 use std::time::Duration;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND};
+use windows::Win32::Foundation::{
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
     GetClipboardSequenceNumber, OpenClipboard, SetClipboardData,
@@ -155,16 +157,42 @@ fn clipboard_owner() -> Option<HWND> {
             .name("QuickPath-ClipboardOwner".to_string())
             .spawn(move || unsafe {
                 let class_name = w!("QuickPath_ClipboardOwner_Class");
-                let hinstance = GetModuleHandleW(None)
-                    .map(|h| HINSTANCE(h.0))
-                    .unwrap_or_default();
+
+                // 审计报告 S-02：`GetModuleHandleW(None)` 失败时绝不能静默退化为 NULL 实例。
+                // 拿不到模块实例就无法正确注册/查找窗口类，此处显式判定失败并让
+                // `clipboard_owner()` 返回 None（保持写路径 fail-closed），同时留下诊断日志。
+                let Ok(module) = GetModuleHandleW(None) else {
+                    crate::dialog::detector::log_debug(&format!(
+                        "CLIPBOARD_OWNER: GetModuleHandleW 失败，err={}，无法注册 owner 窗口类",
+                        GetLastError().0
+                    ));
+                    let _ = tx.send(0);
+                    return;
+                };
+                // 注册与创建必须使用同一个 hinstance（审计报告 S-02）。
+                let hinstance = HINSTANCE(module.0);
+
                 let wc = WNDCLASSW {
                     lpfnWndProc: Some(clipboard_owner_proc),
                     hInstance: hinstance,
                     lpszClassName: class_name,
                     ..Default::default()
                 };
-                let _ = RegisterClassW(&wc);
+
+                // 审计报告 S-02：显式处理 `RegisterClassW` 返回值（0 表示失败）。
+                // 本函数可能被重复调用，仅当 `GetLastError == ERROR_CLASS_ALREADY_EXISTS`
+                // 时才算「已有可用类」；其他错误一律视为失败并中止，不得继续 CreateWindowExW。
+                if RegisterClassW(&wc) == 0 {
+                    let err = GetLastError();
+                    if err != ERROR_CLASS_ALREADY_EXISTS {
+                        crate::dialog::detector::log_debug(&format!(
+                            "CLIPBOARD_OWNER: RegisterClassW 失败，err={}，owner 创建中止",
+                            err.0
+                        ));
+                        let _ = tx.send(0);
+                        return;
+                    }
+                }
 
                 let created = CreateWindowExW(
                     WINDOW_EX_STYLE::default(),
@@ -177,7 +205,9 @@ fn clipboard_owner() -> Option<HWND> {
                     0,
                     None,
                     None,
-                    None,
+                    // 审计报告 S-02：必须与 RegisterClassW 写入 WNDCLASSW.hInstance
+                    // 的实例句柄完全一致，否则进程本地窗口类查找可能失败。
+                    Some(hinstance),
                     None,
                 );
 
@@ -1252,6 +1282,10 @@ mod tests {
 
     /// P0-01：所有写路径必须以「有效窗口」为 owner 打开剪贴板；
     /// 且 `EmptyClipboard` 后 owner 必须生效、`SetClipboardData` 必须真正成功。
+    ///
+    /// 审计报告 S-02：本用例经 `clipboard_owner()` 走真实的
+    /// `RegisterClassW` + `CreateWindowExW` 路径，因此同时充当 S-02 的端到端回归守卫
+    /// （若 `CreateWindowExW` 的实例句柄与注册时不配对导致创建失败，此处会直接失败）。
     #[test]
     fn test_clipboard_owner_window_makes_writes_succeed() {
         let _guard = clip_test_lock();
@@ -1289,5 +1323,107 @@ mod tests {
         }
 
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_owner_probe"));
+    }
+
+    /// 审计报告 S-02：注册窗口类与创建窗口必须使用**同一个** `hinstance`。
+    ///
+    /// 真实调用 `RegisterClassW` + `CreateWindowExW` 并捕获 `GetLastError`：
+    /// 1. `GetModuleHandleW(None)` 必须成功且句柄非空（不得静默退化为 NULL）；
+    /// 2. `RegisterClassW` 成功返回非零 ATOM，或失败时错误码必须明确为
+    ///    `ERROR_CLASS_ALREADY_EXISTS`（而非 0 / 其他模糊错误）；
+    /// 3. 以同一 `hinstance` 创建窗口必须返回非空 HWND 且 `IsWindow` 为真；
+    /// 4. 以该 HWND 为 owner 的 `OpenClipboard` + `EmptyClipboard` + `SetClipboardData`
+    ///    必须成功，且 `GetClipboardOwner()` 等于该 HWND。
+    #[test]
+    fn test_owner_class_registration_and_window_creation_share_hinstance() {
+        let _guard = clip_test_lock();
+
+        let module = unsafe { GetModuleHandleW(None) }.expect("GetModuleHandleW(None) 必须成功");
+        assert!(!module.0.is_null(), "模块实例句柄不得为空");
+        let hinstance = HINSTANCE(module.0);
+
+        // 独立类名，避免与生产 owner 类互相干扰（生产类可能已被注册）。
+        let class_name = w!("QuickPath_ClipboardOwner_TestClass");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(clipboard_owner_proc),
+            hInstance: hinstance,
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+
+        let atom = unsafe { RegisterClassW(&wc) };
+        if atom == 0 {
+            let err = unsafe { GetLastError() };
+            assert_eq!(
+                err, ERROR_CLASS_ALREADY_EXISTS,
+                "RegisterClassW 失败时错误码必须明确为 ERROR_CLASS_ALREADY_EXISTS，实际 {}",
+                err.0
+            );
+        }
+
+        let created = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class_name,
+                w!("QuickPath Clipboard Owner (test)"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(hinstance),
+                None,
+            )
+        };
+
+        let hwnd = match created {
+            Ok(h) => h,
+            Err(e) => panic!(
+                "以与注册一致的 hinstance 创建窗口必须成功：GetLastError={} HRESULT={:?}",
+                unsafe { GetLastError().0 },
+                e.code()
+            ),
+        };
+        assert!(!hwnd.0.is_null(), "CreateWindowExW 必须返回非空 HWND");
+        assert!(
+            unsafe { IsWindow(Some(hwnd)).as_bool() },
+            "新建 owner 窗口必须是存活窗口"
+        );
+
+        // 端到端：以该 HWND 为 owner，清空后 owner 必须生效且能写入数据。
+        assert!(
+            open_clipboard_with_retry(Some(hwnd), 10),
+            "以合法 owner 必须能打开剪贴板"
+        );
+        unsafe {
+            assert!(EmptyClipboard().is_ok(), "以合法 owner 清空剪贴板必须成功");
+            assert_eq!(
+                GetClipboardOwner().ok(),
+                Some(hwnd),
+                "EmptyClipboard 后 GetClipboardOwner 必须等于该 HWND"
+            );
+
+            let wide: Vec<u16> = "qp_s02_probe".encode_utf16().chain(Some(0)).collect();
+            let bytes = wide.len() * 2;
+            let handle = prod_alloc(bytes).expect("分配必须成功");
+            let ptr = prod_lock(handle);
+            assert!(!ptr.is_null());
+            std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr, bytes);
+            prod_unlock(handle);
+            assert!(
+                prod_set(CF_UNICODETEXT, handle),
+                "以合法 owner 写入必须成功"
+            );
+            let _ = CloseClipboard();
+        }
+
+        assert_eq!(get_clipboard_text().as_deref(), Some("qp_s02_probe"));
+
+        // 清理测试窗口，避免残留。
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(hwnd);
+        }
     }
 }
