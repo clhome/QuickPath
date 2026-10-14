@@ -22,6 +22,35 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # ── 阻塞式版本一致性门禁（报告 M-01）──────────────────────────────────
+      # 本 workflow 由 `push: tags: ['v*']` 触发，`github.ref_name` 就是标签名。
+      # 在编译之前比较标签版本与 Cargo.toml 的单一版本源，杜绝「标签是新版本、
+      # 产物却标旧版本」这类元数据漂移；不一致直接 exit 1 让发布变红。
+      # 预发布后缀口径与下方「判定发布通道」步骤一致（-rc/-alpha/-beta/-pre）。
+      - name: 门禁：标签版本与 Cargo.toml 一致
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          # 去掉前导 v，并剥离预发布后缀（与「判定发布通道」步骤同一口径）
+          $tagVersion = ($tag -replace '^v', '') -replace '(?i)(-rc|-alpha|-beta|-pre).*$', ''
+
+          if (-not (Test-Path Cargo.toml)) {
+            Write-Error "未找到 Cargo.toml，无法校验标签版本"
+            exit 1
+          }
+          $cargoToml = Get-Content Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            Write-Error "无法从 Cargo.toml 解析 [package] version"
+            exit 1
+          }
+          $pkgVersion = $Matches[1]
+
+          if ($tagVersion -ne $pkgVersion) {
+            Write-Error "标签版本与 Cargo.toml 不一致：标签 $tag 解析为 $tagVersion，Cargo.toml 为 $pkgVersion"
+            exit 1
+          }
+          Write-Host "版本一致：标签 $tag，Cargo.toml $pkgVersion"
+
       - name: 安装固定版本 Rust 工具链
         shell: pwsh
         # 不使用跟随 stable 浮动的工具链 Action：显式锁死 Rust 版本与组件，

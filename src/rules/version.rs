@@ -53,4 +53,62 @@ mod tests {
             );
         }
     }
+
+    /// M-01 守卫：`app.manifest` 模板的 assemblyIdentity 版本号必须跟随单一版本源，
+    /// 且必须是四段式（不足四位补 `0`，与 `build.rs` 写入 OUT_DIR 的规范化结果一致）。
+    ///
+    /// 背景（审计报告 M-01）：版本升级时 `app.manifest` 模板仍停留在旧值，属同一处漂移。
+    /// `build.rs` 只改写 OUT_DIR 里的清单副本、**不改写源码树模板**（审计报告 P2-03），
+    /// 所以源码树这份模板必须由守卫测试锁定，否则模板会再次静默落后。
+    #[test]
+    fn test_app_manifest_version_tracks_single_version_source() {
+        const APP_MANIFEST: &str = include_str!("../../app.manifest");
+
+        // 与 build.rs 相同的四段式规范化：不足四段补 "0"，取前四段。
+        let mut parts: Vec<&str> = APP_VERSION.split('.').collect();
+        while parts.len() < 4 {
+            parts.push("0");
+        }
+        let expected = format!("version=\"{}\"", parts[..4].join("."));
+
+        let actual = APP_MANIFEST
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("version="))
+            .unwrap_or("<未找到 version= 行>");
+
+        assert_eq!(
+            actual, expected,
+            "app.manifest 的版本必须为四段式 {}（跟随 Cargo.toml 的 {}），实际为 {}",
+            expected, APP_VERSION, actual
+        );
+    }
+
+    /// M-01 守卫：`Cargo.lock` 中 `quickpath` 包条目的版本必须等于单一版本源。
+    ///
+    /// 背景（审计报告 M-01）：`Cargo.toml` 与 `Cargo.lock` 是两处独立落盘的版本号，
+    /// 只改 `Cargo.toml` 会让锁文件停留在旧版本。这里把锁文件纳入编译期追踪。
+    #[test]
+    fn test_cargo_lock_quickpath_version_tracks_single_version_source() {
+        const CARGO_LOCK: &str = include_str!("../../Cargo.lock");
+
+        let entry_version = CARGO_LOCK
+            .split("[[package]]")
+            .find(|block| block.contains("name = \"quickpath\""))
+            .and_then(|block| {
+                block
+                    .lines()
+                    .find_map(|line| line.trim().strip_prefix("version = "))
+            });
+
+        let expected = format!("\"{}\"", APP_VERSION);
+
+        assert_eq!(
+            entry_version,
+            Some(expected.as_str()),
+            "Cargo.lock 中 quickpath 条目的版本必须是 {}（跟随 Cargo.toml），实际锁文件条目为 {:?}",
+            APP_VERSION,
+            entry_version
+        );
+    }
 }
