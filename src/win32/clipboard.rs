@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::thread::JoinHandle;
@@ -182,6 +183,63 @@ static OWNER_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// owner 线程退出确认的有界等待时长；超时即放弃 `join`（detach），绝不永久阻塞宿主线程。
 const OWNER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// owner 窗口就绪的默认等待时长；超时后进入「取消握手」路径（见 `create_clipboard_owner`）。
+const OWNER_READY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// owner 线程创建过程中可由测试驱动的会合阶段（仅测试构建存在）。
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum OwnerCreationStage {
+    /// `RegisterClassW` 之后、创建窗口之前
+    AfterClassRegistered,
+    /// `CreateWindowExW` 成功之后、进入消息泵之前
+    AfterWindowCreated,
+}
+
+/// owner 创建期的测试会合点：让用例以通道/屏障在指定阶段会合，用阶段信号替代
+/// `sleep` 猜时序，从而确定性地验证「超时取消」与「取消/创建并发」（仅测试构建存在）。
+#[cfg(test)]
+struct OwnerTestHooks {
+    /// 需要会合的目标阶段
+    stage: OwnerCreationStage,
+    /// owner 线程到达目标阶段时上报
+    reached_tx: mpsc::Sender<OwnerCreationStage>,
+    /// owner 线程在目标阶段阻塞，等待用例放行
+    release_rx: Mutex<mpsc::Receiver<()>>,
+    /// 超时路径置位取消标记后通知用例
+    cancel_tx: mpsc::Sender<()>,
+    /// owner 线程已创建窗口的原始句柄（供用例断言无主窗口）
+    created_hwnd: Mutex<Option<usize>>,
+    /// 覆盖就绪等待超时，避免用例真的等待默认时长
+    ready_timeout: Duration,
+}
+
+#[cfg(test)]
+impl OwnerTestHooks {
+    /// 到达指定阶段：记录已创建窗口（若有）、上报阶段，并阻塞等待用例放行。
+    fn rendezvous(&self, stage: OwnerCreationStage, created_hwnd_raw: Option<usize>) {
+        if self.stage != stage {
+            return;
+        }
+        if let Some(raw) = created_hwnd_raw {
+            *self
+                .created_hwnd
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(raw);
+        }
+        let _ = self.reached_tx.send(stage);
+        let _ = self
+            .release_rx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recv();
+    }
+}
+
+/// 当前生效的 owner 创建期测试会合点（仅测试构建存在）。
+#[cfg(test)]
+static TEST_OWNER_HOOKS: Mutex<Option<Arc<OwnerTestHooks>>> = Mutex::new(None);
+
 unsafe extern "system" fn clipboard_owner_proc(
     hwnd: HWND,
     msg: u32,
@@ -268,6 +326,17 @@ fn create_clipboard_owner() -> Option<HWND> {
     let (ready_tx, ready_rx) = mpsc::channel::<usize>();
     let (done_tx, done_rx) = mpsc::channel::<()>();
 
+    // 审计报告 P2-4.1：共享取消标记，超时后由父线程置位，owner 线程在三个检查点
+    // （注册类后 / 创建窗口前 / 进入消息泵前）观察并干净退出。
+    let cancel = Arc::new(AtomicBool::new(false));
+    let thread_cancel = Arc::clone(&cancel);
+
+    #[cfg(test)]
+    let test_hooks = TEST_OWNER_HOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+
     let spawned = thread::Builder::new()
         .name("QuickPath-ClipboardOwner".to_string())
         .spawn(move || unsafe {
@@ -311,6 +380,22 @@ fn create_clipboard_owner() -> Option<HWND> {
                 }
             }
 
+            // 审计报告 P2-4.1 检查点 1：注册窗口类之后命中取消则干净退出，不得创建窗口。
+            if thread_cancel.load(Ordering::SeqCst) {
+                let _ = done_tx.send(());
+                return;
+            }
+            #[cfg(test)]
+            if let Some(hooks) = test_hooks.as_ref() {
+                hooks.rendezvous(OwnerCreationStage::AfterClassRegistered, None);
+            }
+
+            // 审计报告 P2-4.1 检查点 2：创建窗口之前再检查一次（两检查点之间可能被置位）。
+            if thread_cancel.load(Ordering::SeqCst) {
+                let _ = done_tx.send(());
+                return;
+            }
+
             let created = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
@@ -331,7 +416,31 @@ fn create_clipboard_owner() -> Option<HWND> {
             match created {
                 Ok(hwnd) if !hwnd.0.is_null() => {
                     let hwnd_raw = hwnd.0 as usize;
+
+                    #[cfg(test)]
+                    if let Some(hooks) = test_hooks.as_ref() {
+                        hooks.rendezvous(OwnerCreationStage::AfterWindowCreated, Some(hwnd_raw));
+                    }
+
                     let _ = ready_tx.send(hwnd_raw);
+
+                    // 审计报告 P2-4.1 检查点 3：进入消息泵之前检查取消。窗口已创建时
+                    // 走既有正常关闭协议（DestroyWindow → WM_DESTROY → PostQuitMessage），
+                    // 绝不进入消息泵，避免留下未登记、无人可关的无主窗口。
+                    if thread_cancel.load(Ordering::SeqCst) {
+                        let _ = DestroyWindow(hwnd);
+                        // 沿用 hwnd_raw 比对后再清空的既有模式，避免误删其他代数的状态。
+                        {
+                            let mut guard = OWNER
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if guard.as_ref().map(|owner| owner.hwnd_raw) == Some(hwnd_raw) {
+                                *guard = None;
+                            }
+                        }
+                        let _ = done_tx.send(());
+                        return;
+                    }
 
                     // 审计报告 R-06：显式退出协议的消息泵。`GetMessageW` 返回 0
                     // （收到 `WM_QUIT`）或 -1（错误）都必须退出循环，绝不因 -1 被
@@ -382,13 +491,75 @@ fn create_clipboard_owner() -> Option<HWND> {
         }
     };
 
-    let hwnd_raw = match ready_rx.recv_timeout(Duration::from_secs(3)) {
+    #[cfg(test)]
+    let ready_timeout = TEST_OWNER_HOOKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+        .map(|hooks| hooks.ready_timeout)
+        .unwrap_or(OWNER_READY_TIMEOUT);
+    #[cfg(not(test))]
+    let ready_timeout = OWNER_READY_TIMEOUT;
+
+    let hwnd_raw = match ready_rx.recv_timeout(ready_timeout) {
         Ok(raw) => raw,
         Err(err) => {
-            crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_OWNER: 等待 owner 窗口就绪超时（{}），owner 不可用",
-                err
-            ));
+            // 审计报告 P2-4.1：超时不再直接丢弃 `JoinHandle`（detach）。先置共享取消
+            // 标记，令尚未越过检查点的线程干净退出；再接住可能已入队的「迟到 ready」
+            // 按已创建窗口回收；最后有界确认线程退出，杜绝未登记线程 / 无主窗口窗口期。
+            cancel.store(true, Ordering::SeqCst);
+            #[cfg(test)]
+            if let Some(hooks) = TEST_OWNER_HOOKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+            {
+                // 通知测试：取消标记已置位（后续会合时序由用例控制）。
+                let _ = hooks.cancel_tx.send(());
+            }
+
+            // 迟到 ready：线程可能已越过检查点并创建了窗口，非阻塞接住已入队的就绪
+            // 消息，按既有正常关闭协议回收（`WM_CLOSE` + `WM_QUIT` 兜底）。
+            if let Ok(late_raw) = ready_rx.try_recv()
+                && late_raw != 0
+            {
+                let late_hwnd = HWND(late_raw as *mut _);
+                if let Err(post_err) =
+                    unsafe { PostMessageW(Some(late_hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }
+                {
+                    crate::dialog::detector::log_debug(&format!(
+                        "CLIPBOARD_OWNER: 超时取消时 PostMessageW(WM_CLOSE) 失败，err={:?}",
+                        post_err
+                    ));
+                }
+                let late_tid = unsafe { GetWindowThreadProcessId(late_hwnd, None) };
+                if late_tid != 0
+                    && let Err(post_err) =
+                        unsafe { PostThreadMessageW(late_tid, WM_QUIT, WPARAM(0), LPARAM(0)) }
+                {
+                    crate::dialog::detector::log_debug(&format!(
+                        "CLIPBOARD_OWNER: 超时取消时 PostThreadMessageW(WM_QUIT) 失败，err={:?}",
+                        post_err
+                    ));
+                }
+            }
+
+            // 有界确认：确认线程已在超时内退出（能 join 就 join），而不是静默 detach。
+            match done_rx.recv_timeout(OWNER_SHUTDOWN_TIMEOUT) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = thread.join();
+                    crate::dialog::detector::log_debug(&format!(
+                        "CLIPBOARD_OWNER: owner 就绪等待超时（{}），已请求取消并确认线程退出",
+                        err
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    crate::dialog::detector::log_debug(&format!(
+                        "CLIPBOARD_OWNER_TIMEOUT_CANCEL: owner 就绪等待超时（{}）后请求取消，但未在 {:?} 内确认线程退出，残余风险：可能存在未登记线程或窗口",
+                        err, OWNER_SHUTDOWN_TIMEOUT
+                    ));
+                }
+            }
             return None;
         }
     };
@@ -2232,6 +2403,176 @@ mod tests {
         assert!(
             !unsafe { IsWindow(Some(owner)).as_bool() },
             "关闭后原 owner 窗口不得存活"
+        );
+    }
+
+    /// owner 创建期会合点守卫：无论用例如何结束，均清空注入的会合点，避免污染后续用例。
+    struct OwnerHooksGuard;
+
+    impl Drop for OwnerHooksGuard {
+        fn drop(&mut self) {
+            *TEST_OWNER_HOOKS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+    }
+
+    /// 一次「就绪等待超时 → 取消握手」的确定性执行结果。
+    struct ReadyTimeoutRun {
+        /// `create_clipboard_owner()` 的返回值（超时路径必须为 None）；
+        /// 以原始句柄回传以避开 `HWND` 非 `Send` 的限制。
+        result: Option<usize>,
+        /// owner 线程实际创建的窗口原始句柄（取消先于创建命中时为 None）
+        created_hwnd: Option<usize>,
+    }
+
+    /// 在指定会合阶段驱动一次「超时取消」时序：
+    /// 1. owner 线程在会合阶段阻塞（到达后由 `reached_rx` 上报）；
+    /// 2. 用例主线程确认超时路径已置位取消标记（`cancel_rx` 上报）；
+    /// 3. 放行 owner 线程，验证其观察到取消后干净退出。
+    ///
+    /// 全程以通道会合代替 `sleep` 猜时序，故结果确定：就绪超时由被阻塞的线程保证，
+    /// 取消必先于放行置位；唯一的真实等待是 50ms 的就绪超时（远小于默认 3s）。
+    fn run_ready_timeout_cancel(stage: OwnerCreationStage) -> ReadyTimeoutRun {
+        let _hooks_guard = OwnerHooksGuard;
+
+        // 清空既有 owner，确保 create 真正进入创建分支。
+        assert!(shutdown_clipboard_owner(), "前置清空 owner 必须成功");
+
+        let (reached_tx, reached_rx) = mpsc::channel::<OwnerCreationStage>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+        let hooks = Arc::new(OwnerTestHooks {
+            stage,
+            reached_tx,
+            release_rx: Mutex::new(release_rx),
+            cancel_tx,
+            created_hwnd: Mutex::new(None),
+            ready_timeout: Duration::from_millis(50),
+        });
+        *TEST_OWNER_HOOKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hooks.clone());
+
+        let create_handle = thread::spawn(|| create_clipboard_owner().map(|hwnd| hwnd.0 as usize));
+
+        let reached = reached_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("owner 线程必须到达目标会合阶段");
+        assert_eq!(reached, stage, "owner 线程应在目标阶段会合");
+
+        cancel_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("就绪等待超时后必须请求取消");
+
+        release_tx.send(()).expect("放行 owner 线程必须成功");
+
+        let result = create_handle.join().expect("创建线程不得 panic");
+        let created_hwnd = *hooks
+            .created_hwnd
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        ReadyTimeoutRun {
+            result,
+            created_hwnd,
+        }
+    }
+
+    /// 审计报告 §4.1「超时取消」：就绪等待超时后必须先置取消标记并**确认** owner 线程
+    /// 退出（而不是静默 detach）；OWNER 中不得残留状态，随后再次创建仍能成功。
+    #[test]
+    fn test_owner_ready_timeout_cancels_and_confirms_thread_exit() {
+        let _guard = clip_test_lock();
+        let run = run_ready_timeout_cancel(OwnerCreationStage::AfterClassRegistered);
+
+        assert!(
+            run.result.is_none(),
+            "就绪等待超时后 create_clipboard_owner 必须返回 None"
+        );
+        assert!(
+            run.created_hwnd.is_none(),
+            "取消先于创建命中时，owner 线程不得创建任何窗口"
+        );
+        assert!(
+            OWNER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none(),
+            "取消确认退出后 OWNER 中不得残留任何状态"
+        );
+
+        // 不因残留状态而永久失败：随后再次创建必须成功且可正常关闭。
+        let recreated = clipboard_owner().expect("取消确认后必须能重新创建 owner");
+        assert!(
+            unsafe { IsWindow(Some(recreated)).as_bool() },
+            "重建的 owner 必须是存活窗口"
+        );
+        assert!(shutdown_clipboard_owner(), "重建的 owner 必须能正常关闭");
+    }
+
+    /// 审计报告 §4.1「迟到 ready」：ready 在等待超时**之后**才到达。owner 线程观察到
+    /// 取消后必须回收已创建窗口、不进入消息泵，并被确认退出；create 返回 None。
+    #[test]
+    fn test_owner_ready_timeout_late_ready_after_window_is_reclaimed() {
+        let _guard = clip_test_lock();
+        let run = run_ready_timeout_cancel(OwnerCreationStage::AfterWindowCreated);
+
+        assert!(
+            run.result.is_none(),
+            "就绪等待超时后 create_clipboard_owner 必须返回 None"
+        );
+        let raw = run.created_hwnd.expect("该时序下 owner 线程应已创建窗口");
+        assert!(
+            !unsafe { IsWindow(Some(HWND(raw as *mut _))).as_bool() },
+            "迟到 ready + 取消必须回收已创建窗口，绝不留下无主窗口"
+        );
+        assert!(
+            OWNER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none(),
+            "取消确认退出后 OWNER 中不得残留任何状态"
+        );
+
+        let recreated = clipboard_owner().expect("取消确认后必须能重新创建 owner");
+        assert!(
+            unsafe { IsWindow(Some(recreated)).as_bool() },
+            "重建的 owner 必须是存活窗口"
+        );
+        assert!(shutdown_clipboard_owner(), "重建的 owner 必须能正常关闭");
+    }
+
+    /// 审计报告 §4.1「取消与创建并发」：取消与 `CreateWindowExW` 并发时，两种时序都
+    /// 不得留下无主窗口 —— 要么窗口创建后被正常关闭回收（`IsWindow == false`），
+    /// 要么取消先命中而根本不创建。
+    #[test]
+    fn test_owner_ready_timeout_cancel_races_window_creation_without_orphan() {
+        let _guard = clip_test_lock();
+
+        // 时序一：取消先于创建命中 —— 根本不创建窗口。
+        let before = run_ready_timeout_cancel(OwnerCreationStage::AfterClassRegistered);
+        assert!(before.result.is_none(), "时序一：create 必须返回 None");
+        assert!(
+            before.created_hwnd.is_none(),
+            "时序一：取消先命中时不得创建窗口"
+        );
+
+        // 时序二：窗口已创建后才命中取消 —— 必须被正常关闭回收。
+        let after = run_ready_timeout_cancel(OwnerCreationStage::AfterWindowCreated);
+        assert!(after.result.is_none(), "时序二：create 必须返回 None");
+        let raw = after.created_hwnd.expect("时序二：owner 线程应已创建窗口");
+        assert!(
+            !unsafe { IsWindow(Some(HWND(raw as *mut _))).as_bool() },
+            "时序二：已创建窗口必须被回收（IsWindow == false），不得成为无主窗口"
+        );
+
+        assert!(
+            OWNER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none(),
+            "两种时序下 OWNER 均不得残留状态"
         );
     }
 
