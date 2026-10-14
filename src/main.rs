@@ -841,6 +841,78 @@ fn schedule_candidates_refresh(dialog_hwnd: HWND, config: &AppConfig) {
     });
 }
 
+/// Win+E 接管后等待新标签在 Shell COM 中注册的轮询次数与间隔（合计 800ms）。
+/// 只有“计数确实可读且严格大于基线”才判定成功；轮询耗尽仍不满足则走原生兜底。
+const WINE_TO_TAB_POLL_ATTEMPTS: usize = 8;
+const WINE_TO_TAB_POLL_INTERVAL_MS: u64 = 100;
+
+/// Win+E 接管序列的决策结果。
+///
+/// 核心不变量：除 `NewTab` 外的任何结果都**恰好**调用过一次补偿动作，
+/// 即“每一次 Win+E 都必须有可见结果”，绝不静默失败、也不重复弹窗。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WineToTabOutcome {
+    /// 新标签已在 Shell COM 中确认出现（计数可读且大于基线），无需补偿。
+    NewTab,
+    /// 未能确认新标签出现，已调用一次补偿动作打开原生资源管理器窗口。
+    NativeFallback(WineToTabFallback),
+}
+
+/// 走原生兜底的具体原因（只影响诊断日志，不改变“补偿恰好一次”的动作）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WineToTabFallback {
+    /// 基线计数不可读（COM 超时 / STA 不可用）：不冒险新建，直接补偿。
+    BaselineUnknown,
+    /// 接管动作未被受理（模块禁用 / 目标非资源管理器窗口 / 触发失败）。
+    NotAccepted,
+    /// 接管已受理，但轮询期内计数始终不可读或不大于基线。
+    CountNotIncreased,
+}
+
+/// Win+E 接管的可注入决策序列（纯决策逻辑：无 I/O、无 Win32 调用）。
+///
+/// 语义与内联实现逐条等价：
+/// - 基线 `count_before == None`（COM 超时 / 不可读）时**不**调用 `try_accept`，
+///   直接补偿一次（绝不冒险新建）；
+/// - `try_accept()` 返回 false（接管被拒）时补偿一次；
+/// - 接管受理后最多轮询 `WINE_TO_TAB_POLL_ATTEMPTS` 次，每次先 `wait()` 再
+///   `count_after()`；只有“计数确实可读且严格大于基线”才判定成功并提前返回；
+/// - 轮询耗尽仍不满足则补偿一次。
+///
+/// 生产路径传 `thread::sleep(WINE_TO_TAB_POLL_INTERVAL_MS)` 与
+/// `launch_native_explorer_window`；测试传 no-op 等待与计数闭包，
+/// 从而在不弹窗、不依赖真实 COM/Explorer 的前提下验证每条失败分支。
+fn run_wine_to_tab_sequence(
+    count_before: Option<usize>,
+    mut try_accept: impl FnMut() -> bool,
+    mut count_after: impl FnMut() -> Option<usize>,
+    mut wait: impl FnMut(),
+    mut compensate: impl FnMut(),
+) -> WineToTabOutcome {
+    let Some(count_before) = count_before else {
+        // 基线未知：不冒险新建，直接补偿原生窗口
+        compensate();
+        return WineToTabOutcome::NativeFallback(WineToTabFallback::BaselineUnknown);
+    };
+
+    if !try_accept() {
+        compensate();
+        return WineToTabOutcome::NativeFallback(WineToTabFallback::NotAccepted);
+    }
+
+    for _ in 0..WINE_TO_TAB_POLL_ATTEMPTS {
+        wait();
+        if let Some(count) = count_after()
+            && count > count_before
+        {
+            return WineToTabOutcome::NewTab;
+        }
+    }
+
+    compensate();
+    WineToTabOutcome::NativeFallback(WineToTabFallback::CountNotIncreased)
+}
+
 /// 处理 Win+E 接管请求（由低级键盘钩子投递，系统原生按键已被吞掉）。
 ///
 /// 关键闭环：接管动作在工作线程执行，并在 800ms 内确认“新标签确实出现”；
@@ -866,34 +938,32 @@ fn handle_wine_to_tab_request(state: &AppState, target: HWND) {
         // 基线计数必须“确实读到”：STA 超时时 `get_all_tabs` 会退化为空列表，
         // 若把查询失败当 0，就会用宿主原有标签误判“新标签已出现”（报告 P1-01）。
         // 基线未知时不冒险新建，直接补偿原生窗口，保证每次 Win+E 都有可见结果。
-        let Some(count_before) = com.get_tabs_count_for_hwnd_checked(target) else {
-            dialog::detector::log_debug(
-                "WINE_TO_TAB: 首个标签计数查询超时，无法证明新建成功，补偿打开原生窗口",
-            );
-            launch_native_explorer_window();
-            return;
-        };
+        let count_before = com.get_tabs_count_for_hwnd_checked(target);
 
-        if !coordinator.wine_to_tab_in(target) {
-            launch_native_explorer_window();
-            return;
-        }
+        let outcome = run_wine_to_tab_sequence(
+            count_before,
+            // 接管动作延迟到「基线可读」之后才执行（由决策函数保证）
+            || coordinator.wine_to_tab_in(target),
+            || com.get_tabs_count_for_hwnd_checked(target),
+            || thread::sleep(Duration::from_millis(WINE_TO_TAB_POLL_INTERVAL_MS)),
+            launch_native_explorer_window,
+        );
 
-        // 等待新标签在 Shell COM 中注册（最多 800ms）；
-        // 只有“计数确实可读且大于基线”才认定为成功，超时/读不到均走原生兜底
-        for _ in 0..8 {
-            thread::sleep(Duration::from_millis(100));
-            if let Some(count) = com.get_tabs_count_for_hwnd_checked(target)
-                && count > count_before
-            {
-                return;
+        match outcome {
+            WineToTabOutcome::NewTab => {}
+            WineToTabOutcome::NativeFallback(WineToTabFallback::BaselineUnknown) => {
+                dialog::detector::log_debug(
+                    "WINE_TO_TAB: 首个标签计数查询超时，无法证明新建成功，补偿打开原生窗口",
+                );
             }
+            WineToTabOutcome::NativeFallback(WineToTabFallback::CountNotIncreased) => {
+                dialog::detector::log_debug(&format!(
+                    "WINE_TO_TAB: host=0x{:X} 新标签未出现或计数不可读，补偿打开原生窗口",
+                    target_raw
+                ));
+            }
+            WineToTabOutcome::NativeFallback(WineToTabFallback::NotAccepted) => {}
         }
-        dialog::detector::log_debug(&format!(
-            "WINE_TO_TAB: host=0x{:X} 新标签未出现或计数不可读，补偿打开原生窗口",
-            target_raw
-        ));
-        launch_native_explorer_window();
     });
 }
 
@@ -1109,5 +1179,152 @@ mod tests {
         assert!(line.contains("rebuild=2"), "{line}");
         assert!(line.contains("degraded=true"), "{line}");
         assert!(line.contains("p50="), "{line}");
+    }
+
+    /// 一次 `run_wine_to_tab_sequence` 调用观测到的各注入点调用次数。
+    struct WineToTabProbe {
+        outcome: WineToTabOutcome,
+        accept_calls: usize,
+        wait_calls: usize,
+        count_calls: usize,
+        compensate_calls: usize,
+    }
+
+    /// 用计数闭包驱动决策函数：`after_counts` 按轮询顺序给出 `count_after` 的返回值，
+    /// 越界（调用次数超过切片长度）一律返回 `None`（模拟“计数始终不可读”）。
+    fn run_wine_to_tab_probe(
+        count_before: Option<usize>,
+        accept_result: bool,
+        after_counts: &[Option<usize>],
+    ) -> WineToTabProbe {
+        use std::cell::Cell;
+        let accept_calls = Cell::new(0usize);
+        let wait_calls = Cell::new(0usize);
+        let count_calls = Cell::new(0usize);
+        let compensate_calls = Cell::new(0usize);
+        let mut idx = 0usize;
+        let outcome = run_wine_to_tab_sequence(
+            count_before,
+            || {
+                accept_calls.set(accept_calls.get() + 1);
+                accept_result
+            },
+            || {
+                count_calls.set(count_calls.get() + 1);
+                let value = after_counts.get(idx).copied().flatten();
+                idx += 1;
+                value
+            },
+            || {
+                wait_calls.set(wait_calls.get() + 1);
+            },
+            || {
+                compensate_calls.set(compensate_calls.get() + 1);
+            },
+        );
+        WineToTabProbe {
+            outcome,
+            accept_calls: accept_calls.get(),
+            wait_calls: wait_calls.get(),
+            count_calls: count_calls.get(),
+            compensate_calls: compensate_calls.get(),
+        }
+    }
+
+    /// 报告 §10-4：基线计数未知（模拟 COM 超时）→ 必须原生兜底，
+    /// 补偿恰好一次，且**不尝试新建**（`try_accept` 从未被调用）。
+    #[test]
+    fn wine_to_tab_baseline_unknown_falls_back_without_trying_new_tab() {
+        let probe = run_wine_to_tab_probe(None, true, &[]);
+        assert_eq!(
+            probe.outcome,
+            WineToTabOutcome::NativeFallback(WineToTabFallback::BaselineUnknown)
+        );
+        assert_eq!(probe.compensate_calls, 1, "基线未知必须补偿恰好一次");
+        assert_eq!(probe.accept_calls, 0, "基线未知时绝不尝试新建标签");
+        assert_eq!(probe.wait_calls, 0, "基线未知时不进入轮询");
+        assert_eq!(probe.count_calls, 0, "基线未知时不再查计数");
+    }
+
+    /// 报告 §10-4：接管被拒（`wine_to_tab_in` 返回 false）→ 原生兜底 1 次，不进入轮询。
+    #[test]
+    fn wine_to_tab_not_accepted_falls_back_once() {
+        let probe = run_wine_to_tab_probe(Some(2), false, &[Some(3); 8]);
+        assert_eq!(
+            probe.outcome,
+            WineToTabOutcome::NativeFallback(WineToTabFallback::NotAccepted)
+        );
+        assert_eq!(probe.compensate_calls, 1);
+        assert_eq!(probe.accept_calls, 1);
+        assert_eq!(probe.wait_calls, 0, "接管被拒不应进入轮询");
+    }
+
+    /// 报告 §10-4：接管受理但计数始终不可读（COM 挂起）→ 轮询满 8 次后原生兜底 1 次。
+    #[test]
+    fn wine_to_tab_count_always_unreadable_falls_back_once() {
+        let probe = run_wine_to_tab_probe(Some(2), true, &[]);
+        assert_eq!(
+            probe.outcome,
+            WineToTabOutcome::NativeFallback(WineToTabFallback::CountNotIncreased)
+        );
+        assert_eq!(probe.compensate_calls, 1);
+        assert_eq!(probe.wait_calls, WINE_TO_TAB_POLL_ATTEMPTS, "必须轮询 8 次");
+        assert_eq!(probe.count_calls, WINE_TO_TAB_POLL_ATTEMPTS);
+    }
+
+    /// 报告 §10-4：接管受理但计数始终等于基线（模拟 Explorer 重启/源窗口关闭后计数不增）
+    /// → 原生兜底 1 次。
+    #[test]
+    fn wine_to_tab_count_never_increases_falls_back_once() {
+        let probe = run_wine_to_tab_probe(Some(3), true, &[Some(3); 8]);
+        assert_eq!(
+            probe.outcome,
+            WineToTabOutcome::NativeFallback(WineToTabFallback::CountNotIncreased)
+        );
+        assert_eq!(probe.compensate_calls, 1);
+        assert_eq!(probe.wait_calls, WINE_TO_TAB_POLL_ATTEMPTS);
+    }
+
+    /// 报告 §10-4：接管受理，计数先不可读、后大于基线 → 判定成功、补偿 0 次、提前返回。
+    #[test]
+    fn wine_to_tab_count_increases_after_unreadable_succeeds_without_compensation() {
+        let probe = run_wine_to_tab_probe(Some(1), true, &[None, Some(2)]);
+        assert_eq!(probe.outcome, WineToTabOutcome::NewTab);
+        assert_eq!(probe.compensate_calls, 0, "判定成功后绝不补偿");
+        assert_eq!(probe.wait_calls, 2, "第二轮才确认，应提前返回");
+        assert_eq!(probe.count_calls, 2);
+    }
+
+    /// 报告 §10-4：接管受理且计数立即大于基线 → 判定成功、补偿 0 次、仅等待一次。
+    #[test]
+    fn wine_to_tab_count_increases_immediately_succeeds_without_compensation() {
+        let probe = run_wine_to_tab_probe(Some(1), true, &[Some(2)]);
+        assert_eq!(probe.outcome, WineToTabOutcome::NewTab);
+        assert_eq!(probe.compensate_calls, 0);
+        assert_eq!(probe.wait_calls, 1, "首轮即确认，只等待一次");
+        assert_eq!(probe.count_calls, 1);
+    }
+
+    /// 核心不变量（报告 §10-4）：每一种失败输入下补偿次数**恰好为 1**——
+    /// 既不是 0 次“静默失败”，也不是多次重复弹窗。
+    #[test]
+    fn wine_to_tab_failure_inputs_compensate_exactly_once() {
+        type FailingInput<'a> = (&'a str, Option<usize>, bool, &'a [Option<usize>]);
+        let failing_inputs: &[FailingInput] = &[
+            ("基线未知", None, true, &[]),
+            ("接管被拒", Some(2), false, &[Some(3); 8]),
+            ("计数始终不可读", Some(2), true, &[]),
+            ("计数始终等于基线", Some(3), true, &[Some(3); 8]),
+            ("计数始终小于基线", Some(5), true, &[Some(2); 8]),
+        ];
+        for (name, count_before, accept_result, after_counts) in failing_inputs {
+            let probe = run_wine_to_tab_probe(*count_before, *accept_result, after_counts);
+            assert!(
+                matches!(probe.outcome, WineToTabOutcome::NativeFallback(_)),
+                "{name}: 失败输入必须走原生兜底，实际 {:?}",
+                probe.outcome
+            );
+            assert_eq!(probe.compensate_calls, 1, "{name}: 补偿必须恰好一次");
+        }
     }
 }
