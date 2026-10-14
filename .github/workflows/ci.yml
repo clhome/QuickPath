@@ -1,0 +1,71 @@
+# 常规 CI 质量门禁（审计报告 v1.2.3 §11 第三优先级第 3 条）。
+# 目的：把与 tag 发布通道（release.yml）同等严格的门禁前移到 pull request 与主分支 push，
+# 让格式/告警/测试/依赖漏洞在合并前就暴露，而不是拖到打 tag 发布时才失败。
+name: CI
+
+on:
+  # 所有分支的 PR 都跑门禁，作为合并前的准入检查。
+  pull_request:
+  # 主分支（仓库主分支名为 main）每次 push 复跑，防止绕过 PR 的直推漏检。
+  push:
+    branches:
+      - main
+  # 允许手动触发，便于在无 PR 场景下按需复跑。
+  workflow_dispatch:
+
+# 这是 CI 不是发布：只读代码。与 release.yml 的 contents: write 明确区分，
+# 杜绝普通分支/PR 拿到写权限（最小权限原则）。
+permissions:
+  contents: read
+
+# 同一 PR/分支的新推送取消其旧的排队或进行中运行：
+# CI 只关心最新一次提交的结论，旧运行继续占用 runner 纯属浪费配额；
+# group 带 ref，避免不同 PR/分支之间互相取消。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gates:
+    name: Quality Gates (Windows)
+    runs-on: windows-latest
+
+    steps:
+      # 所有第三方 Action 一律锁定到完整 commit SHA（与 release.yml 同一版本），
+      # 避免上游 tag 被移动/劫持后 CI 执行到非预期代码。
+      - name: 检出代码
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: 安装固定版本 Rust 工具链
+        shell: pwsh
+        # 显式锁死 Rust 版本与组件，保证 CI 与 release.yml 使用完全一致的工具链，
+        # 避免「PR 绿、tag 红」这类工具链漂移造成的假通过/假失败。
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.94.1
+          rustc -V
+          cargo -V
+
+      - name: 启用 Rust 编译缓存
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+
+      # ── 阻塞式质量门禁 ────────────────────────────────────────────────────
+      # 与 release.yml 完全同等的门禁：任一失败即让 CI 变红、阻塞合并，
+      # 不允许带格式/告警/测试失败/漏洞/编译错误的改动进入主分支。
+      - name: 门禁：格式检查
+        run: cargo fmt --all -- --check
+
+      - name: 门禁：Clippy（0 告警）
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: 门禁：执行单元与集成测试
+        run: cargo test --all-targets
+
+      - name: 门禁：依赖安全审计
+        shell: pwsh
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: 编译 Release 版本
+        run: cargo build --release

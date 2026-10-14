@@ -86,10 +86,13 @@ jobs:
               "$hash  $($_.Name)"
           } | Out-File -FilePath "dist/sha256sums.txt" -Encoding ascii
 
-      # ── Authenticode 代码签名（未启用）──────────────────────────────────────
-      # 报告 P2-02：同一工作流自生成的 sha256 清单只能证明“产物未被改动”，
-      # 不能证明发布者身份。启用前需准备代码签名证书并把口令放入
-      # secrets（如 WINDOWS_CERT_PFX_BASE64 / WINDOWS_CERT_PASSWORD），然后取消注释：
+      # ── Authenticode 代码签名（本轮未启用，仅保留模板）──────────────────────
+      # 报告 P2-02 / §11 三-1：同一工作流自生成的 sha256 清单只能证明“产物未被改动”，
+      # 不能证明发布者身份；稳定版发布要求「签名 + 验签 + 时间戳」三者齐备并作为硬门禁。
+      # 用户已决定本轮不启用（2026-10-14），因此以下步骤全部保持注释，
+      # 不引入任何实际签名/验签动作，也不新增 secrets 引用。
+      # 启用前需准备代码签名证书并把口令放入 secrets
+      # （如 WINDOWS_CERT_PFX_BASE64 / WINDOWS_CERT_PASSWORD），然后取消注释：
       #
       # - name: 对可执行文件签名
       #   shell: pwsh
@@ -97,6 +100,14 @@ jobs:
       #     $pfx = "$env:RUNNER_TEMP\qp.pfx"
       #     [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_PFX_BASE64 }}"))
       #     & signtool.exe sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" dist\QuickPath.exe
+      #
+      # - name: 对可执行文件验签（签名 + 时间戳均须有效，作为发布硬门禁）
+      #   shell: pwsh
+      #   run: |
+      #     # /pa 用默认验证策略、/v 输出详情；验签失败退出码非 0，直接中止发布。
+      #     # 时间戳服务器（RFC 3161，如 http://timestamp.digicert.com）不可用时会产生
+      #     # 无时间戳的短命签名，证书过期后即失效，故时间戳与签名同样必须校验通过。
+      #     & signtool.exe verify /pa /v dist\QuickPath.exe
 
       - name: 自动创建 GitHub Release 并上传产物
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
