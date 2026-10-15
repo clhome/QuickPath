@@ -376,15 +376,52 @@ struct AtomicWriteTestHook {
 #[cfg(test)]
 static TEST_BEFORE_ATOMIC_WRITE: Mutex<Option<AtomicWriteTestHook>> = Mutex::new(None);
 
-/// 测试注入：安排在下一次（可跳过前 `skip` 次）统一原子写入开始之前执行 `action`。
+/// 测试注入:安排在下一次(可跳过前 `skip` 次)统一原子写入开始之前执行 `action`。
+///
+/// **为什么要做残留检测(CI 稳定性缺陷的修复)**:本会合点是**进程级单槽**静态量,
+/// 而用例会把它配成「执行前若干次写入」的故障注入(`TEST_FAIL_FORMAT` 等进程级开关)。
+/// 若前一个用例的钩子**从未被消费**(断言先失败 / 原子写入次数不足 / panic 提前退出),
+/// 它就会残留在静态量里,等**后续某个无关用例**的写入去触发,把全局开关打开且不还原 ——
+/// 表现为“无关用例在夹具第一步莫名其妙失败”(CI 上已实测到 `部分格式写入失败: [13]`)。
+///
+/// 因此返回 RAII guard:**无论正常结束、断言失败还是 panic 展开,都会自动撤销**;
+/// 并且安装时先断言无残留,使泄漏的失败点落在**源头**而不是后面的无关用例。
+///
+/// 调用方必须绑定返回值(`let _hook = arm_atomic_write_hook(..)`),
+/// 不得写 `let _ =`,后者会立即 drop 直接撤销。
 #[cfg(test)]
-fn arm_atomic_write_hook(skip: usize, action: impl FnOnce() + Send + 'static) {
-    *TEST_BEFORE_ATOMIC_WRITE
+fn arm_atomic_write_hook(skip: usize, action: impl FnOnce() + Send + 'static) -> ArmHookGuard {
+    let mut guard = TEST_BEFORE_ATOMIC_WRITE
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(AtomicWriteTestHook {
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        guard.is_none(),
+        "上一个原子写入会合点未被消费就残留在静态量里:它会污染后续无关用例的全局开关"
+    );
+    *guard = Some(AtomicWriteTestHook {
         skip,
         action: Box::new(action),
     });
+    ArmHookGuard(())
+}
+
+/// [`arm_atomic_write_hook`] 的 RAII guard:离开作用域即撤销尚未消费的会合点。
+#[cfg(test)]
+struct ArmHookGuard(());
+
+#[cfg(test)]
+impl Drop for ArmHookGuard {
+    fn drop(&mut self) {
+        disarm_atomic_write_hook();
+    }
+}
+
+/// 撤销尚未消费的会合点(幂等)。
+#[cfg(test)]
+fn disarm_atomic_write_hook() {
+    *TEST_BEFORE_ATOMIC_WRITE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 /// 执行（并消费）原子写入会合点。
@@ -2102,12 +2139,27 @@ mod tests {
         set_raw_clipboard_text_tracked(text).is_some()
     }
 
-    /// 测试夹具：写入纯文本并返回写入后的序列号（失败 / 归属不可判定时为 None）。
+    /// 测试夹具:写入纯文本并返回写入后的序列号(失败 / 归属不可判定时为 None)。
+    ///
+    /// 失败时**打印原因**,便于区分「环境争用」与「测试注入开关泄漏」这两类
+    /// 完全不同的问题 —— 否则 `assert!(set_raw_clipboard_text(..))` 失败时不带任何信息,
+    /// 在 CI 上只能靠猜(实测过:某次失败的真因是 `TEST_FAIL_FORMAT` 被泄漏为
+    /// `CF_UNICODETEXT`,而表象只是“夹具播种失败”)。
     fn set_raw_clipboard_text_tracked(text: &str) -> Option<u32> {
         let expected = clipboard_sequence_number();
         match clipboard_atomic_write(expected, true, || write_unicode_text_payload(text)) {
             Ok((sequence, _written, failed)) if failed.is_empty() => Some(sequence),
-            _ => None,
+            Ok((_sequence, _written, failed)) => {
+                eprintln!(
+                    "[clipboard test fixture] 播种失败:部分格式写入失败 {failed:?}\
+                     (若含 13=CF_UNICODETEXT,极可能是测试注入开关被泄漏,见 arm_atomic_write_hook 的 RAII guard)"
+                );
+                None
+            }
+            Err(err) => {
+                eprintln!("[clipboard test fixture] 播种失败:{err:?}");
+                None
+            }
         }
     }
 
@@ -2510,7 +2562,7 @@ mod tests {
         for op in [FailOp::Set, FailOp::Alloc, FailOp::Lock] {
             assert!(set_raw_clipboard_text("qp_propagate_seed"));
 
-            arm_atomic_write_hook(1, move || {
+            let _hook = arm_atomic_write_hook(1, move || {
                 TEST_FAIL_MODE.store(op.mode(), std::sync::atomic::Ordering::SeqCst);
                 TEST_FAIL_FORMAT.store(CF_UNICODETEXT, std::sync::atomic::Ordering::SeqCst);
             });
@@ -3929,7 +3981,7 @@ mod tests {
 
         // 在「写前校验」与「持锁复核」之间注入用户复制（等价竞态 A 的交错）
         let user_text = "qp_p004a_user_copy".to_string();
-        arm_atomic_write_hook(0, move || {
+        let _hook = arm_atomic_write_hook(0, move || {
             assert!(set_raw_clipboard_text(&user_text));
         });
 
@@ -4238,6 +4290,75 @@ mod tests {
             get_clipboard_text().as_deref(),
             Some("qp_p007_lifecycle_seed"),
             "Drop 兜底必须把用户原内容还回去"
+        );
+    }
+
+    /// CI 稳定性守卫:**测试旋钮必须全部配 RAII 清理**。
+    ///
+    /// 背景(实测过的 CI 失败,不是假想):`arm_atomic_write_hook` 是**进程级单槽**静态量,
+    /// 它安装的钩子会修改 `TEST_FAIL_FORMAT` 等进程级开关。旧实现不返回 guard,
+    /// 若某用例的会合点**未被消费**(断言先失败 / 原子写入次数不足 / panic 提前退出),
+    /// 钩子就残留下来,等**后续无关用例**的写入去触发 ——
+    /// 表现为“一个毫不相干的用例在夹具第一步莫名其妙失败”,定位代价极高。
+    ///
+    /// 本守卫钉住两条:
+    /// 1 安装函数必须返回 RAII guard,且其 `Drop` 必须真的撤销;
+    /// 2 调用方不得用 `let _ =` / 不绑定返回值的方式静默丢弃 guard。
+    #[test]
+    fn test_clipboard_test_knobs_are_raii_cleaned() {
+        const SOURCE: &str = include_str!("clipboard.rs");
+
+        // 1) 安装器必须返回 guard
+        assert!(
+            SOURCE.contains("fn arm_atomic_write_hook(skip: usize, action: impl FnOnce() + Send + 'static) -> ArmHookGuard"),
+            "测试钩子安装器必须返回 RAII guard"
+        );
+        // 2) guard 的 Drop 必须真的撤销(而不是空实现)
+        let guard_start = SOURCE
+            .find("impl Drop for ArmHookGuard")
+            .expect("ArmHookGuard 必须实现 Drop");
+        let guard_tail = &SOURCE[guard_start..];
+        let guard_end = guard_tail.find("\n}").expect("Drop 实现必须能被切分");
+        assert!(
+            guard_tail[..guard_end].contains("disarm_atomic_write_hook()"),
+            "ArmHookGuard::drop 必须真的撤销残留钩子(否则全局开关会泄漏到后续用例)"
+        );
+        // 3) 安装时必须断言无残留(纵深防御:泄漏点落在源头而不是无关用例)
+        let arm_start = SOURCE
+            .find("fn arm_atomic_write_hook(")
+            .expect("安装器必须存在");
+        let arm_tail = &SOURCE[arm_start..];
+        let arm_end = arm_tail.find("\n}").expect("安装器必须能被切分");
+        assert!(
+            arm_tail[..arm_end].contains("guard.is_none()"),
+            "安装会合点前必须断言无残留(使泄漏失败在源头)"
+        );
+
+        // 4) 所有调用点必须绑定返回值:禁止 `let _ = arm_atomic_write_hook`
+        //    (`.` 会是 Drop 立即触发的写法)与裸调用。
+        let production_end = SOURCE.find("\nmod tests {").expect("必须存在测试模块");
+        let callers = SOURCE[production_end..]
+            .lines()
+            .filter(|line| line.contains("arm_atomic_write_hook("))
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .take_while(|line| !line.contains("fn arm_atomic_write_hook"))
+            .collect::<Vec<_>>();
+        for line in &callers {
+            let trimmed = line.trim();
+            if trimmed.starts_with("fn ") || trimmed.starts_with("///") {
+                continue;
+            }
+            assert!(
+                !trimmed.contains("let _ ="),
+                "`let _ = arm_atomic_write_hook(..)` 会使 guard 立即 drop、旋钮直接撤销:应当绑定为 `let _hook = ...`({trimmed})"
+            );
+        }
+        // 至少验证有调用点确实以 `let ` 绑定(守卫本身不是空跑)
+        assert!(
+            SOURCE[production_end..].lines().any(|l| l
+                .trim_start()
+                .starts_with("let _hook = arm_atomic_write_hook(")),
+            "存在未绑定返回值的调用点:测试旋钮 guard 会被立即丢弃"
         );
     }
 
@@ -4800,7 +4921,7 @@ mod tests {
         let baseline = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
         let baseline_hook = baseline.clone();
         let external = "qp_p005_t1_external".to_string();
-        arm_atomic_write_hook(0, move || {
+        let _hook = arm_atomic_write_hook(0, move || {
             assert!(set_raw_clipboard_text(&external));
             baseline_hook.store(empty_clipboard_calls(), std::sync::atomic::Ordering::SeqCst);
         });
@@ -4842,7 +4963,7 @@ mod tests {
         let baseline = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
         let baseline_hook = baseline.clone();
         let external = "qp_p005_t2_external".to_string();
-        arm_atomic_write_hook(0, move || {
+        let _hook = arm_atomic_write_hook(0, move || {
             assert!(set_raw_clipboard_text(&external));
             baseline_hook.store(empty_clipboard_calls(), std::sync::atomic::Ordering::SeqCst);
         });
@@ -4898,8 +5019,8 @@ mod tests {
         // 首次恢复（第 1 次原子写入）注入 CF_UNICODETEXT 失败；
         // 重试（第 2 次原子写入）开头让外部写入发生。
         let _inject = FailInjection::enable(CF_UNICODETEXT);
-        arm_atomic_write_hook(1, move || {
-            // 会合点里的外部写入本身也是 CF_UNICODETEXT，必须临时撤下故障注入
+        let _hook = arm_atomic_write_hook(1, move || {
+            // 会合点里的外部写入本身也是 CF_UNICODETEXT,必须临时撤下故障注入
             // （否则“外部写入”会被自己的注入弄失败，交错就不成立）。
             TEST_FAIL_FORMAT.store(u32::MAX, std::sync::atomic::Ordering::SeqCst);
             assert!(set_raw_clipboard_text(&external));

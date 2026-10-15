@@ -1854,3 +1854,40 @@
 - **未闭合**:CI 对固定提交的门禁证据(报告明确要求不以本机记录替代)、真机 §15 T-01~T-04、发布产物验收(Authenticode/信誉提示披露)。
 - **纪律偏离声明(如实登记)**:变异 M1/M2 的施加与还原用 Python 脚本经 `bash` 执行(违反 AGENTS.md「文件改动强制使用原生文件工具」),
   随后均已还原、`grep -rn MUTATION src` 为空;其余改动全部使用原生工具。详见修复记录 §6.2。
+
+---
+
+# GitHub Actions CI 失败修复(测试旋钮跨用例泄漏)
+
+**现象**:CI 上 `cargo test --all-targets` 报 `test_clipboard_busy_is_reported_and_never_claims_success` 在
+`src\win32\clipboard.rs` 的**夹具第一行**(`assert!(set_raw_clipboard_text("qp_busy_seed"))`)失败,其余 227 个用例通过;本地无法复现。
+
+**根因(先取证后结论,非猜测)**:
+1. 先排除测试锁 —— 用**花括号配平**脚本逐个提取用例函数体,确认所有写种子的用例都持 `clip_test_lock`;
+2. 给夹具加**失败原因诊断**(原实现失败不带任何信息)后重跑,直接拿到:
+   `[clipboard test fixture] 播种失败:部分格式写入失败 [13]` → `13 = CF_UNICODETEXT`,
+   即 `TEST_FAIL_FORMAT` 被置位且**未还原**;
+3. 定位到泄漏源:`arm_atomic_write_hook` 是**进程级单槽**静态量,`run_atomic_write_hook` 的 `skip`
+   只在原子写入被调用时递减。`skip = 1` 的用例若实际调用次数不足(或断言先失败 / panic 提前退出),
+   钩子就残留在静态量里,由**后续无关用例**的写入触发,把全局开关打开。
+
+**修复(单文件 `src/win32/clipboard.rs`,不放宽任何业务断言)**:
+- `arm_atomic_write_hook` 返回 **RAII guard**(`ArmHookGuard`),`Drop` 时撤销未消费的钩子 ——
+  无论正常结束、断言失败还是 panic 展开都会清理;
+- 安装时**断言无残留**(`guard.is_none()`),使泄漏的失败点落在**源头**而不是无关用例(纵深防御);
+- 5 处调用点全部绑定 `let _hook = ...`;禁止 `let _ =`(会立即 drop 直接撤销);
+- 夹具失败时 `eprintln!` 输出具体原因(定位成本高的直接原因就是原实现静默);
+- 新增守卫 `test_clipboard_test_knobs_are_raii_cleaned`(4 条断言);同类单槽旋钮 `block_owner_pump_for_test` 已核查未改。
+
+**门禁**:fmt 干净 / clippy 0 告警 / `cargo test --all-targets` **228 → 229**(0 失败),
+**默认并行连跑 3 次均 229 全绿**(验证稳定性)+ 单线程 229 全绿 / `cargo audit` 退出码 0 / release 通过。
+
+**变异自证 3 处**:M1 去掉 guard 的 `Drop` 撤销 → **跨用例污染重现**(两个无关用例双双失败,正是 CI 同类症状),
+证明修复真的消除了泄漏;M3 调用点改 `let _ =` → 守卫 + 行为用例双双变红;
+**M2(去掉无残留断言)未变红,属预期** —— M1 已使残留不可能发生,该断言只是纵深防御,已如实登记不宣称可被钉住。
+
+**教训(同类缺陷第二次实例)**:只要存在**进程级单槽测试旋钮**,安装就必须返回 **RAII guard**;
+且失败必须**带原因输出**,否则“夹具莫名其妙失败”会把排查导向错误方向。
+
+**未闭合**:需在 GitHub Actions 上复跑同一提交确认转绿(CI 证据仍属未闭合项);真机 §10~§15 不变。
+**纪律偏离声明**:本轮变异 M1/M3 的施加与还原用 `edit` 工具完成,无偏离。
