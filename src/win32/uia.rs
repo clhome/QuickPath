@@ -363,8 +363,17 @@ struct ScoredCandidate {
 struct WpsInjectState {
     /// 当前持有 lease 的对话框指纹(空闲为 `None`)
     holder: Option<String>,
-    /// 各对话框最近一次注入的代次(让延迟的旧恢复自动失效)
-    generations: std::collections::HashMap<String, u64>,
+    /// 各对话框最近一次注入的令牌(让延迟的旧恢复自动失效)
+    generations: std::collections::HashMap<String, u128>,
+    /// **进程级单调发号器**(审计报告 P1-09)
+    ///
+    /// 与 `generations` 的容量回收**刻意拆开**:清表只负责限制映射占用的内存,
+    /// **绝不重置发号器**。否则同一指纹在清表后又会拿到相同的数值,
+    /// 使清表前发出的旧恢复令牌重新有效(ABA)。
+    ///
+    /// 用 `u128` 彻底消除回绕:即便每纳秒发一次号,也远超任何物理时间尺度,
+    /// 因此不需要额外的 fail-closed 分支(0 仍保留为「无记录」哨兵)。
+    next_generation: u128,
 }
 
 fn wps_inject_state() -> &'static std::sync::Mutex<WpsInjectState> {
@@ -377,15 +386,22 @@ fn wps_inject_state() -> &'static std::sync::Mutex<WpsInjectState> {
 #[derive(Debug)]
 struct WpsInjectLease {
     fingerprint: String,
+    /// 本次操作持有的**不可变**令牌(报告 P1-09 第 2 节)。
+    ///
+    /// 不由映射反查:即使该指纹的映射因容量回收被删除,
+    /// 本次任务持有的凭证语义也不会改变。
+    generation: u128,
 }
 
 impl WpsInjectLease {
-    /// 主注入专用:非阻塞获取,成功时把该对话框的 generation +1。
+    /// 主注入专用:非阻塞获取,成功时从**进程级发号器**取得新令牌。
     fn try_acquire(identity: &WindowIdentity) -> Option<Self> {
         Self::try_acquire_fingerprint(&identity.fingerprint())
     }
 
-    /// 主注入的**唯一实现**:去重 + 代次递增(生产路径与测试共用,避免测试测到复制品)。
+    /// 主注入的**唯一实现**:去重 + 发号 + 登记映射(生产路径与测试共用)。
+    ///
+    /// 发号、清表、写入映射与登记 holder 全部在**同一个状态锁临界区**内完成。
     fn try_acquire_fingerprint(fingerprint: &str) -> Option<Self> {
         let mut state = wps_inject_state()
             .lock()
@@ -394,49 +410,62 @@ impl WpsInjectLease {
             return None;
         }
         state.holder = Some(fingerprint.to_string());
-        // 代次表只需保留最近活跃的少数对话框,避免随进程寿命无界增长
+
+        // 进程级单调发号(与容量回收无关:
+        // 清表**不得**触碰 `next_generation`,否则旧令牌会重新有效)。
+        state.next_generation += 1;
+        let generation = state.next_generation;
+
+        // 映射只保留最近活跃的少数对话框,避免随进程寿命无界增长。
+        // 这里清表是安全的:发号器不受影响,因此清表后的新令牌不可能等于旧令牌。
         if state.generations.len() > 16 {
             state.generations.clear();
         }
-        let generation = state
+        state
             .generations
-            .entry(fingerprint.to_string())
-            .or_insert(0);
-        *generation = generation.wrapping_add(1);
+            .insert(fingerprint.to_string(), generation);
+
         Some(Self {
             fingerprint: fingerprint.to_string(),
+            generation,
         })
     }
 
-    /// 延迟恢复专用:**条件式**取得 lease(审计报告 P1-08)。
+    /// 延迟恢复专用:**条件式**取得 lease(审计报告 P1-08 / P1-09)。
     ///
     /// 在**同一次加锁**内同时校验两件事,缺一不可:
     /// 1. 当前没有持有者(否则已有新注入接管,旧恢复必须放弃);
-    /// 2. 该对话框的当前代次**恰好等于** `expected_generation`(否则已有新注入
-    ///    递增过代次,旧恢复的目标已过期)。
+    /// 2. 该对话框的当前令牌**恰好等于** `expected_generation`(否则已有新注入
+    ///    发过新号,旧恢复的目标已过期)。
     ///
-    /// 刻意**不递增**代次:递增会让本次恢复自己的期望值立刻失效。
+    /// 由于令牌来自**进程级发号器**,「映射被清空」或「指纹从未出现过」都表现为
+    /// 取不到匹配值 → fail-closed(绝不把「无记录」当成某个合法令牌)。
+    ///
+    /// 刻意**不推进发号器**:恢复不产生新的操作令牌,否则会让自身期望值失效。
     /// 取不到时返回 `None`,调用方必须**零动作退出**。
-    fn try_acquire_restore(fingerprint: &str, expected_generation: u64) -> Option<Self> {
+    fn try_acquire_restore(fingerprint: &str, expected_generation: u128) -> Option<Self> {
         let mut state = wps_inject_state()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.holder.is_some() {
             return None;
         }
-        // 代次缺失(从未注入过,或已被代次表的容量回收清掉)一律 fail-closed
         if state.generations.get(fingerprint).copied() != Some(expected_generation) {
             return None;
         }
         state.holder = Some(fingerprint.to_string());
         Some(Self {
             fingerprint: fingerprint.to_string(),
+            generation: expected_generation,
         })
     }
 
-    /// 该对话框当前的注入代次(供延迟恢复复核)。
-    fn generation(&self) -> u64 {
-        current_generation(&self.fingerprint)
+    /// 本次操作持有的不可变令牌(供延迟恢复使用)。
+    ///
+    /// 直接返回构造时保存的值,**不查映射** —— 避免「主注入结束后重新查表」
+    /// 在映射被回收时拿到错误/缺失的值(报告 P1-09 第 2 节)。
+    fn generation(&self) -> u128 {
+        self.generation
     }
 
     /// 测试专用:按指纹获取主注入 lease(不涉及真实窗口句柄)。
@@ -449,8 +478,17 @@ impl WpsInjectLease {
 
     /// 测试专用:条件式获取恢复 lease(**复用**生产实现)。
     #[cfg(test)]
-    fn begin_restore_for_test(fingerprint: &str, expected_generation: u64) -> Option<Self> {
+    fn begin_restore_for_test(fingerprint: &str, expected_generation: u128) -> Option<Self> {
         Self::try_acquire_restore(fingerprint, expected_generation)
+    }
+
+    /// 测试专用:读取进程级发号器当前值(用于断言清表不重置发号器)。
+    #[cfg(test)]
+    fn next_token_for_test() -> u128 {
+        wps_inject_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .next_generation
     }
 }
 
@@ -466,15 +504,7 @@ impl Drop for WpsInjectLease {
     }
 }
 
-/// 按身份指纹读取当前注入代次;从未注入过返回 0。
-fn current_generation(fingerprint: &str) -> u64 {
-    let state = wps_inject_state()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    state.generations.get(fingerprint).copied().unwrap_or(0)
-}
-
-/// 模拟快捷键 Ctrl + A 全选（仅在确认目标窗口为前台后调用）
+/// 模拟快捷键 Ctrl + A 全选(仅在确认目标窗口为前台后调用)
 fn simulate_ctrl_a() {
     unsafe {
         keybd_event(VK_CONTROL.0 as u8, 0, Default::default(), 0);
@@ -1035,7 +1065,7 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
 /// 单独抽成函数是为了给测试一个**确定性会合点**:测试可以把恢复线程精确停在
 /// 「即将取得 lease」处,然后启动新注入,验证陈旧代次一定拿不到所有权 ——
 /// 不靠 `sleep` 猜时序。生产语义就是一次调用。
-fn acquire_restore_lease(fingerprint: &str, generation: u64) -> Option<WpsInjectLease> {
+fn acquire_restore_lease(fingerprint: &str, generation: u128) -> Option<WpsInjectLease> {
     #[cfg(test)]
     restore_gate::before_acquire(fingerprint);
     WpsInjectLease::try_acquire_restore(fingerprint, generation)
@@ -1141,7 +1171,7 @@ pub(crate) mod restore_gate {
 ///
 /// 现在改为**条件式取得**所有权:代次校验与占位在同一临界区完成,
 /// 并把 guard 持到全部动作结束。取不到即零动作退出。
-fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String, generation: u64) {
+fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String, generation: u128) {
     thread::spawn(move || unsafe {
         // 等待 WPS Qt 视图载入新目录并刷新
         thread::sleep(Duration::from_millis(650));
@@ -1463,6 +1493,18 @@ mod tests {
         assert!(degraded.contains("cls=len=64"));
     }
 
+    /// 按身份指纹读取当前令牌;无记录返回 0(哨兵值,发号器永不为 0)。
+    ///
+    /// **仅测试使用**:生产路径一律使用 [`WpsInjectLease::generation`] 持有的不可变令牌;
+    /// 恢复入口必须在状态锁内直接比对映射,不得经这类「自己会加锁」的助手
+    /// (否则就是锁外检查,即 P1-08 的 TOCTOU)。
+    fn current_generation(fingerprint: &str) -> u128 {
+        let state = wps_inject_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.generations.get(fingerprint).copied().unwrap_or(0)
+    }
+
     /// 构造一个**测试专用**身份指纹(不涉及真实窗口,仅验证去重/代次语义)。
     fn test_fingerprint(tag: &str) -> String {
         format!("test:{tag}")
@@ -1519,8 +1561,138 @@ mod tests {
         drop(third);
     }
 
+    /// 审计报告 P1-09:进程级发号器与映射容量回收**必须拆开**。
+    ///
+    /// 旧实现让每个 fingerprint 从 0 开始计数,并在映射超限时 `clear()`,
+    /// 于是同一指纹在清表后又会拿到相同的数值 —— 清表前发出的旧恢复令牌因此
+    /// 重新有效(ABA)。本用例逐条履行报告 §回归测试 的 10 步序列。
+    #[test]
+    fn test_generation_token_is_process_monotonic_across_map_eviction() {
+        let _guard = wps_inject_test_lock();
+
+        // 确定性准备:清掉**映射**(不影响发号器),使下面的预填恰好填满 16 项。
+        // 令牌计数是进程级的,故所有断言一律用**相对值**。
+        {
+            let mut state = wps_inject_state().lock().unwrap_or_else(|p| p.into_inner());
+            state.generations.clear();
+        }
+        let base = WpsInjectLease::next_token_for_test();
+
+        let pre_fill: Vec<String> = (0..16)
+            .map(|i| test_fingerprint(&format!("p1_09_prefill_{i:02}")))
+            .collect();
+
+        // (1) 预填 16 个不同 fingerprint(每个都拿一次主注入令牌)
+        for fp in &pre_fill {
+            let lease = WpsInjectLease::begin_for_test(fp).expect("预填用主注入必须能取得");
+            drop(lease);
+        }
+        let after_prefill = WpsInjectLease::next_token_for_test();
+        assert_eq!(after_prefill - base, 16, "16 次发号必须使发号器恰好前进 16");
+        {
+            let state = wps_inject_state().lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(state.generations.len(), 16, "预填后映射必须恰好 16 项");
+        }
+
+        let target = test_fingerprint("p1_09_target");
+
+        // (2)(3) 表长 16 → 插入 target 后变 17(本次尚未触发清表),记录令牌 A
+        let first = WpsInjectLease::begin_for_test(&target).expect("第 17 个对话框必须能取得");
+        let token_a = first.generation();
+        drop(first);
+        assert_eq!(token_a, base + 17, "A 必须是第 17 次发号的值");
+        {
+            let state = wps_inject_state().lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(state.generations.len(), 17, "此刻映射已越过容量上限");
+        }
+
+        // (4)(5) 再次对同一指纹注入:必然跨过 `len() > 16` 的清表分支,记录令牌 B
+        let second = WpsInjectLease::begin_for_test(&target).expect("清表后必须能再次取得");
+        let token_b = second.generation();
+        assert_ne!(
+            token_a, token_b,
+            "清表后同一指纹必须拿到**不同**令牌(这正是旧实现的 ABA 缺陷)"
+        );
+        let after_evict = WpsInjectLease::next_token_for_test();
+        drop(second);
+        {
+            let state = wps_inject_state().lock().unwrap_or_else(|p| p.into_inner());
+            assert_eq!(state.generations.len(), 1, "清表后只剩刚插入的目标项");
+        }
+
+        // (9)(10) 清表前后发号器严格前进,且不得被清表重置
+        assert!(
+            after_evict > after_prefill,
+            "清表不得重置发号器(旧实现会在清表后让同一指纹重新拿到相同值)"
+        );
+        assert_eq!(token_b, after_evict, "令牌 B 必须就是清表后那次发号的值");
+
+        // 旧实现的反例:ABA 下 token_b 会等于 base + 1(与 token_a 无关的旧值),
+        // 因此下面这一条断言正是该缺陷的钉子。
+        assert!(
+            token_b - base > 17,
+            "清表后重新发号必须继续前进,而不是回到早期数值(ABA)"
+        );
+
+        // (7) 旧令牌 A 必须被拒绝
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&target, token_a).is_none(),
+            "清表前的旧恢复令牌必须失效(否则旧恢复会复活并干扰后一次跳转)"
+        );
+
+        // (8) 新令牌 B 在空闲时必须被接受
+        let restore = WpsInjectLease::begin_restore_for_test(&target, token_b)
+            .expect("当前令牌必须能取得恢复所有权");
+        drop(restore);
+
+        // (9) 恢复取得不推进发号器
+        assert_eq!(
+            WpsInjectLease::next_token_for_test(),
+            after_evict,
+            "恢复入口绝不得推进发号器"
+        );
+
+        // 被清表清掉的旧指纹:映射中已无记录,必须 fail-closed
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&pre_fill[0], base + 1).is_none(),
+            "映射中已无记录的指纹必须取不到所有权"
+        );
+    }
+
+    /// 审计报告 P1-09 第 2 节:主注入 lease 必须保存**不可变**令牌,
+    /// 而不是在主注入结束后回查映射(回查会在映射被回收时拿不到或拿到错的)。
+    #[test]
+    fn test_lease_carries_immutable_token_not_a_map_lookup() {
+        let _guard = wps_inject_test_lock();
+        let fp = test_fingerprint("p1_09_immutable");
+
+        let lease = WpsInjectLease::begin_for_test(&fp).expect("必须能取得");
+        let token = lease.generation();
+        drop(lease);
+
+        // 人为把该指纹从映射中抹掉:持有值仍必须不变(证明它不是查表得来的)
+        {
+            let mut state = wps_inject_state().lock().unwrap_or_else(|p| p.into_inner());
+            state.generations.remove(&fp);
+        }
+        assert_eq!(
+            current_generation(&fp),
+            0,
+            "映射已无该指纹记录(模拟容量回收)"
+        );
+
+        // 重新取得时必须得到**全新**令牌(发号器不受映射删除影响)
+        let again = WpsInjectLease::begin_for_test(&fp).expect("必须能再次取得");
+        assert_ne!(
+            again.generation(),
+            token,
+            "映射被删后重新发号仍必须前进(绝不能回到旧值)"
+        );
+        drop(again);
+    }
+
     /// 审计报告 P1-08 验收标准 1~5:延迟恢复的**条件式取得**必须把
-    /// 「holder 为空」与「代次恰好匹配」合并到同一临界区,且**不递增**代次。
+    /// 「holder 为空」与「令牌指中」合并到同一临界区,且**不推进发号器**。
     ///
     /// 这是报告点名的核心不变式:旧实现把 generation 当成一次性快照,
     /// 检查通过后不持有 lease 就继续动作(TOCTOU)。
@@ -1669,6 +1841,7 @@ mod tests {
         );
     }
 
+    /// 审计报告 P1-08 / P1-09:令牌校验与 holder 占位必须原子 ——
     /// 审计报告 P1-08:源码守卫 —— 真实恢复链路必须经**条件式取得**并在持有期内动作。
     #[test]
     fn test_wps_restore_wires_conditional_acquire_before_any_action() {
@@ -1800,43 +1973,78 @@ mod tests {
             .find("fn try_acquire_restore(")
             .expect("恢复专用条件式入口必须存在");
         let restore_tail = &production[restore_acquire..];
+        // 切分该函数体:以下一个 `fn ` 为界(稳定边界,不依赖注释文案 ——
+        // 注释一旦被改写,用 `.unwrap_or(len)` 会静默截断到全文,守卫随之失效)。
         let restore_end = restore_tail
-            .find("    /// 该对话框当前的注入代次")
-            .unwrap_or(restore_tail.len());
+            .find("\n    fn ")
+            .expect("恢复入口之后必须还有其它方法(否则无法界定函数体)");
+        let restore_body = &restore_tail[..restore_end];
         assert!(
-            !restore_tail[..restore_end].contains("wrapping_add"),
-            "恢复入口绝不得递增代次(否则自己的期望值立即失效)"
+            restore_body.contains("fn try_acquire_restore(")
+                && !restore_body.contains("wrapping_add"),
+            "恢复入口绝不得推进发号器(否则自己的期望值立即失效)"
         );
-        // 关键:代次必须从**已加锁的 state** 读取,而不是调 `current_generation()`
+        // 关键:令牌必须从**已加锁的 state** 读取,而不是调 `current_generation()`
         // (后者自己会加锁 → 它的出现即可证明检查在临界区之外,即报告 P1-08 的 TOCTOU)。
         assert!(
-            !restore_tail[..restore_end].contains("current_generation("),
-            "代次检查不得通过 current_generation() 做(那等于在状态锁之外检查,即 check-then-act)"
+            !restore_body.contains("current_generation("),
+            "令牌检查不得通过 current_generation() 做(那等于在状态锁之外检查,即 check-then-act)"
         );
         assert!(
-            restore_tail[..restore_end].contains("state.generations.get(fingerprint)"),
-            "代次必须从同一次加锁持有的 state 中读取"
+            restore_body.contains("state.generations.get(fingerprint)"),
+            "令牌必须从同一次加锁持有的 state 中读取"
         );
-        // holder 校验与代次校验必须位于同一临界区(锁取得语句之前不得有任一校验)
-        let lock_at = restore_tail[..restore_end]
+        // holder 校验与令牌校验必须位于同一临界区(锁取得语句之前不得有任一校验)
+        let lock_at = restore_body
             .find("wps_inject_state()")
             .expect("恢复入口必须访问全局状态");
-        let holder_at = restore_tail[..restore_end]
+        let holder_at = restore_body
             .find("state.holder.is_some()")
             .expect("恢复入口必须校验 holder");
-        let generation_at = restore_tail[..restore_end]
+        let generation_at = restore_body
             .find("state.generations.get(fingerprint)")
-            .expect("恢复入口必须校验代次");
+            .expect("恢复入口必须校验令牌");
         assert!(
             lock_at < holder_at && lock_at < generation_at,
-            "holder 与代次校验必须都在取得状态锁**之后**(否则两者不在同一临界区)"
+            "holder 与令牌校验必须都在取得状态锁**之后**(否则两者不在同一临界区)"
         );
         assert_eq!(
-            restore_tail[..restore_end]
-                .matches("state.holder.is_some()")
-                .count(),
+            restore_body.matches("state.holder.is_some()").count(),
             1,
-            "holder 校验必须与代次校验位于同一临界区(同一把锁内)"
+            "holder 校验必须与令牌校验位于同一临界区(同一把锁内)"
         );
+        // P1-09:发号器与映射容量回收必须拆开 —— 清表不得出现在发号器赋值之前
+        // 或覆盖发号器(否则等价于「清表重置发号器」)。
+        let main_acquire = production
+            .find("fn try_acquire_fingerprint(")
+            .expect("主注入发号入口必须存在");
+        let main_tail = &production[main_acquire..];
+        let main_end = main_tail
+            .find("\n    fn ")
+            .expect("主注入入口之后必须还有其它方法");
+        let main_body = &main_tail[..main_end];
+        // 注意:需对 rustfmt 鲁棒 —— 方法链可能被折行,故先折叠空白再匹配。
+        let main_norm = main_body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let next_at = main_norm
+            .find("state.next_generation += 1")
+            .expect("主注入必须从**进程级发号器**取得新令牌(P1-09)");
+        let insert_at = main_norm
+            .find(".insert(fingerprint.to_string(), generation)")
+            .expect("主注入必须把新令牌写入映射");
+        assert!(
+            next_at < insert_at,
+            "必须先发号再写入映射(P1-09:映射回收不得影响令牌单调性)"
+        );
+        assert_eq!(
+            main_norm.matches("state.generations.clear()").count(),
+            1,
+            "清表只允许出现一处(仅用于限制映射内存)"
+        );
+        for forbidden in ["next_generation = 0", "next_generation = 1"] {
+            assert!(
+                !main_norm.contains(forbidden),
+                "清表/发号路径绝不得重置发号器(命中 `{forbidden}`,即旧的 ABA 缺陷)"
+            );
+        }
     }
 }
