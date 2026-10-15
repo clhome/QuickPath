@@ -121,10 +121,16 @@ static TEST_FAIL_FORMAT: std::sync::atomic::AtomicU32 = std::sync::atomic::Atomi
 #[cfg(test)]
 static TEST_FAIL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// 读取系统剪贴板序列号（每次剪贴板内容变化都会自增）
+/// 读取系统剪贴板序列号(每次剪贴板内容变化都会自增)
 fn clipboard_sequence_number() -> u32 {
     #[cfg(test)]
     if TEST_FORCE_SEQ_ZERO.load(std::sync::atomic::Ordering::SeqCst) {
+        return 0;
+    }
+    // 仅前 N 次不可读:让“序列号尚未初始化”的启动瞬时态可被确定性复现。
+    #[cfg(test)]
+    if TEST_SEQ_ZERO_CALLS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        TEST_SEQ_ZERO_CALLS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         return 0;
     }
     unsafe { GetClipboardSequenceNumber() }
@@ -350,11 +356,18 @@ pub fn is_transaction_in_flight() -> bool {
 #[cfg(test)]
 static TEST_FORCE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// 测试期强制「剪贴板序列号不可读」注入：让 `clipboard_sequence_number()` 返回 0，
-/// 用于验证事务在归属不可判定时必须保守放弃恢复（绝不覆盖当前内容）。
+/// 测试期强制「剪贴板序列号不可读」注入:让 `clipboard_sequence_number()` 返回 0,
+/// 用于验证事务在归属不可判定时必须保守放弃恢复(绝不覆盖当前内容)。
 #[cfg(test)]
 static TEST_FORCE_SEQ_ZERO: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+/// 测试期「序列号仅有前 N 次不可读」注入:**确定性复现会话启动期的瞬时不可读**。
+///
+/// 与 [`TEST_FORCE_SEQ_ZERO`](持续不可读)不同,本钩子只影响接下来的 N 次读取,
+/// 用于验证夹具的**有界自愈**路径真的能走通(而不是恒失败或假成功)。
+#[cfg(test)]
+static TEST_SEQ_ZERO_CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// 测试期强制「owner 创建失败」注入：让 `clipboard_owner()` 返回 None，
 /// 用于验证 §12「owner 创建失败时原剪贴板保持不变」的 fail-closed 语义。
@@ -2141,29 +2154,95 @@ mod tests {
 
     /// 测试夹具:写入纯文本并返回写入后的序列号(失败 / 归属不可判定时为 None)。
     ///
-    /// 失败时**打印原因**,便于区分「环境争用」与「测试注入开关泄漏」这两类
-    /// 完全不同的问题 —— 否则 `assert!(set_raw_clipboard_text(..))` 失败时不带任何信息,
-    /// 在 CI 上只能靠猜(实测过:某次失败的真因是 `TEST_FAIL_FORMAT` 被泄漏为
-    /// `CF_UNICODETEXT`,而表象只是“夹具播种失败”)。
+    /// **为什么要处理「序列号读到 0」**:`GetClipboardSequenceNumber` 用 `0` 表示
+    /// “序列号不可读”,而不是“剪贴板为空”。实取证已排除一个常见误解:
+    /// 剪贴板被其他线程持有 `OpenClipboard` 时返回值**正常**(本机实测持有时为 238217),
+    /// 故 `0` 与“被占用”无关;能产生 `0` 的只有序列号未初始化 / 无窗口站剪贴板访问权。
+    /// 本夹具对这类**环境瞬时态**做有界自愈:读到 0 时先用不依赖序列号的方式
+    /// (open + `EmptyClipboard`)建立一次剪贴板状态,再重试。
+    ///
+    /// **边界**:任何业务断言都未被放宽 —— 夹具仍必须真的写入成功,否则返回 `None`;
+    /// 若 `0` 是持续性的(如无访问权),三次尝试后仍返回 `None` 并把原因打出来。
     fn set_raw_clipboard_text_tracked(text: &str) -> Option<u32> {
-        let expected = clipboard_sequence_number();
-        match clipboard_atomic_write(expected, true, || write_unicode_text_payload(text)) {
-            Ok((sequence, _written, failed)) if failed.is_empty() => Some(sequence),
-            Ok((_sequence, _written, failed)) => {
+        /// 夹具尝试次数:只吸收启动期的环境瞬时态,不改变被测语义。
+        const FIXTURE_ATTEMPTS: u32 = 3;
+        for attempt in 1..=FIXTURE_ATTEMPTS {
+            let expected = clipboard_sequence_number();
+            if expected == 0 {
                 eprintln!(
-                    "[clipboard test fixture] 播种失败:部分格式写入失败 {failed:?}\
-                     (若含 13=CF_UNICODETEXT,极可能是测试注入开关被泄漏,见 arm_atomic_write_hook 的 RAII guard)"
+                    "[clipboard test fixture] 序列号不可读(=0),先建立一次剪贴板状态后重试(第 {attempt}/{FIXTURE_ATTEMPTS} 次)"
                 );
-                None
+                prime_clipboard_session_for_test();
+                continue;
             }
-            Err(err) => {
-                eprintln!("[clipboard test fixture] 播种失败:{err:?}");
-                None
+            match clipboard_atomic_write(expected, true, || write_unicode_text_payload(text)) {
+                Ok((sequence, _written, failed)) if failed.is_empty() => return Some(sequence),
+                Ok((_sequence, _written, failed)) => {
+                    eprintln!(
+                        "[clipboard test fixture] 播种失败:部分格式写入失败 {failed:?} (第 {attempt}/{FIXTURE_ATTEMPTS} 次)\
+                         (若含 13=CF_UNICODETEXT,极可能是测试注入开关被泄漏,见 arm_atomic_write_hook 的 RAII guard)"
+                    );
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[clipboard test fixture] 播种失败:{err:?} (第 {attempt}/{FIXTURE_ATTEMPTS} 次)"
+                    );
+                }
             }
+        }
+        None
+    }
+
+    /// 夹具前置条件:以**不依赖序列号**的方式建立一次剪贴板状态。
+    ///
+    /// 与 `seed_clipboard_formats_with_text` 同一思路。只改动剪贴板内容,
+    /// 不变更 `TEST_EMPTY_CLIPBOARD_CALLS` 计数(那是给生产原语的统计口径)。
+    fn prime_clipboard_session_for_test() {
+        if !open_clipboard_for_write(10) {
+            return;
+        }
+        unsafe {
+            let _ = EmptyClipboard();
+            let _ = CloseClipboard();
         }
     }
 
-    /// 测试夹具：统一原子原语真正执行 `EmptyClipboard` 的累计次数。
+    /// CI 稳定性回归:夹具必须能**自愈**「序列号启动期瞬时不可读」,且自愈后
+    /// 仍以与生产完全相同的原子原语写入成功(不得假成功)。
+    ///
+    /// 针对 CI 实测失败的确定性复现:某次 CI 的唯一诊断是
+    /// `播种失败:OwnershipUnknown`,而 46 处夹具调用只挂那一处 —— 典型的
+    /// 会话启动期序列号不可读。本用例用「仅前 N 次不可读」钩子复现该瞬时态。
+    #[test]
+    fn test_fixture_self_heals_transient_unreadable_sequence() {
+        let _guard = clip_test_lock();
+
+        // 让接下来的 1 次序列号读取返回 0(模拟启动期不可读)
+        TEST_SEQ_ZERO_CALLS.store(1, std::sync::atomic::Ordering::SeqCst);
+        let seq = set_raw_clipboard_text_tracked("qp_fixture_selfheal");
+        TEST_SEQ_ZERO_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(
+            seq.is_some(),
+            "序列号瞬时不可读时夹具必须自愈并真的写入成功(不得直接失败)"
+        );
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_fixture_selfheal"),
+            "自愈后剪贴板必须真的持有目标文本(不得假成功)"
+        );
+        assert!(seq.unwrap() != 0, "自愈后返回的序列号必须是真实可读值");
+
+        // 对照:持续不可读(如无访问权)必须在有界尝试后**如实失败**,绝不假成功
+        {
+            let _zero = SeqZeroInjection::enable();
+            assert!(
+                set_raw_clipboard_text_tracked("qp_fixture_persistent_zero").is_none(),
+                "序列号持续不可读时必须如实返回 None(有界尝试后不假成功)"
+            );
+        }
+    }
+
     fn empty_clipboard_calls() -> usize {
         TEST_EMPTY_CLIPBOARD_CALLS.load(std::sync::atomic::Ordering::SeqCst)
     }
