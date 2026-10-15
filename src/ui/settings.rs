@@ -5084,4 +5084,37 @@ mod tests {
             "反馈文案不得包含任何路径正文"
         );
     }
+
+    /// 审计报告 D-01C:README 不得把置灰范围写成「注入期间」——
+    /// 实现只能保证「**剪贴板事务**进行中置灰」;WPS 仅走 UIA `SetValue` 时不建事务,
+    /// 不会置灰。这是文案与实现的契约钉子,防止后续再把两者写成一回事。
+    #[test]
+    fn test_readme_busy_state_scope_matches_implementation() {
+        for (name, src) in [
+            ("README_CN.md", include_str!("../../README_CN.md")),
+            ("README.md", include_str!("../../README.md")),
+        ] {
+            // 必须明确限定为剪贴板事务
+            assert!(
+                src.contains("剪贴板事务进行中")
+                    || src.contains("clipboard transaction is in flight"),
+                "{name} 必须把置灰范围限定为「剪贴板事务进行中」(D-01C)"
+            );
+            // 必须解释 SetValue 不占用剪贴板 → 不置灰
+            assert!(
+                src.contains("SetValue"),
+                "{name} 必须说明仅走 UIA SetValue 的注入不占用剪贴板、不触发置灰(D-01C)"
+            );
+            // 不得再出现「探测/注入进行中置灰」这类超出实现的表述
+            for overclaim in [
+                "探测/注入进行中两个入口同时置灰",
+                "while a probe or injection is in flight",
+            ] {
+                assert!(
+                    !src.contains(overclaim),
+                    "{name} 的置灰描述超出实现(命中 `{overclaim}`,D-01C)"
+                );
+            }
+        }
+    }
 }

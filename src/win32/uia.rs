@@ -334,20 +334,26 @@ struct ScoredCandidate {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-// WPS 注入的**操作级**去重与 generation 核验(审计报告 P0-07 风险 6)
+// WPS 注入的**操作级**去重与 generation 核验(审计报告 P0-07 风险 6 → P1-08)
 //
 // 剪贴板 lease 只能串行化「使用剪贴板的短区间」,挡不住两个线程都走 UIA
 // `SetValue` 后继续对同一个对话框操作(重复 Enter / 导航到错误目录),
 // 也挡不住延迟 650ms 的文件名恢复干扰后一次操作 —— 那个区间里没有剪贴板事务。
 //
-// 因此另设两层防护:
-// 1 **操作级独占 lease**:同一时刻只允许一次 WPS 注入走完 UIA 查询与全局输入
-//   (不排队、不等待,拿不到立即零动作拒绝)。取全局唯一而非逐对话框一份:
-//   `bring_to_front` 与 `keybd_event` 操作的是**进程级**前台与键盘,两个不同
-//   对话框同时注入同样会互相抢夺前台并把全局按键发给错误窗口。
-// 2 **对话框 generation**:每次注入开始就把该身份指纹的代次 +1;延迟的文件名
-//   恢复在写入前复核代次,代次已变(有新注入接管)则放弃 —— 旧恢复绝不会覆盖
-//   新注入的结果,也不需要把 lease 握过整个 650ms 延迟窗口。
+// 因此设一把把**操作级独占 lease**(全局唯一,非阻塞拒绝):
+// `bring_to_front` 与 `keybd_event` 操作的是**进程级**前台与键盘,两个不同
+// 对话框同时注入同样会互相抢夺前台并把全局按键发给错误窗口。
+//
+// 关键不变量(报告 P1-08):**代次校验与所有权取得必须在同一次加锁内完成**。
+// 旧实现把「generation 仍匹配」当成一次性快照,检查通过后却不持有 lease 就
+// 继续做窗口复核 / UIA 查询 / 聚焦 / 剪贴板与全局按键 —— 属于 check-then-act
+// TOCTOU:新注入可在检查与动作之间取得所有权,两者仍会互相干扰。
+// 现在延迟恢复必须经 [`WpsInjectLease::try_acquire_restore`] **条件式取得**
+// (holder 为空 **且** 代次匹配,同一临界区),并把 guard 持到整段动作结束;
+// 取不到即零动作退出(不建 UIA 客户端、不查控件、不抢焦点、不碰剪贴板、不发按键)。
+//
+// 两层职责保持**独立**:本 lease 保护 WPS 操作链(前台 + 键盘 + UIA),
+// 剪贴板事务 lease 保护系统剪贴板。刻意不合并。
 //
 // 身份指纹由 HWND + PID + 进程创建时间 + 类名组成:HWND 被复用 / 进程重启后
 // 指纹自动不同,不会被旧代次误伤。
@@ -374,13 +380,12 @@ struct WpsInjectLease {
 }
 
 impl WpsInjectLease {
-    /// 非阻塞获取:已有注入在进行时返回 `None`,**不排队也不等待**。
+    /// 主注入专用:非阻塞获取,成功时把该对话框的 generation +1。
     fn try_acquire(identity: &WindowIdentity) -> Option<Self> {
         Self::try_acquire_fingerprint(&identity.fingerprint())
     }
 
-    /// 去重与代次的**唯一实现**:生产路径与测试共用,避免测试测到复制品
-    /// (否则把去重改坏也测不出红)。
+    /// 主注入的**唯一实现**:去重 + 代次递增(生产路径与测试共用,避免测试测到复制品)。
     fn try_acquire_fingerprint(fingerprint: &str) -> Option<Self> {
         let mut state = wps_inject_state()
             .lock()
@@ -403,17 +408,49 @@ impl WpsInjectLease {
         })
     }
 
+    /// 延迟恢复专用:**条件式**取得 lease(审计报告 P1-08)。
+    ///
+    /// 在**同一次加锁**内同时校验两件事,缺一不可:
+    /// 1. 当前没有持有者(否则已有新注入接管,旧恢复必须放弃);
+    /// 2. 该对话框的当前代次**恰好等于** `expected_generation`(否则已有新注入
+    ///    递增过代次,旧恢复的目标已过期)。
+    ///
+    /// 刻意**不递增**代次:递增会让本次恢复自己的期望值立刻失效。
+    /// 取不到时返回 `None`,调用方必须**零动作退出**。
+    fn try_acquire_restore(fingerprint: &str, expected_generation: u64) -> Option<Self> {
+        let mut state = wps_inject_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.holder.is_some() {
+            return None;
+        }
+        // 代次缺失(从未注入过,或已被代次表的容量回收清掉)一律 fail-closed
+        if state.generations.get(fingerprint).copied() != Some(expected_generation) {
+            return None;
+        }
+        state.holder = Some(fingerprint.to_string());
+        Some(Self {
+            fingerprint: fingerprint.to_string(),
+        })
+    }
+
     /// 该对话框当前的注入代次(供延迟恢复复核)。
     fn generation(&self) -> u64 {
         current_generation(&self.fingerprint)
     }
 
-    /// 测试专用:按指纹获取 lease(不涉及真实窗口句柄)。
+    /// 测试专用:按指纹获取主注入 lease(不涉及真实窗口句柄)。
     ///
     /// **复用** [`Self::try_acquire_fingerprint`],因此行为用例钉住的就是生产实现。
     #[cfg(test)]
     fn begin_for_test(fingerprint: &str) -> Option<Self> {
         Self::try_acquire_fingerprint(fingerprint)
+    }
+
+    /// 测试专用:条件式获取恢复 lease(**复用**生产实现)。
+    #[cfg(test)]
+    fn begin_restore_for_test(fingerprint: &str, expected_generation: u64) -> Option<Self> {
+        Self::try_acquire_restore(fingerprint, expected_generation)
     }
 }
 
@@ -993,21 +1030,131 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
     }
 }
 
+/// 延迟恢复的「取得操作级所有权」步骤(审计报告 P1-08)。
+///
+/// 单独抽成函数是为了给测试一个**确定性会合点**:测试可以把恢复线程精确停在
+/// 「即将取得 lease」处,然后启动新注入,验证陈旧代次一定拿不到所有权 ——
+/// 不靠 `sleep` 猜时序。生产语义就是一次调用。
+fn acquire_restore_lease(fingerprint: &str, generation: u64) -> Option<WpsInjectLease> {
+    #[cfg(test)]
+    restore_gate::before_acquire(fingerprint);
+    WpsInjectLease::try_acquire_restore(fingerprint, generation)
+}
+
+/// 恢复线程的确定性会合点(仅测试构建存在)。
+///
+/// 配 RAII [`GateGuard`]:即使断言失败或 panic,也会自动放行被暂停的线程,
+/// 不会把整个测试进程挂死。
+#[cfg(test)]
+pub(crate) mod restore_gate {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Gate {
+        armed: bool,
+        target: Option<String>,
+        paused: bool,
+        released: bool,
+    }
+
+    fn gate() -> &'static (Mutex<Gate>, Condvar) {
+        static GATE: OnceLock<(Mutex<Gate>, Condvar)> = OnceLock::new();
+        GATE.get_or_init(|| (Mutex::new(Gate::default()), Condvar::new()))
+    }
+
+    /// 武装会合点:下一个匹配 `fingerprint` 的恢复取得点会被暂停。
+    fn arm(target: &str) {
+        let (mutex, _) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        state.armed = true;
+        state.target = Some(target.to_string());
+        state.paused = false;
+        state.released = false;
+    }
+
+    /// 由 [`super::acquire_restore_lease`] 调用:未武装或不匹配时立即返回。
+    pub(super) fn before_acquire(fingerprint: &str) {
+        let (mutex, condvar) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        if !state.armed || state.target.as_deref() != Some(fingerprint) {
+            return;
+        }
+        state.paused = true;
+        condvar.notify_all();
+        while !state.released {
+            state = condvar.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+        state.armed = false;
+        state.paused = false;
+    }
+
+    /// 等待恢复线程到达会合点;超时返回 `false`(调用方必须随后放行)。
+    pub(crate) fn wait_until_paused(timeout: Duration) -> bool {
+        let (mutex, condvar) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        let deadline = Instant::now() + timeout;
+        while !state.paused {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (guard, _) = condvar
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|p| p.into_inner());
+            state = guard;
+        }
+        true
+    }
+
+    /// 放行被暂停的恢复线程,并解除武装。
+    pub(crate) fn release() {
+        let (mutex, condvar) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        state.released = true;
+        condvar.notify_all();
+    }
+
+    /// 武装后**必须**持有:无论用例正常结束还是 panic,离开作用域都会自动放行。
+    pub(crate) struct GateGuard(());
+
+    impl GateGuard {
+        pub(crate) fn armed(target: &str) -> Self {
+            arm(target);
+            Self(())
+        }
+    }
+
+    impl Drop for GateGuard {
+        fn drop(&mut self) {
+            release();
+        }
+    }
+}
+
 /// 目录导航完成后把原文件名恢复回编辑框(尽力而为)。
 ///
-/// 审计报告 P0-07 风险 6:恢复在 650ms 后执行,该窗口期内用户可能已再次触发注入
-/// (新注入会把该对话框的 generation +1)。因此写入前必须复核代次:
-/// 代次变化即放弃 —— 旧恢复绝不覆盖新注入的结果。
+/// 审计报告 P0-07 风险 6 → **P1-08**:恢复在 650ms 后执行,该窗口期内用户可能已再次
+/// 触发注入。旧实现只在开头做一次 generation 检查,通过后却**不持有 lease** 就继续
+/// 做窗口复核 / UIA 查询 / 聚焦 / 剪贴板与按键 —— 检查与动作之间新注入可以取得所有权,
+/// 于是两者仍会互相干扰(典型 check-then-act TOCTOU)。
+///
+/// 现在改为**条件式取得**所有权:代次校验与占位在同一临界区完成,
+/// 并把 guard 持到全部动作结束。取不到即零动作退出。
 fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String, generation: u64) {
     thread::spawn(move || unsafe {
         // 等待 WPS Qt 视图载入新目录并刷新
         thread::sleep(Duration::from_millis(650));
 
-        // generation 核验:已有新注入接管该对话框则放弃(不写编辑框、不发按键)
-        if current_generation(&identity.fingerprint()) != generation {
-            log_debug("UIA_RESTORE_SKIP: 对话框 generation 已变化,放弃恢复文件名");
+        // 条件式取得操作级所有权:holder 为空 **且** 代次恰好匹配才成功。
+        // 取不到(已有新注入接管 / 代次已过期 / 代次已被回收)一律零动作退出。
+        let fingerprint = identity.fingerprint();
+        let Some(_restore_lease) = acquire_restore_lease(&fingerprint, generation) else {
+            log_debug("UIA_RESTORE_SKIP: 已有新注入或 generation 已变化,放弃恢复文件名");
             return;
-        }
+        };
+        // 以下全部动作都在 `_restore_lease` 持有期内完成(guard 活到闭包结束),
+        // 因此不存在「检查通过之后、动作之前」被别人接管的窗口。
 
         if !identity.verify() || !identity.is_foreground() {
             log_debug("UIA_RESTORE_SKIP: 窗口身份或前台状态已变化，放弃恢复文件名");
@@ -1346,27 +1493,241 @@ mod tests {
             WpsInjectLease::begin_for_test(&fp).is_none(),
             "已有注入在跑时第二次获取必须**立即**失败(不排队、不等待)"
         );
-        // 与剪贴板 lease 完全独立:注入进行中仍可开启剪贴板事务
-        // (注入需要剪贴板兜底时不必自拒绍),反之亦然。
+        // 报告 P1-08 验收标准 6:**跨对话框也互斥** —— 全局前台与键盘不是逐窗口资源,
+        // 两个不同对话框并发注入同样会抢前台并把全局按键发给错窗口。
+        let other = test_fingerprint("wps_dedup_other_dialog");
+        assert!(
+            WpsInjectLease::begin_for_test(&other).is_none(),
+            "已有 holder 时,即使是另一个对话框也必须被拒绝(全局焦点/按键非逐窗口资源)"
+        );
+        // 与剪贴板 lease **职责独立**(报告 P1-08 第 3 节明确要求不合并):
+        // 这里只做结构性断言(两者互不影响对方的原子变量),不去开真实剪贴板事务 ——
+        // 那会让用例依赖机器上正在运行的其它应用写入的私有格式(不可保真克隆 → fail-closed),
+        // 把环境噪声当成业务结果。
         assert!(
             !crate::win32::clipboard::is_transaction_in_flight(),
-            "WPS 注入 lease 不得影响剪贴板事实来源"
+            "WPS 注入 lease 不得影响剪贴板事实来源(两者不共用状态)"
         );
-        {
-            let mut tx = crate::win32::clipboard::ClipboardTransaction::begin()
-                .expect("注入期间仍应能开启剪贴板事务");
-            assert!(
-                WpsInjectLease::begin_for_test(&fp).is_none(),
-                "剪贴板事务进行中仍不得再开第二次注入(两把锁互不代偿)"
-            );
-            let _ = tx.restore_if_still_owned();
-        }
+        assert!(
+            WpsInjectLease::begin_for_test(&fp).is_none(),
+            "剪贴板状态无关:已有 holder 时仍必须拒绝"
+        );
         drop(first);
         let second = WpsInjectLease::begin_for_test(&fp).expect("释放后必须能再次获取");
         drop(second);
+        let third = WpsInjectLease::begin_for_test(&other).expect("释放后另一对话框也必须能获取");
+        drop(third);
     }
 
-    /// 审计报告 P0-07 风险 6:延迟恢复必须按 **generation** 复核,旧恢复不得覆盖新结果。
+    /// 审计报告 P1-08 验收标准 1~5:延迟恢复的**条件式取得**必须把
+    /// 「holder 为空」与「代次恰好匹配」合并到同一临界区,且**不递增**代次。
+    ///
+    /// 这是报告点名的核心不变式:旧实现把 generation 当成一次性快照,
+    /// 检查通过后不持有 lease 就继续动作(TOCTOU)。
+    #[test]
+    fn test_restore_lease_is_conditional_atomic_and_does_not_bump_generation() {
+        let _guard = wps_inject_test_lock();
+        let fp = test_fingerprint("wps_restore_conditional");
+
+        // 先做一次主注入,拿到代次 g1(同时把 holder 释放掉,模拟注入主体已结束)
+        let injection = WpsInjectLease::begin_for_test(&fp).expect("首次主注入必须能拿到 lease");
+        let g1 = injection.generation();
+        drop(injection);
+
+        // (4) 恢复成功路径:holder 为空 + 代次匹配 → 可以取得,且**不修改**代次
+        {
+            let _restore = WpsInjectLease::begin_restore_for_test(&fp, g1)
+                .expect("空闲且代次匹配时恢复必须能取得所有权");
+            assert_eq!(
+                current_generation(&fp),
+                g1,
+                "恢复专用入口绝不得递增代次(否则自己的期望值立即失效)"
+            );
+            assert!(
+                WpsInjectLease::begin_for_test(&fp).is_none(),
+                "恢复持有期间新主注入必须被拒绝"
+            );
+            assert!(
+                WpsInjectLease::begin_restore_for_test(&fp, g1).is_none(),
+                "恢复持有期间第二次恢复也必须被拒绝"
+            );
+        }
+        assert_eq!(current_generation(&fp), g1, "恢复结束后代次仍不得变化");
+
+        // (3) 代次已过期:即使 holder 为空也不能取得
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&fp, g1.wrapping_sub(1)).is_none(),
+            "代次已过期时必须取不到(即使当前无人持有)"
+        );
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&fp, g1.wrapping_add(1)).is_none(),
+            "代次比期望更新时同样必须取不到"
+        );
+        // 从未注入过的对话框(代次表里没有记录)必须 fail-closed
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&test_fingerprint("wps_restore_unknown"), 0)
+                .is_none(),
+            "代次表中无记录时必须 fail-closed(不得把「从未注入」当成代次 0 匹配)"
+        );
+
+        // (2) 旧恢复先取得所有权:新注入必须立即失败且零动作;恢复结束后注入可再次取得
+        {
+            let restore = WpsInjectLease::begin_restore_for_test(&fp, g1)
+                .expect("空闲且代次匹配时必须能取得");
+            assert!(
+                WpsInjectLease::begin_for_test(&fp).is_none(),
+                "旧恢复持有期间新注入必须立即失败(零动作)"
+            );
+            drop(restore);
+        }
+        let after = WpsInjectLease::begin_for_test(&fp).expect("恢复结束后新注入必须能再次取得");
+        let g2 = after.generation();
+        drop(after);
+        assert_ne!(g1, g2, "新注入必须递增代次");
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&fp, g1).is_none(),
+            "上一次的旧恢复代次必须已失效"
+        );
+
+        // (1) 新注入已持有所有权:旧恢复必须返回 None
+        {
+            let injection = WpsInjectLease::begin_for_test(&fp).expect("新注入取得所有权");
+            assert!(
+                WpsInjectLease::begin_restore_for_test(&fp, injection.generation()).is_none(),
+                "已有 holder 时恢复必须失败(不得抢占正在进行的注入)"
+            );
+            drop(injection);
+        }
+
+        // (5) 异常释放:提前返回 / panic 展开后 RAII 必须释放,后续注入可继续
+        let caught = std::panic::catch_unwind(|| {
+            let _restore = WpsInjectLease::begin_restore_for_test(&fp, g2)
+                .expect("空闲且代次匹配时必须能取得");
+            panic!("模拟恢复线程 panic");
+        });
+        assert!(caught.is_err());
+        let resumed =
+            WpsInjectLease::begin_for_test(&fp).expect("恢复 panic 展开后必须已释放 lease");
+        drop(resumed);
+    }
+
+    /// 审计报告 P1-08:确定性**会合点**测试 —— 把真实恢复线程精确停在
+    /// 「即将取得所有权」处,然后启动新注入,验证旧恢复不可能穿透。
+    ///
+    /// 不使用 `sleep` 猜时序:barrier 由 `restore_gate` 提供,且带 RAII 放行。
+    /// 覆盖报告必测交错 1 与「检查后穿透」这一具体缺陷。
+    #[test]
+    fn test_restore_cannot_slip_through_after_check_when_new_injection_wins() {
+        let _guard = wps_inject_test_lock();
+        let fp = test_fingerprint("wps_restore_barrier");
+
+        // 先建立代次(主注入一次),并记住它
+        let seed = WpsInjectLease::begin_for_test(&fp).expect("首次主注入");
+        let generation = seed.generation();
+        drop(seed);
+
+        // 武装会合点:恢复线程将在「代次校验 / 占位」之前被暂停
+        let gate = crate::win32::uia::restore_gate::GateGuard::armed(&fp);
+        let target = fp.clone();
+        let restore = std::thread::spawn(move || {
+            let acquired = acquire_restore_lease(&target, generation);
+            let ok = acquired.is_some();
+            // 无论成败,guard 必须在离开作用域时释放
+            drop(acquired);
+            ok
+        });
+
+        let reached =
+            crate::win32::uia::restore_gate::wait_until_paused(std::time::Duration::from_secs(10));
+        assert!(reached, "恢复线程必须能在超时内到达取得所有权之前的会合点");
+
+        // 会合点处无人持有:这正是旧实现「检查通过但还没动作」的窗口
+        let injection =
+            WpsInjectLease::begin_for_test(&fp).expect("会合点处无人持有,新注入必须能取得所有权");
+        assert_ne!(
+            injection.generation(),
+            generation,
+            "新注入必须提升代次,使旧恢复的期望值过期"
+        );
+
+        crate::win32::uia::restore_gate::release();
+        let restore_acquired = restore.join().expect("恢复线程不得 panic");
+        assert!(
+            !restore_acquired,
+            "新注入已取得所有权后,旧恢复必须取不到(不得穿透检查)"
+        );
+        assert_eq!(
+            current_generation(&fp),
+            injection.generation(),
+            "被拒绝的恢复绝不能改动代次或取得所有权"
+        );
+        drop(injection);
+        drop(gate);
+        assert!(
+            WpsInjectLease::begin_for_test(&fp).is_some(),
+            "双方都结束后必须能重新取得所有权"
+        );
+    }
+
+    /// 审计报告 P1-08:源码守卫 —— 真实恢复链路必须经**条件式取得**并在持有期内动作。
+    #[test]
+    fn test_wps_restore_wires_conditional_acquire_before_any_action() {
+        const SOURCE: &str = include_str!("uia.rs");
+        let production = &SOURCE[..SOURCE.find("\nmod tests {").expect("必须存在测试模块")];
+
+        let restore_start = production
+            .find("fn spawn_restore_original_name")
+            .expect("spawn_restore_original_name 必须存在");
+        let restore_body = &production[restore_start..];
+
+        let acquire_at = restore_body
+            .find("acquire_restore_lease(")
+            .expect("延迟恢复必须经条件式取得入口获取操作级所有权");
+        // 兼容 `let ... else { log(...); return; };` 与 `if ... is_none() { ...; return; }`
+        // 两种写法:只看取得点之后的一个有限窗口内是否出现了零动作退出。
+        let window_end = (acquire_at + 400).min(restore_body.len());
+        assert!(
+            restore_body[acquire_at..window_end].contains("return"),
+            "取不到所有权时必须立即零动作退出"
+        );
+
+        // 取得之后才允许出现窗口复核 / UIA 查询 / 聚焦 / 剪贴板 / 按键
+        for later in [
+            "identity.verify()",
+            "CoCreateInstance::<_, IUIAutomation>",
+            "find_wps_edit_element",
+            "focus_edit_element",
+            "with_temporary_clipboard_text",
+            "simulate_ctrl_a_checked",
+            "simulate_ctrl_v_checked",
+        ] {
+            let at = restore_body
+                .find(later)
+                .unwrap_or_else(|| panic!("回复链路必须包含 `{later}`"));
+            assert!(
+                acquire_at < at,
+                "`{later}` 必须晚于条件式取得所有权(否则仍是检查后穿透)"
+            );
+        }
+        // 不得在取得后立刻手工释放:guard 必须活到闭包结束(报告 P1-08 第 2 节)
+        assert!(
+            !restore_body.contains("drop(_restore_lease)")
+                && !restore_body.contains("drop(restore_lease)"),
+            "恢复 lease 不得在取得后立即释放(否则动作期间失去保护)"
+        );
+        // guard 必须绑定到一个在闭包结束前持续存活的名字(而不是取得就丢掉)
+        assert!(
+            restore_body.contains("let Some(_restore_lease) ="),
+            "取得的所有权必须绑定到变量并活到动作结束(下划线前缀不禁用 Drop)"
+        );
+        assert!(
+            production.contains("fn acquire_restore_lease(")
+                && production.contains("WpsInjectLease::try_acquire_restore("),
+            "条件式取得入口必须真实存在"
+        );
+    }
+
+    /// 审计报告 P0-07 风险 6:延迟恢复必须按 **generation** 失效,旧恢复不得覆盖新结果。
     #[test]
     fn test_delayed_restore_is_invalidated_by_newer_injection_generation() {
         let _guard = wps_inject_test_lock();
@@ -1376,10 +1737,9 @@ mod tests {
         let lease = WpsInjectLease::begin_for_test(&fp).expect("首次注入必须能拿到 lease");
         let generation_of_first = lease.generation();
         drop(lease);
-        assert_eq!(
-            current_generation(&fp),
-            generation_of_first,
-            "旧恢复自己的代次在当前代次未变时必须匹配(否则恢复永远不会执行)"
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&fp, generation_of_first).is_some(),
+            "代次未变且无人持有时,旧恢复必须能取得所有权(否则恢复永远不会执行)"
         );
 
         // 第二次注入接管同一对话框:代次提升,旧恢复随之失效
@@ -1388,12 +1748,11 @@ mod tests {
         drop(second);
         assert_ne!(
             generation_of_first, generation_of_second,
-            "新注入必须提升代次,使上一次的延迟恢复不再匹配"
+            "新注入必须提升代次"
         );
-        assert_ne!(
-            current_generation(&fp),
-            generation_of_first,
-            "旧恢复在写入前复核代次时必须判为已失效(放弃恢复)"
+        assert!(
+            WpsInjectLease::begin_restore_for_test(&fp, generation_of_first).is_none(),
+            "旧恢复在新注入提升代次后必须取不到所有权(即使此刻无人持有)"
         );
 
         // 身份指纹变化(HWND 复用 / 进程重启) → 属于另一个对话框,不影响本对话框的代次
@@ -1411,7 +1770,7 @@ mod tests {
         const SOURCE: &str = include_str!("uia.rs");
         let production = &SOURCE[..SOURCE.find("\nmod tests {").expect("必须存在测试模块")];
 
-        // 1) 注入入口必须在任何 UIA 查询 / 全局输入之前取得操作级 lease
+        // 1) 主注入必须在任何 UIA 查询 / 全局输入之前取得操作级 lease
         let run_start = production
             .find("unsafe fn run_wps_injection")
             .expect("run_wps_injection 必须存在");
@@ -1432,28 +1791,52 @@ mod tests {
             "拿不到 lease 时必须零动作退出(不得继续 SetValue / 发 Enter)"
         );
 
-        // 2) 延迟恢复必须复核 generation 且复核失败即 return
-        let restore_start = production
-            .find("fn spawn_restore_original_name")
-            .expect("spawn_restore_original_name 必须存在");
-        let restore_body = &production[restore_start..];
-        let gen_check = restore_body
-            .find("current_generation(")
-            .expect("延迟恢复必须按 generation 复核");
-        let clipboard_at = restore_body
-            .find("with_temporary_clipboard_text")
-            .expect("延迟恢复必须走剪贴板事务");
-        assert!(
-            gen_check < clipboard_at,
-            "generation 复核必须早于任何编辑框写入"
-        );
-        assert!(
-            restore_body[gen_check..clipboard_at].contains("return"),
-            "generation 已变化时必须放弃恢复(旧恢复绝不覆盖新注入结果)"
-        );
+        // 2) 主注入仍使用会递增代次的入口(恢复入口刻意不递增)
         assert!(
             production.contains("WpsInjectLease::try_acquire(&identity)"),
             "去重必须绑定窗口身份指纹(HWND + PID + 创建时间 + 类名)"
+        );
+        let restore_acquire = production
+            .find("fn try_acquire_restore(")
+            .expect("恢复专用条件式入口必须存在");
+        let restore_tail = &production[restore_acquire..];
+        let restore_end = restore_tail
+            .find("    /// 该对话框当前的注入代次")
+            .unwrap_or(restore_tail.len());
+        assert!(
+            !restore_tail[..restore_end].contains("wrapping_add"),
+            "恢复入口绝不得递增代次(否则自己的期望值立即失效)"
+        );
+        // 关键:代次必须从**已加锁的 state** 读取,而不是调 `current_generation()`
+        // (后者自己会加锁 → 它的出现即可证明检查在临界区之外,即报告 P1-08 的 TOCTOU)。
+        assert!(
+            !restore_tail[..restore_end].contains("current_generation("),
+            "代次检查不得通过 current_generation() 做(那等于在状态锁之外检查,即 check-then-act)"
+        );
+        assert!(
+            restore_tail[..restore_end].contains("state.generations.get(fingerprint)"),
+            "代次必须从同一次加锁持有的 state 中读取"
+        );
+        // holder 校验与代次校验必须位于同一临界区(锁取得语句之前不得有任一校验)
+        let lock_at = restore_tail[..restore_end]
+            .find("wps_inject_state()")
+            .expect("恢复入口必须访问全局状态");
+        let holder_at = restore_tail[..restore_end]
+            .find("state.holder.is_some()")
+            .expect("恢复入口必须校验 holder");
+        let generation_at = restore_tail[..restore_end]
+            .find("state.generations.get(fingerprint)")
+            .expect("恢复入口必须校验代次");
+        assert!(
+            lock_at < holder_at && lock_at < generation_at,
+            "holder 与代次校验必须都在取得状态锁**之后**(否则两者不在同一临界区)"
+        );
+        assert_eq!(
+            restore_tail[..restore_end]
+                .matches("state.holder.is_some()")
+                .count(),
+            1,
+            "holder 校验必须与代次校验位于同一临界区(同一把锁内)"
         );
     }
 }

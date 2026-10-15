@@ -98,8 +98,11 @@ impl ProbeButton {
         }
     }
 
-    /// 命中测试:探测进行中(剪贴板事务独占 lease 已被占用)时一律不响应,
+    /// 命中测试:**剪贴板事务**进行中(独占 lease 已被占用)时一律不响应,
     /// 即使绘制态尚未刷新也不会发起第二个请求。
+    ///
+    /// 范围限定为剪贴板事务(报告 D-01C):WPS 仅走 UIA `SetValue` 时不建事务,
+    /// 不在此处置灰;该情况下的并发冲突由 WPS 操作级 lease 拒绝。
     fn contains(&self, x: i32, y: i32) -> bool {
         self.visible
             && !crate::win32::clipboard::is_transaction_in_flight()
@@ -715,6 +718,7 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                 }
                 header_right_limit = header_right_limit.min(rect.left);
 
+                // 忙碌态只反映**剪贴板事务**(报告 D-01C),不作为安全边界。
                 let in_flight = crate::win32::clipboard::is_transaction_in_flight();
                 let hovered = state_mut.probe_buttons[idx].hovered && !in_flight;
                 let bg = if in_flight {

@@ -1123,7 +1123,9 @@ fn explicit_probe_menu_ready(
     let authorized = [state.config.enable_totalcmd, state.config.enable_xyplorer];
     // P0-06 → P0-07:已有剪贴板事务在跑时两个入口同时置灰。
     // 读唯一事实来源 `clipboard::is_transaction_in_flight()` —— 事务自持 lease,
-    // 因此 WPS 注入 / 文件名恢复进行中也会置灰(旧的业务层 lease 做不到这一点)。
+    // 因此 **WPS 进入剪贴板兜底或文件名恢复事务时**也会置灰。
+    // 注意范围:WPS 注入若经 UIA `SetValue` 完成则不建剪贴板事务,此处仍为可点
+    // (报告 D-01C);两把 lease 的职责不同,UI 置灰只是反馈而非安全边界。
     let in_flight = crate::win32::clipboard::is_transaction_in_flight();
     [
         authorized[0] && !in_flight && snapshots[0].is_some(),
