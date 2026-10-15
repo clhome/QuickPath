@@ -1988,6 +1988,18 @@ fn get_clipboard_text_checked() -> Option<(String, u32)> {
     }
 }
 
+/// 跨模块共享的「真实剪贴板用例串行锁」（仅测试构建）。
+///
+/// 本文件内部的用例与其它模块（如 `managers::probe_lease` / `managers::clipboard_probe`）
+/// 里同样操作真实剪贴板的用例必须共用同一把锁，否则并行执行时会互相抢剪贴板。
+#[cfg(test)]
+pub(crate) fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static CLIP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CLIP_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1995,13 +2007,9 @@ mod tests {
     use std::sync::Mutex;
     use windows::Win32::System::DataExchange::GetClipboardOwner;
 
-    static CLIP_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     /// 串行化剪贴板用例。即使某个用例 panic，也不要因为锁中毒而掩盖其他用例的真实结果。
     fn clip_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        CLIP_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        clipboard_test_lock()
     }
 
     /// 测试夹具：把纯文本写入剪贴板。
@@ -3892,6 +3900,68 @@ mod tests {
             "归属未变时必须正常恢复"
         );
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_p005_seed"));
+    }
+
+    /// 审计报告 P0-06：确定性并发会合测试。
+    ///
+    /// 把首个请求暂停在「已写空、未收到回写」处，此时启动第二个请求：它必须被
+    /// **进程级独占 lease** 拒绝（`AlreadyRunning`），且剪贴板序列号不变（零触碰）。
+    /// 这直接复现报告描述的「两次并发探测各自快照 → 双双放弃恢复 → 原内容丢失」场景。
+    #[test]
+    fn test_second_probe_is_rejected_with_zero_clipboard_touch() {
+        use crate::managers::explicit_probe::{
+            ExplicitProbeOutcome, ScriptedManager, TriggerSnapshot, probe_with_snapshot,
+        };
+        use crate::managers::probe_lease::ProbeLease;
+        use std::time::{Duration, Instant};
+
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_p006_original"));
+
+        crate::managers::clipboard_probe::test_gate::arm();
+        let first = std::thread::spawn(move || {
+            let _lease = ProbeLease::try_acquire().expect("首请求必须拿到独占 lease");
+            let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
+            // request 闭包永不执行：请求在 gate 处就被挂起
+            let _ = probe_panel_path(&mut tx, |_| false, || None);
+            let _ = tx.restore_if_still_owned();
+        });
+
+        let reached =
+            crate::managers::clipboard_probe::test_gate::wait_until_paused(Duration::from_secs(10));
+        // 无论是否到达会合点，都必须释放 gate，否则线程会永久阻塞
+        if !reached {
+            crate::managers::clipboard_probe::test_gate::release();
+            let _ = first.join();
+            panic!("首请求未能在超时内到达「已写空、未收到回写」会合点");
+        }
+
+        let sequence_at_pause = clipboard_sequence_number();
+        assert_ne!(sequence_at_pause, 0, "会合点处剪贴板序列号必须可读");
+
+        let snapshot = TriggerSnapshot {
+            hwnd_raw: 0,
+            pid: 0,
+            manager: ScriptedManager::TotalCmd,
+            captured_at: Instant::now(),
+            request_id: 1,
+        };
+        assert_eq!(
+            probe_with_snapshot(&snapshot, true),
+            ExplicitProbeOutcome::AlreadyRunning,
+            "首请求仍持有 lease 时第二个请求必须被拒绝"
+        );
+        assert_eq!(
+            clipboard_sequence_number(),
+            sequence_at_pause,
+            "被拒绝的第二个请求不得触碰剪贴板（零写入、零清空）"
+        );
+
+        crate::managers::clipboard_probe::test_gate::release();
+        first.join().expect("首请求线程不得 panic");
+        let released = ProbeLease::try_acquire();
+        assert!(released.is_some(), "首请求结束后必须释放 lease");
+        drop(released);
     }
 
     /// 审计报告 P0-04 竞态 B：请求窗口内出现非目标来源的剪贴板更新

@@ -62,6 +62,8 @@ settings = "设置中心..."
 exit = "退出 QuickPath"
 probe_totalcmd = "从 TC 获取当前路径"
 probe_xyplorer = "从 XYplorer 获取当前路径"
+probe_result_ok = "已获取管理器当前路径"
+probe_result_failed = "未取得路径（已取消或超时）"
 
 [monitor]
 tab_general = "常规偏好"
@@ -156,5 +158,5 @@ xyplorer_desc = "手动触发一次；来源无法证明时取消，不覆盖当
 tips_title = "💡 使用前请先了解"
 tips_line1 = "• 开关只表示“已授权”，不会自行探测"
 tips_line2 = "• 每次都要手动点托盘/吸附条上的「TC」或「XY」"
-tips_line3 = "• 探测会短暂占用剪贴板；来源不可证明时取消并保留你当前复制的内容"
+tips_line3 = "• 探测会短暂占用剪贴板；来源不可证明时不覆盖当前内容，但管理器可能回写路径"
 

@@ -60,6 +60,79 @@ impl std::fmt::Display for TextFingerprint {
     }
 }
 
+/// 允许原样输出的 UIA 类名白名单：**通用控件类名**，不含任何用户数据。
+///
+/// 该白名单与下面 `SafeUiaMetadata` 的判定共同构成审计报告 S-LOG-A 的“固定标签”语义：
+/// 只有精确命中白名单、且长度与字符集受限的值才允许原样出现。
+const SAFE_UIA_CLASS_NAMES: &[&str] = &[
+    "QLineEdit",
+    "kd::KDTextField",
+    "Edit",
+    "ComboBox",
+    "ComboBoxEx32",
+    "Button",
+    "Static",
+    "Splitter",
+    "ScrollBar",
+    "Slider",
+    "ProgressBar",
+    "DirectUIHWND",
+    "SysListView32",
+];
+
+/// 允许原样输出的自动化 ID 白名单：**本文件评分规则自己使用的语义标签**，
+/// 它们是固定常量而非用户数据。其余一律降级为指纹。
+const SAFE_UIA_AUTO_IDS: &[&str] = &[
+    "fileName",
+    "FileName",
+    "file_name",
+    "filename",
+    "search",
+    "Search",
+];
+
+/// UIA 诊断字段的**统一安全格式化器**（审计报告 S-LOG-A）。
+///
+/// `name` 来自第三方控件的 `CurrentName()`，可能直接暴露文件名 / 路径 / 业务内容，
+/// 因此**永远只输出指纹**；`class_name` / `auto_id` 仅在精确命中白名单（且长度、
+/// 字符集受限）时输出固定标签，否则同样输出指纹。
+///
+/// 所有 UIA 日志调用点**必须**使用本格式化器，禁止自行拼接原文。
+struct SafeUiaMetadata {
+    name: TextFingerprint,
+    class_label: String,
+    id_label: String,
+}
+
+impl SafeUiaMetadata {
+    fn of(name: &str, class_name: &str, auto_id: &str) -> Self {
+        Self {
+            name: TextFingerprint::of(name),
+            class_label: safe_uia_label(class_name, SAFE_UIA_CLASS_NAMES),
+            id_label: safe_uia_label(auto_id, SAFE_UIA_AUTO_IDS),
+        }
+    }
+}
+
+impl std::fmt::Display for SafeUiaMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "name={} cls={} id={}",
+            self.name, self.class_label, self.id_label
+        )
+    }
+}
+
+/// 白名单精确匹配 + 长度/字符集受限时才原样输出，否则回退到指纹。
+fn safe_uia_label(value: &str, whitelist: &[&str]) -> String {
+    if value.len() <= 32 && value.is_ascii() && whitelist.contains(&value) {
+        value.to_string()
+    } else {
+        TextFingerprint::of(value).to_string()
+    }
+}
+
 /// 文本类别（不含任何主体内容）：空 / 目录形式 / 带扩展名的文件名 / 其他。
 fn classify_text(text: &str) -> &'static str {
     let trimmed = text.trim();
@@ -463,12 +536,10 @@ fn find_wps_edit_element(
                 }
 
                 log_debug(&format!(
-                    "UIA_EVAL[{}]: score={} name='{}' cls='{}' id='{}' val={} top={}",
+                    "UIA_EVAL[{}]: score={} {} val={} top={}",
                     i,
                     score,
-                    name,
-                    class_name,
-                    auto_id,
+                    SafeUiaMetadata::of(&name, &class_name, &auto_id),
                     TextFingerprint::of(&val),
                     elem_rect.top
                 ));
@@ -499,17 +570,16 @@ fn find_wps_edit_element(
         // 若最高分依然过低（例如 <= 100），说明窗口内根本不存在合法的文件名编辑框，绝不盲目注入
         if best.score <= 100 {
             log_debug(&format!(
-                "UIA_REJECT: Best candidate score too low ({}) name='{}' cls='{}' id='{}'",
-                best.score, best.name, best.class_name, best.auto_id
+                "UIA_REJECT: Best candidate score too low ({}) {}",
+                best.score,
+                SafeUiaMetadata::of(&best.name, &best.class_name, &best.auto_id)
             ));
             return None;
         }
 
         log_debug(&format!(
-            "UIA_CHOSEN: name='{}' cls='{}' id='{}' val={} score={} rect={:?}",
-            best.name,
-            best.class_name,
-            best.auto_id,
+            "UIA_CHOSEN: {} val={} score={} rect={:?}",
+            SafeUiaMetadata::of(&best.name, &best.class_name, &best.auto_id),
             TextFingerprint::of(&best.val),
             best.score,
             best.rect
@@ -1033,7 +1103,7 @@ mod tests {
 
         // --- 源码守卫：生产代码不得再把正文原样写进日志 ---
         const SOURCE: &str = include_str!("uia.rs");
-        let production = &SOURCE[..SOURCE.find("#[cfg(test)]").expect("必须存在测试模块")];
+        let production = &SOURCE[..SOURCE.find("\nmod tests {").expect("必须存在测试模块")];
         for key in [
             "old_text",
             "cur_val",
@@ -1042,6 +1112,12 @@ mod tests {
             "current",
             "target",
             "target_folder",
+            // S-LOG-A：UIA 外部元数据（第三方控件可能把文件名/路径放进这些字段）
+            "name",
+            "cls",
+            "id",
+            "class_name",
+            "auto_id",
         ] {
             let raw = format!("{}='{{}}'", key);
             assert!(
@@ -1055,5 +1131,59 @@ mod tests {
                 && production.contains("redact_path_structure("),
             "敏感位置必须经过共享脱敏入口（指纹 / 路径结构骨架）"
         );
+        // S-LOG-A：三条 UIA 分支（评估 / 拒绝 / 选中）都必须走统一安全格式化器
+        assert_eq!(
+            production.matches("SafeUiaMetadata::of(").count(),
+            3,
+            "UIA_EVAL / UIA_REJECT / UIA_CHOSEN 三条日志分支都必须使用 SafeUiaMetadata"
+        );
+        assert!(
+            production.contains("SAFE_UIA_CLASS_NAMES") && production.contains("SAFE_UIA_AUTO_IDS"),
+            "class_name / auto_id 必须经内置白名单过滤后才允许原样输出"
+        );
+    }
+
+    /// 审计报告 S-LOG-A：UIA 外部元数据不得泄露业务文本。
+    ///
+    /// `name` 恒为指纹；非白名单（或超长 / 非 ASCII）的 `class_name`、`auto_id` 也必须
+    /// 降级为指纹；白名单内的通用类名 / 语义标签仍原样保留，排障信息不丢失。
+    #[test]
+    fn test_uia_metadata_formatter_never_leaks_business_text() {
+        let sensitive = SafeUiaMetadata::of(
+            r"D:\客户项目\甲方合同\报价单.docx",
+            r"D:\客户项目\甲方合同",
+            r"客户编号-8848",
+        );
+        let rendered = sensitive.to_string();
+        for secret in ["客户项目", "甲方合同", "报价单", "客户编号", "8848"] {
+            assert!(
+                !rendered.contains(secret),
+                "UIA 元数据格式化器不得泄露业务文本（命中 `{}`）：{}",
+                secret,
+                rendered
+            );
+        }
+        assert!(
+            rendered.contains("name=len="),
+            "name 必须输出指纹：{rendered}"
+        );
+
+        // 白名单内的通用控件标签必须原样保留（排障信息不丢）
+        let generic = SafeUiaMetadata::of("文件名(N):", "QLineEdit", "fileName");
+        let rendered_generic = generic.to_string();
+        assert!(rendered_generic.contains("cls=QLineEdit"));
+        assert!(rendered_generic.contains("id=fileName"));
+        assert!(
+            !rendered_generic.contains("文件名"),
+            "name 即使看起来是通用标签也必须只输出指纹：{rendered_generic}"
+        );
+
+        // 超长 / 非 ASCII 的类名与 ID 必须降级为指纹
+        let long_class = "A".repeat(64);
+        let non_ascii = "控件类名";
+        let degraded = SafeUiaMetadata::of("", &long_class, non_ascii).to_string();
+        assert!(!degraded.contains(&long_class));
+        assert!(!degraded.contains(non_ascii));
+        assert!(degraded.contains("cls=len=64"));
     }
 }

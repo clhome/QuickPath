@@ -162,6 +162,11 @@ pub struct TraySection {
     pub probe_totalcmd: String,
     #[serde(default)]
     pub probe_xyplorer: String,
+    /// 审计报告 D-01A：探测结束后的**可见反馈**（成功 / 未取得路径）
+    #[serde(default)]
+    pub probe_result_ok: String,
+    #[serde(default)]
+    pub probe_result_failed: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -596,6 +601,20 @@ impl I18n {
         &Self::get_bundle(lang).tray.exit
     }
 
+    /// 托盘气泡：显式探测结束后的可见反馈文案（审计报告 D-01A）。
+    ///
+    /// `success = true` 为「已取得路径」，否则为「未取得路径（已取消 / 超时）」。
+    /// 文案刻意简短，且**不包含**任何剪贴板正文。
+    pub fn tray_probe_result(lang: &Language, success: bool) -> &str {
+        let tray = &Self::get_bundle(lang).tray;
+        let (value, fallback) = if success {
+            (&tray.probe_result_ok, "已获取管理器当前路径")
+        } else {
+            (&tray.probe_result_failed, "未取得路径（已取消或超时）")
+        };
+        if value.is_empty() { fallback } else { value }
+    }
+
     /// 管理器联动页的文案（审计报告 U-01），缺失时回退到内置默认。
     pub fn integration_texts(lang: &Language) -> IntegrationTexts {
         let section = &Self::get_bundle(lang).integration;
@@ -648,8 +667,8 @@ impl I18n {
             ),
             tips_line3: pick(
                 &section.tips_line3,
-                "• 探测会短暂占用剪贴板；来源不可证明时取消并保留你当前复制的内容",
-                "• A probe briefly uses the clipboard and never overwrites it on doubt",
+                "• 探测会短暂占用剪贴板；来源不可证明时不覆盖当前内容，但管理器可能回写路径",
+                "• A probe briefly uses the clipboard; on doubt no old snapshot is restored, but the manager may still write its path",
             ),
         }
     }

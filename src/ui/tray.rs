@@ -1,6 +1,8 @@
+use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -23,6 +25,47 @@ pub const IDM_TOGGLE_MONITOR: usize = 1006;
 /// 审计报告 U-01：显式获取第三方管理器当前路径（单次、前台、用户触发）
 pub const IDM_PROBE_TOTALCMD: usize = 1007;
 pub const IDM_PROBE_XYPLORER: usize = 1008;
+
+/// 托盘消息宿主窗口（供宿主在显式探测结束后弹出结果提示）。
+///
+/// 只在 `TrayIcon` 存活期间有效；`Drop` 时立即置空，避免向已销毁的窗口发通知。
+static TRAY_NOTIFY_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// 弹出一条托盘气泡提示（显式探测结局的**可见反馈**，审计报告 D-01A）。
+///
+/// 标题与正文由调用方传入（已 i18n），本函数不记录也不回显任何剪贴板正文。
+/// 托盘图标不存在（已退出）时静默返回。
+pub fn notify(title: &str, text: &str) {
+    let hwnd = TRAY_NOTIFY_HWND.load(Ordering::SeqCst);
+    if hwnd.is_null() {
+        return;
+    }
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(hwnd),
+        uID: 1,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO,
+        ..Default::default()
+    };
+    fill_wide(&mut nid.szInfoTitle, title);
+    fill_wide(&mut nid.szInfo, text);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
+/// 把字符串按 UTF-16 写入定长缓冲区（超出部分截断，始终以 NUL 结尾）。
+fn fill_wide(buffer: &mut [u16], text: &str) {
+    if buffer.is_empty() {
+        return;
+    }
+    let last = buffer.len() - 1;
+    for (slot, unit) in buffer[..last].iter_mut().zip(text.encode_utf16()) {
+        *slot = unit;
+    }
+    buffer[last] = 0;
+}
 
 pub struct TrayIcon {
     pub hwnd: HWND,
@@ -84,6 +127,7 @@ impl TrayIcon {
                 return Err("添加系统托盘图标失败".to_string());
             }
 
+            TRAY_NOTIFY_HWND.store(notify_target.0, Ordering::SeqCst);
             Ok(Self { hwnd, nid })
         }
     }
@@ -259,6 +303,7 @@ unsafe extern "system" fn tray_wnd_proc(
 
 impl Drop for TrayIcon {
     fn drop(&mut self) {
+        TRAY_NOTIFY_HWND.store(std::ptr::null_mut(), Ordering::SeqCst);
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
             if !self.hwnd.0.is_null() {

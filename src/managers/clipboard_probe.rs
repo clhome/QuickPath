@@ -50,6 +50,11 @@ where
     // 必须先把本次写入自己触发的通知排空，再取标记（见步骤 3）。
     tx.await_own_write_observed()?;
 
+    // 确定性并发测试会合点（仅测试构建）：把首个请求暂停在「已写空、未收到回写」处，
+    // 供审计报告 P0-06 的用例验证第二个请求被进程级独占 lease 拒绝且零触碰剪贴板。
+    #[cfg(test)]
+    test_gate::arrive();
+
     // 请求前记下事件标记：这之后登记的剪贴板更新都属于本次请求窗口
     let marker = tx.request_marker();
 
@@ -104,6 +109,78 @@ fn clean_dir_path(raw: &str) -> Option<String> {
         return None;
     }
     Some(clean)
+}
+
+/// 测试专用的确定性会合点（仅测试构建存在）。
+///
+/// 生产代码不得依赖本模块；`probe_panel_path` 只在 `#[cfg(test)]` 下调用 [`arrive`]。
+#[cfg(test)]
+pub(crate) mod test_gate {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct Gate {
+        armed: bool,
+        paused: bool,
+        released: bool,
+    }
+
+    fn gate() -> &'static (Mutex<Gate>, Condvar) {
+        static GATE: OnceLock<(Mutex<Gate>, Condvar)> = OnceLock::new();
+        GATE.get_or_init(|| (Mutex::new(Gate::default()), Condvar::new()))
+    }
+
+    /// 武装会合点：下一次 `probe_panel_path` 会在「已写空、未收到回写」处暂停。
+    pub(crate) fn arm() {
+        let (mutex, _) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        state.armed = true;
+        state.paused = false;
+        state.released = false;
+    }
+
+    /// 由 `probe_panel_path` 调用：未武装时立即返回。
+    pub(crate) fn arrive() {
+        let (mutex, condvar) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        if !state.armed {
+            return;
+        }
+        state.paused = true;
+        condvar.notify_all();
+        while !state.released {
+            state = condvar.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+        state.armed = false;
+        state.paused = false;
+    }
+
+    /// 等待首个请求到达会合点；超时返回 `false`（调用方必须随后 [`release`]）。
+    pub(crate) fn wait_until_paused(timeout: Duration) -> bool {
+        let (mutex, condvar) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        let deadline = Instant::now() + timeout;
+        while !state.paused {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let (guard, _) = condvar
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|p| p.into_inner());
+            state = guard;
+        }
+        true
+    }
+
+    /// 放行被暂停的请求，并解除武装。
+    pub(crate) fn release() {
+        let (mutex, condvar) = gate();
+        let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        state.released = true;
+        condvar.notify_all();
+    }
 }
 
 /// 归属冲突导致探测中止时的统一日志（不记录真实剪贴板内容）。

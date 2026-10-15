@@ -62,6 +62,8 @@ settings = "Settings..."
 exit = "Exit QuickPath"
 probe_totalcmd = "Get path from TC"
 probe_xyplorer = "Get path from XYplorer"
+probe_result_ok = "Manager path fetched"
+probe_result_failed = "No path fetched (cancelled or timed out)"
 
 [monitor]
 tab_general = "General"
@@ -156,5 +158,5 @@ xyplorer_desc = "Manual, one-shot; cancels if the source can't be proven"
 tips_title = "💡 Before enabling"
 tips_line1 = "• The switch only grants permission; it never probes"
 tips_line2 = "• Click “TC” / “XY” in the tray or floating bar to fetch once"
-tips_line3 = "• A probe briefly uses the clipboard and never overwrites it on doubt"
+tips_line3 = "• A probe briefly uses the clipboard; on doubt no old snapshot is restored, but the manager may still write its path"
 

@@ -4942,7 +4942,7 @@ mod tests {
     #[test]
     fn test_integration_settings_source_guard() {
         const SOURCE: &str = include_str!("settings.rs");
-        let production = &SOURCE[..SOURCE.find("#[cfg(test)]").expect("必须存在测试模块")];
+        let production = &SOURCE[..SOURCE.find("\nmod tests {").expect("必须存在测试模块")];
 
         for required in [
             "HOVER_ID_INTEGRATION_TC",
@@ -4963,10 +4963,12 @@ mod tests {
         );
     }
 
-    /// 审计报告 U-01 验收标准 7：两个管理器都要有 UI + 配置 + 调用链覆盖。
+    /// 审计报告 U-01 / U-01A / P0-06：两个管理器都要有 UI + 配置 + 调用链覆盖。
     ///
-    /// 这里守住“UI 入口 → 宿主探测入口”的调用链：托盘菜单与吸附条按钮都必须接到
-    /// `request_explicit_probe`，且托盘菜单在未授权/无目标时必须置灰。
+    /// 这里守住“UI 入口 → 宿主探测入口”的调用链：
+    /// - 托盘菜单必须在**右键那一刻**做严格前台快照，并在 `WM_COMMAND` 里**单次消费**；
+    /// - 吸附条按钮必须消费**对话框打开事件冻结的快照**，不得自行解析目标；
+    /// - 托盘菜单在未授权 / 无目标 / 探测中必须置灰。
     #[test]
     fn test_explicit_probe_call_chain_is_wired_from_ui() {
         const MAIN_SRC: &str = include_str!("../main.rs");
@@ -4982,28 +4984,79 @@ mod tests {
         let main_norm = MAIN_SRC.split_whitespace().collect::<Vec<_>>().join(" ");
         for manager in ["TotalCmd", "XYplorer"] {
             let expected = format!(
-                "request_explicit_probe(managers::explicit_probe::ScriptedManager::{});",
+                "capture_foreground_snapshot( managers::explicit_probe::ScriptedManager::{}",
                 manager
             );
             assert!(
                 main_norm.contains(&expected),
-                "{} 菜单项必须调用显式探测入口（缺少 `{}`）",
+                "{} 必须在右键那一刻做严格前台快照（缺少 `{}`）",
                 manager,
                 expected
             );
         }
         assert!(
-            BAR_SRC.contains("crate::request_explicit_probe(manager)"),
-            "吸附条按钮必须调用显式探测入口"
+            main_norm.contains("take_pending_tray_trigger(0)")
+                && main_norm.contains("take_pending_tray_trigger(1)"),
+            "托盘命令必须单次消费冻结快照，不得重新解析目标"
         );
         assert!(
-            BAR_SRC.contains("ScriptedManager::TotalCmd")
-                && BAR_SRC.contains("ScriptedManager::XYplorer"),
-            "吸附条必须分别提供 TC 与 XYplorer 两个入口"
+            main_norm.contains("clear_pending_tray_trigger()"),
+            "菜单关闭后必须清空快照（同一 request_id 只能消费一次）"
+        );
+        assert!(
+            !MAIN_SRC.contains("resolve_target") && !MAIN_SRC.contains("FOREGROUND_TARGET_RECENCY"),
+            "宿主不得再存在任何墙钟回退目标解析（U-01A）"
+        );
+
+        assert!(
+            BAR_SRC.contains("crate::request_explicit_probe_with_snapshot(target)"),
+            "吸附条按钮必须消费冻结快照并调用显式探测入口"
+        );
+        assert!(
+            BAR_SRC.contains("TriggerSnapshot") && BAR_SRC.contains("invalidate_bar_targets"),
+            "吸附条必须持有对话框事件绑定的快照，并在隐藏时使其失效"
         );
         assert!(
             TRAY_SRC.contains("MF_GRAYED"),
             "托盘菜单在未授权或无可归因目标时必须置灰"
+        );
+        assert!(
+            MAIN_SRC.contains("probe_lease::is_in_flight()"),
+            "探测进行中必须同时置灰两个入口（P0-06）"
+        );
+        assert!(
+            MAIN_SRC.contains("ui::tray::notify(") && MAIN_SRC.contains("tray_probe_result("),
+            "探测结局必须给出可见反馈（D-01A 验收标准 4）"
+        );
+    }
+
+    /// 审计报告 D-01A：探测结局的可见反馈文案必须在两个语言包中都非空且可区分。
+    #[test]
+    fn test_tray_probe_result_i18n_present_in_both_locales() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+
+        for (name, tray) in [("zh-CN", &zh.tray), ("en-US", &en.tray)] {
+            assert!(
+                !tray.probe_result_ok.trim().is_empty(),
+                "{name} 语言包缺少 tray.probe_result_ok"
+            );
+            assert!(
+                !tray.probe_result_failed.trim().is_empty(),
+                "{name} 语言包缺少 tray.probe_result_failed"
+            );
+        }
+        assert_ne!(
+            zh.tray.probe_result_ok, en.tray.probe_result_ok,
+            "中英文反馈文案不得相同（避免英文界面出现中文）"
+        );
+        let zh_ok = crate::rules::I18n::tray_probe_result(&crate::rules::Language::ZhCN, true);
+        let zh_failed = crate::rules::I18n::tray_probe_result(&crate::rules::Language::ZhCN, false);
+        assert_ne!(zh_ok, zh_failed, "成功与失败的反馈文案必须可区分");
+        assert!(
+            !zh_ok.contains("\\") && !zh_ok.contains(":\\"),
+            "反馈文案不得包含任何路径正文"
         );
     }
 }

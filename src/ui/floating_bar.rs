@@ -5,6 +5,7 @@
 
 use crate::dialog::{DialogKind, inject_path_to_dialog};
 use crate::managers::FolderCandidate;
+use crate::managers::explicit_probe::TriggerSnapshot;
 use crate::rules::{I18n, Language};
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -70,11 +71,14 @@ pub struct FloatingBarState {
     pub probe_buttons: [ProbeButton; 2],
 }
 
-/// 顶栏「显式探测」按钮：只在用户已授权时绘制（授权 ≠ 自动探测）。
+/// 顶栏「显式探测」按钮：只在用户已授权**且**冻结到有效目标快照时绘制
+/// （授权 ≠ 自动探测；快照 ≠ 实时前台，见 `explicit_probe` 模块文档）。
 #[derive(Debug, Clone, Copy)]
 pub struct ProbeButton {
-    /// 是否绘制（= 配置中该能力已授权）
+    /// 是否绘制（= 已授权 **且** 对话框打开事件冻结到了有效目标）
     pub visible: bool,
+    /// 本次对话框 generation 冻结的不可变目标快照（点击只消费它，不再猜目标）
+    pub target: Option<TriggerSnapshot>,
     pub rect: RECT,
     pub hovered: bool,
 }
@@ -83,6 +87,7 @@ impl ProbeButton {
     const fn hidden() -> Self {
         Self {
             visible: false,
+            target: None,
             rect: RECT {
                 left: 0,
                 top: 0,
@@ -93,8 +98,11 @@ impl ProbeButton {
         }
     }
 
+    /// 命中测试：探测进行中（P0-06 lease 已被占用）时一律不响应，
+    /// 即使绘制态尚未刷新也不会发起第二个请求。
     fn contains(&self, x: i32, y: i32) -> bool {
         self.visible
+            && !crate::managers::probe_lease::is_in_flight()
             && x >= self.rect.left
             && x <= self.rect.right
             && y >= self.rect.top
@@ -222,7 +230,7 @@ impl FloatingBar {
         opacity: u8,
         language: Language,
         kind: DialogKind,
-        probe_authorized: [bool; 2],
+        probe_targets: [Option<TriggerSnapshot>; 2],
     ) {
         if candidates.is_empty() {
             self.hide();
@@ -263,9 +271,11 @@ impl FloatingBar {
         self.state.selected_index = 0;
         self.state.hovered_index = None;
         self.state.is_producer_hovered = false;
-        // 审计报告 U-01：按钮是否出现只取决于「用户是否已授权」，授权本身不发起探测。
-        for (idx, authorized) in probe_authorized.iter().enumerate() {
-            self.state.probe_buttons[idx].visible = *authorized;
+        // 审计报告 U-01 / U-01A：按钮是否出现取决于「已授权 **且** 本对话框打开事件
+        // 冻结到了有效目标快照」；授权本身不发起探测，也不回退到任何墙钟记录。
+        for (idx, target) in probe_targets.iter().enumerate() {
+            self.state.probe_buttons[idx].visible = target.is_some();
+            self.state.probe_buttons[idx].target = *target;
             self.state.probe_buttons[idx].hovered = false;
         }
 
@@ -337,8 +347,17 @@ impl FloatingBar {
     }
 
     pub fn hide(&self) {
+        // 对话框关闭：与本次对话框绑定的触发快照立即失效（U-01A generation 语义）。
+        crate::managers::explicit_probe::invalidate_bar_targets();
         unsafe {
             let _ = ShowWindow(self.state.hwnd, SW_HIDE);
+        }
+    }
+
+    /// 重新绘制（探测开始 / 结束等外部状态变化后由宿主调用）。
+    pub fn invalidate(&self) {
+        unsafe {
+            let _ = InvalidateRect(Some(self.state.hwnd), None, false);
         }
     }
 
@@ -696,8 +715,11 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                 }
                 header_right_limit = header_right_limit.min(rect.left);
 
-                let hovered = state_mut.probe_buttons[idx].hovered;
-                let bg = if hovered {
+                let in_flight = crate::managers::probe_lease::is_in_flight();
+                let hovered = state_mut.probe_buttons[idx].hovered && !in_flight;
+                let bg = if in_flight {
+                    COLORREF(0x001a1a1a)
+                } else if hovered {
                     COLORREF(0x00453e38)
                 } else {
                     COLORREF(0x00282424)
@@ -709,13 +731,22 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                 SelectObject(hdc, HGDIOBJ(font_tag.0 as _));
                 SetTextColor(
                     hdc,
-                    if hovered {
+                    if in_flight {
+                        // 探测进行中：置灰 + 省略号，明确“已有一次探测在跑”（P0-06）
+                        COLORREF(0x00606060)
+                    } else if hovered {
                         COLORREF(0x00ffcd60)
                     } else {
                         COLORREF(0x00a49c9c)
                     },
                 );
-                let label = if idx == 0 { "TC" } else { "XY" };
+                let label = if in_flight {
+                    "…"
+                } else if idx == 0 {
+                    "TC"
+                } else {
+                    "XY"
+                };
                 let mut label_buf: Vec<u16> = label.encode_utf16().collect();
                 let mut label_rect = rect;
                 DrawTextW(
@@ -992,17 +1023,17 @@ fn handle_mouse_click(hwnd: HWND, x: i32, y: i32) {
     }
     let state = unsafe { &mut *state_ptr };
 
-    // 0. 顶栏「显式探测」按钮（审计报告 U-01）：只在用户点击时发起一次探测。
-    //    授权、目标窗口归因、冷却与剪贴板事务的 fail-closed 判定全部在宿主侧复核；
-    //    这里不做任何同步等待，避免卡住吸附条的窗口过程。
+    // 0. 顶栏「显式探测」按钮（审计报告 U-01 / U-01A）：点击只消费**本对话框
+    //    generation 冻结的不可变快照**，不再去猜目标窗口；授权、lease、剪贴板事务的
+    //    fail-closed 判定全部在宿主侧复核。这里不做任何同步等待，避免卡住吸附条窗口过程。
     for idx in 0..state.probe_buttons.len() {
         if state.probe_buttons[idx].contains(x, y) {
-            let manager = if idx == 0 {
-                crate::managers::explicit_probe::ScriptedManager::TotalCmd
-            } else {
-                crate::managers::explicit_probe::ScriptedManager::XYplorer
-            };
-            crate::request_explicit_probe(manager);
+            let target = state.probe_buttons[idx].target;
+            // 立即重绘为忙碌态（宿主在后台线程探测，不阻塞本窗口过程）
+            unsafe {
+                let _ = InvalidateRect(Some(hwnd), None, false);
+            }
+            crate::request_explicit_probe_with_snapshot(target);
             return;
         }
     }

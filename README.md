@@ -58,7 +58,7 @@ When working across multiple applications, do you frequently face this frustrati
 - **🔌 Full File Manager Ecosystem Support**:
   - Windows 11 / 10 Native File Explorer (including multi-tab recognition)
   - Directory Opus (DOpus)
-  - Total Commander (TC) / XYplorer: **experimental, off by default**. Their paths can only be returned through the system clipboard, so QuickPath never probes them in the background. Enable the switch under Settings → Managers, then use **“Get path from TC / XYplorer” in the tray menu or floating bar** to fetch the path once, on demand (a probe cancels itself when the source cannot be proven and never overwrites your clipboard).
+  - Total Commander (TC) / XYplorer: **experimental, off by default**. Their paths can only be returned through the system clipboard, so QuickPath never probes them in the background. Enable the switch under Settings → Managers, then use **“Get path from TC / XYplorer” in the tray menu or floating bar** to fetch the path once, on demand (a probe cancels itself when the source cannot be proven and **will not restore an old snapshot over your clipboard**; the target manager may still write its path after the request, so avoid copying anything important while a probe is running).
 - **💼 Comprehensive Productivity & Creative Suite Compatibility**:
   - WPS Office (Writer, Spreadsheets, Presentation, PDF, Personal & Enterprise editions)
   - Microsoft Office (Word, Excel, PowerPoint)
@@ -100,7 +100,7 @@ When working across multiple applications, do you frequently face this frustrati
 
 ![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings_en.webp)
 
-QuickPath includes a modern Fluent **three-tab** card-based Settings Center:
+QuickPath includes a modern Fluent **four-tab** card-based Settings Center:
 - **"General Preferences" Tab**:
   - **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms);
   - **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency;
@@ -116,6 +116,10 @@ QuickPath includes a modern Fluent **three-tab** card-based Settings Center:
   - **System Compatibility Detection**: Automatically displays a graceful informational banner when running on Windows 10 or pre-22H2 systems that lack native Explorer tabs.
 - **"Taskbar Monitor" Tab (New in Ver 1.1.0)**:
   - Master toggle for hardware monitoring, docking position selector ("Right of Taskbar" / "Above Taskbar Left Float"), granular metric toggles (Network/CPU/RAM/GPU/Disk), 15~20s historical waveform graph toggle, sampling refresh rate selector (1.0s / 3.0s recommended / 5.0s), and monitor panel transparency slider (50% – 100%);
+- **"Managers" Tab (New in Ver 1.2.3)**:
+  - Two authorization switches (Total Commander / XYplorer), **off by default**: turning a switch on never probes and never touches the system clipboard;
+  - One-shot triggers: the **tray menu** (requires that manager's window to be in the foreground, otherwise the item is grayed) or the `[TC]` / `[XY]` buttons in the **floating bar** header (bound to the current dialog-open event, not a strict foreground trigger);
+  - Both entries are grayed while a probe is in flight (only one probe may run at a time); on cancel / timeout / unprovable source **no old snapshot is restored** over your current clipboard, and a tray balloon reports the outcome;
 ![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
 
 ---

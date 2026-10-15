@@ -149,7 +149,7 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 | **Windows 11 File Explorer** | Native **Multi-Tab** recognition. Overcomes legacy COM limitations to pinpoint the currently focused tab |
 | **Windows 10 File Explorer** | Full support for standard single-window `CabinetWClass` enumeration |
 | **Directory Opus (DOpus)** | Bridges via `dopusrt` command-line IPC to retrieve active Lister paths in milliseconds |
-| **Total Commander (TC)** | **Experimental and off by default.** Its path can only be returned through the system clipboard, so QuickPath never probes it in the background. Enable it in Settings → Managers, then use **“Get path from TC” in the tray menu or floating bar** to fetch the path once, on demand. Each probe snapshots the clipboard first, and cancels itself (without overwriting your current clipboard) whenever the source cannot be proven — e.g. a concurrent copy, a missing update event or an unknown owner |
+| **Total Commander (TC)** | **Experimental and off by default.** Its path can only be returned through the system clipboard, so QuickPath never probes it in the background. Enable it in Settings → Managers, then use **“Get path from TC” in the tray menu or floating bar** to fetch the path once, on demand. Each probe snapshots the clipboard first, and cancels itself (**without restoring an old snapshot over your current clipboard**) whenever the source cannot be proven — e.g. a concurrent copy, a missing update event or an unknown owner. Note that the target manager may still write its path after the request, so avoid copying anything important while a probe is running |
 | **XYplorer** | **Experimental and off by default**, same rules as Total Commander: authorize in Settings → Managers, then trigger “Get path from XYplorer” manually |
 
 ### 4.5 Taskbar Hardware Status Monitor (New in Ver 1.1.0)
@@ -271,7 +271,7 @@ Development and productivity software (such as VS Code, Cursor, IntelliJ IDEA, G
 
 ### 5.2 Configuration Options in Detail
 
-The Settings Center utilizes a modern Fluent **three-tab** card layout (freely toggle between "General Preferences", "Tab Utility", and "Taskbar Monitor" at the top):
+The Settings Center utilizes a modern Fluent **four-tab** card layout (freely toggle between "General Preferences", "Tab Utility", "Taskbar Monitor" and "Managers" at the top):
 
 #### "General Preferences" Tab
 1. **Smart AutoSwitch**
@@ -330,6 +330,23 @@ The Settings Center utilizes a modern Fluent **three-tab** card layout (freely t
    - **Show Historical Waveform Graph**: Toggles the 15~20s polyline background trend;
    - **Sampling Refresh Rate**: Fluent capsule segmented control offering `1.0s`, `3.0s (Recommended)`, and `5.0s`;
    - **Panel Opacity Slider**: Custom slider adjusting background opacity between `50%` and `100%`.
+
+#### "Managers" Tab (New in Ver 1.2.3)
+1. **Two authorization switches (off by default)**:
+   - "Experimental: Total Commander probe" and "Experimental: XYplorer probe";
+   - A switch **only grants permission**: turning it on never probes by itself and never touches the system clipboard;
+   - Both switches are migrated to `false` once when upgrading from an older version.
+2. **How to trigger a single fetch**:
+   - **Tray menu**: with the **Total Commander / XYplorer window in the foreground**, right-click the tray icon and choose "📂 Get path from TC" / "📂 Get path from XYplorer". The item is **grayed out** when the foreground window is not that manager;
+   - **Floating bar**: after a file dialog appears, the `[TC]` / `[XY]` buttons appear in the bar header. The bar is a `WS_EX_NOACTIVATE` window, so the foreground at click time is always the dialog; those buttons therefore use the "**most recent source bound to the current dialog-open event**" semantics and are **not** a strict foreground trigger. The binding expires as soon as the dialog changes or closes.
+3. **Clipboard limits during a probe**:
+   - A probe briefly uses the system clipboard (full snapshot → empty → ask the manager to write → restore);
+   - **Only one probe may run at a time**: both entries are grayed while a probe is in flight (the bar button shows `…`), and a repeated click is rejected outright **without touching the clipboard**;
+   - Avoid copying anything important until the probe finishes.
+4. **Visible result of cancel / timeout / unprovable source**:
+   - Path found: injected into the active dialog when one exists, otherwise recorded to history only, plus a tray balloon "Manager path fetched";
+   - No path (timeout, unprovable source, lost ownership, no attributable target, failure cooldown): **no old snapshot is restored over your current clipboard**, plus a tray balloon "No path fetched (cancelled or timed out)";
+   - Note that the target manager may still write its path after the request, so "QuickPath does not restore an old snapshot" is **not** the same as "a concurrent copy can never be lost".
 
 ### 5.3 Settings Draft & Apply Mechanism
 - **Draft Protection**: Modifications made inside the settings window remain in draft state until confirmed;
@@ -397,7 +414,7 @@ Settings are serialized in standard JSON format:
 | `enable_totalcmd` | boolean | `false` | Authorizes the Total Commander clipboard-based probe. **Granting permission never triggers a probe by itself**: the path is only fetched when you click “Get path from TC” in the tray menu or the floating bar. The same applies to `enable_xyplorer` |
 | `enable_xyplorer` | boolean | `false` | Authorizes the XYplorer clipboard-based probe (same rules as above) |
 
-A probe briefly uses the system clipboard and restores it afterwards. If the source of the update cannot be proven (concurrent copy, missing update notification, unknown owner, timeout), QuickPath cancels the probe and **never overwrites what you currently have on the clipboard**. If you upgrade from an older version, both switches are migrated to `false` once.
+A probe briefly uses the system clipboard and restores it afterwards. If the source of the update cannot be proven (concurrent copy, missing update notification, unknown owner, timeout), QuickPath cancels the probe and **will not restore an old snapshot over what you currently have on the clipboard**. Note that the target manager may still write its path after the request, so avoid copying anything important while a probe is running. If you upgrade from an older version, both switches are migrated to `false` once.
 
 #### File Explorer Tab Utility Configuration Properties (New in Ver 1.2.0)
 | Property | Type | Default | Description |

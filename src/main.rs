@@ -24,6 +24,7 @@ use win32::autostart::set_autostart;
 use win32::events::{WM_QUICKPATH_FOREGROUND, WinEventHookGuard, get_active_foreground_window};
 
 use std::cell::RefCell;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -72,6 +73,13 @@ static MANAGER_SCAN_TX: OnceLock<Sender<ManagerScanResult>> = OnceLock::new();
 
 /// 显式探测结果回传通道的发送端（审计报告 U-01），语义与 `MANAGER_SCAN_TX` 一致。
 static EXPLICIT_PROBE_TX: OnceLock<Sender<ExplicitProbeResult>> = OnceLock::new();
+
+/// 托盘菜单本次弹出时冻结的触发快照（审计报告 U-01A）。
+///
+/// 只在 `WM_RBUTTONUP`（弹出菜单前）写入，`WM_COMMAND` 时**取出**（单次消费），
+/// 菜单关闭（选中或取消）后立即清空。因此同一 `request_id` 不可能被两条命令复用。
+static PENDING_TRAY_TRIGGER: Mutex<[Option<managers::explicit_probe::TriggerSnapshot>; 2]> =
+    Mutex::new([None, None]);
 
 thread_local! {
     /// 宿主消息线程独占的 `AppState` 拥有值。
@@ -387,9 +395,13 @@ unsafe extern "system" fn host_wnd_proc(
                         && !state.config.is_blacklisted(&dlg_info.process_name)
                     {
                         let candidates = state.tracker.get_all_candidates(&state.config);
-                        // 审计报告 U-01：授权开关只决定是否绘制显式探测按钮，不发起任何探测
-                        let probe_authorized =
-                            [state.config.enable_totalcmd, state.config.enable_xyplorer];
+                        // 审计报告 U-01 / U-01A：按钮只消费「与当前对话框打开事件绑定」的
+                        // 不可变快照（generation 复用），授权开关只决定快照是否冻结，
+                        // 这里不发起任何探测。
+                        let probe_targets = managers::explicit_probe::bar_probe_targets(
+                            dlg_info.hwnd.0 as usize,
+                            [state.config.enable_totalcmd, state.config.enable_xyplorer],
+                        );
                         if let Some(bar) = &mut state.floating_bar {
                             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
                             bar.show(
@@ -400,7 +412,7 @@ unsafe extern "system" fn host_wnd_proc(
                                 state.config.floating_bar_opacity,
                                 state.config.language.clone(),
                                 dlg_info.kind,
-                                probe_authorized,
+                                probe_targets,
                             );
                         }
                     }
@@ -414,6 +426,10 @@ unsafe extern "system" fn host_wnd_proc(
                 let results: Vec<ExplicitProbeResult> = state.probe_rx.try_iter().collect();
                 for result in results {
                     apply_explicit_probe_result(state, result);
+                }
+                // 探测结束：让吸附条重绘，清除忙碌态并恢复按钮可点。
+                if let Some(bar) = &state.floating_bar {
+                    bar.invalidate();
                 }
             });
             LRESULT(0)
@@ -470,12 +486,19 @@ unsafe extern "system" fn host_wnd_proc(
         WM_TRAY_CALLBACK => {
             let event = lparam.0 as u32;
             if event == WM_RBUTTONUP {
-                // 审计报告 U-01：先记录“用户点开菜单这一刻的前台窗口”。
-                // 菜单弹出会短暂把前台交给 QuickPath 自身窗口，因此必须在弹菜单之前抓取，
-                // 否则后面的目标解析只能退回到更早的记录（或直接无目标）。
-                managers::explicit_probe::note_foreground_window(
-                    win32::events::get_active_foreground_window(),
-                );
+                // 审计报告 U-01A（托盘方案）：在**弹出菜单之前**严格取当前前台窗口。
+                // 菜单弹出会把前台短暂交给 QuickPath 自身窗口，因此必须在
+                // `SetForegroundWindow` 之前抓取；前台不是目标管理器时对应菜单项置灰，
+                // **不做任何墙钟回退**（600 秒旧记录已删除）。
+                let snapshots = [
+                    managers::explicit_probe::capture_foreground_snapshot(
+                        managers::explicit_probe::ScriptedManager::TotalCmd,
+                    ),
+                    managers::explicit_probe::capture_foreground_snapshot(
+                        managers::explicit_probe::ScriptedManager::XYplorer,
+                    ),
+                ];
+                store_pending_tray_trigger(snapshots);
                 // 先取出菜单所需配置再释放借用：`TrackPopupMenu` 会进入模态消息
                 // 循环，期间可能重入宿主窗口过程；若此时仍持有 `APP_STATE` 借用
                 // 会触发 `RefCell` panic。
@@ -484,7 +507,7 @@ unsafe extern "system" fn host_wnd_proc(
                         state.config.auto_switch_enabled,
                         state.config.autostart_enabled,
                         state.config.monitor.enabled,
-                        explicit_probe_menu_ready(state),
+                        explicit_probe_menu_ready(state, &snapshots),
                         state.config.language.clone(),
                         state.config.hotkey.clone(),
                     )
@@ -502,6 +525,8 @@ unsafe extern "system" fn host_wnd_proc(
                         &hotkey,
                     );
                 }
+                // 菜单关闭（选中或取消）后清空快照：同一 request_id 只能被消费一次。
+                clear_pending_tray_trigger();
             } else if event == WM_LBUTTONUP {
                 with_state(|state| open_settings(state));
             }
@@ -539,10 +564,10 @@ unsafe extern "system" fn host_wnd_proc(
                     with_state(on_hotkey_triggered);
                 }
                 IDM_PROBE_TOTALCMD => {
-                    request_explicit_probe(managers::explicit_probe::ScriptedManager::TotalCmd);
+                    request_explicit_probe_with_snapshot(take_pending_tray_trigger(0));
                 }
                 IDM_PROBE_XYPLORER => {
-                    request_explicit_probe(managers::explicit_probe::ScriptedManager::XYplorer);
+                    request_explicit_probe_with_snapshot(take_pending_tray_trigger(1));
                 }
                 IDM_OPEN_SETTINGS => {
                     with_state(|state| open_settings(state));
@@ -715,7 +740,13 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
         ));
 
         // 3. 需求 3：无论何时打开文件对话框，悬浮吸附条均直接自动展示！
-        let probe_authorized = [state.config.enable_totalcmd, state.config.enable_xyplorer];
+        // 审计报告 U-01A：吸附条是 `WS_EX_NOACTIVATE`，点击时前台永远是对话框，
+        // 因此目标改用「对话框打开事件冻结的最近来源快照」（generation 绑定，
+        // 对话框变化即重新冻结），文档已如实标注它不是严格前台触发。
+        let probe_targets = managers::explicit_probe::bar_probe_targets(
+            dlg_info.hwnd.0 as usize,
+            [state.config.enable_totalcmd, state.config.enable_xyplorer],
+        );
         if let Some(bar) = &mut state.floating_bar {
             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
             bar.show(
@@ -726,7 +757,7 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
                 state.config.floating_bar_opacity,
                 state.config.language.clone(),
                 dlg_info.kind,
-                probe_authorized,
+                probe_targets,
             );
         } else {
             crate::dialog::detector::log_debug(
@@ -1055,7 +1086,10 @@ fn on_hotkey_triggered(state: &mut AppState) {
     let fg_hwnd = get_active_foreground_window();
     if let Some(dlg_info) = detect_file_dialog(fg_hwnd) {
         let candidates = state.tracker.get_all_candidates(&state.config);
-        let probe_authorized = [state.config.enable_totalcmd, state.config.enable_xyplorer];
+        let probe_targets = managers::explicit_probe::bar_probe_targets(
+            dlg_info.hwnd.0 as usize,
+            [state.config.enable_totalcmd, state.config.enable_xyplorer],
+        );
         if let Some(bar) = &mut state.floating_bar {
             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
             bar.show(
@@ -1066,7 +1100,7 @@ fn on_hotkey_triggered(state: &mut AppState) {
                 state.config.floating_bar_opacity,
                 state.config.language.clone(),
                 dlg_info.kind,
-                probe_authorized,
+                probe_targets,
             );
         }
     }
@@ -1080,36 +1114,75 @@ fn open_settings(state: &AppState) {
 
 /// 托盘菜单里两个「获取当前路径」条目的可用性（`[Total Commander, XYplorer]`）。
 ///
-/// 只有「已授权 **且** 能归因到一个可用的目标窗口」时才可点击；否则置灰，
-/// 避免用户点了却什么都不发生（审计报告 U-01 验收标准 4/5）。
-fn explicit_probe_menu_ready(state: &AppState) -> [bool; 2] {
-    use managers::explicit_probe::{ScriptedManager, resolve_target};
+/// 只有「已授权 **且** 当前没有探测在跑 **且** 该快照有效」时才可点击；否则置灰
+/// （审计报告 U-01 / U-01A / P0-06）。`snapshots` 来自**右键那一刻**的严格前台抓取。
+fn explicit_probe_menu_ready(
+    state: &AppState,
+    snapshots: &[Option<managers::explicit_probe::TriggerSnapshot>; 2],
+) -> [bool; 2] {
+    let authorized = [state.config.enable_totalcmd, state.config.enable_xyplorer];
+    // P0-06：已有探测在跑时两个入口同时置灰（lease 仍是最终安全边界）。
+    let in_flight = managers::probe_lease::is_in_flight();
     [
-        state.config.enable_totalcmd && resolve_target(ScriptedManager::TotalCmd).is_some(),
-        state.config.enable_xyplorer && resolve_target(ScriptedManager::XYplorer).is_some(),
+        authorized[0] && !in_flight && snapshots[0].is_some(),
+        authorized[1] && !in_flight && snapshots[1].is_some(),
     ]
+}
+
+/// 写入本次托盘菜单的触发快照。
+fn store_pending_tray_trigger(snapshots: [Option<managers::explicit_probe::TriggerSnapshot>; 2]) {
+    let mut pending = PENDING_TRAY_TRIGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *pending = snapshots;
+}
+
+/// 取出本次托盘菜单的快照（单次消费：取出后立即置空）。
+fn take_pending_tray_trigger(index: usize) -> Option<managers::explicit_probe::TriggerSnapshot> {
+    let mut pending = PENDING_TRAY_TRIGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending.get_mut(index).and_then(Option::take)
+}
+
+/// 菜单关闭（选中或取消）后清空快照。
+fn clear_pending_tray_trigger() {
+    let mut pending = PENDING_TRAY_TRIGGER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *pending = [None, None];
 }
 
 /// 用户显式触发一次第三方管理器路径探测（托盘菜单 / 悬浮吸附条按钮，审计报告 U-01）。
 ///
+/// `snapshot` 必须是 UI 触发事件冻结的**不可变快照**（U-01A）：本函数不再去猜目标窗口。
+///
 /// - **授权开关只授权**：未授权时直接返回，绝不发起探测（验收标准 3）；
 /// - 探测在后台线程执行（单次协议消息上限 `MESSAGE_TIMEOUT_MS`），结果经通道回传，
 ///   绝不阻塞宿主消息线程；
-/// - 冷却窗口内不重试（与后台扫描共用同一套失败冷却）。
-pub fn request_explicit_probe(manager: managers::explicit_probe::ScriptedManager) {
+/// - 进程级独占 lease 在探测线程内获取（P0-06）：已有探测在跑时第二个请求立即被拒绝。
+pub fn request_explicit_probe_with_snapshot(
+    snapshot: Option<managers::explicit_probe::TriggerSnapshot>,
+) {
+    let Some(snapshot) = snapshot else {
+        dialog::detector::log_debug(
+            "EXPLICIT_PROBE_NO_SNAPSHOT: 没有有效的触发快照（菜单已取消或未在管理器窗口触发），本次未发起探测",
+        );
+        return;
+    };
     // 读配置用 `get_global_config()` 而不是 `with_state`：吸附条的鼠标处理就在宿主消息
     // 线程上，若此刻恰好有活动借用（例如宿主正在 `with_state` 闭包里泵消息），
     // `with_state` 会降级为 `None` 并让本次点击静默失效；`get_global_config()` 在
     // 状态忙时会回退到磁盘配置，保证“已授权”判定不会因重入而丢失。
     let config = crate::get_global_config();
-    let authorized = match manager {
+    let authorized = match snapshot.manager {
         managers::explicit_probe::ScriptedManager::TotalCmd => config.enable_totalcmd,
         managers::explicit_probe::ScriptedManager::XYplorer => config.enable_xyplorer,
     };
     if !authorized {
         dialog::detector::log_debug(&format!(
             "EXPLICIT_PROBE_NOT_AUTHORIZED({}): 用户尚未在设置中心授权该能力，本次未发起探测",
-            manager.label()
+            snapshot.manager.label()
         ));
         return;
     }
@@ -1120,9 +1193,14 @@ pub fn request_explicit_probe(manager: managers::explicit_probe::ScriptedManager
     }
 
     thread::spawn(move || {
-        let outcome = managers::explicit_probe::probe_once(manager, true);
+        let outcome = managers::explicit_probe::probe_with_snapshot(&snapshot, true);
         if let Some(tx) = EXPLICIT_PROBE_TX.get()
-            && tx.send(ExplicitProbeResult { manager, outcome }).is_ok()
+            && tx
+                .send(ExplicitProbeResult {
+                    manager: snapshot.manager,
+                    outcome,
+                })
+                .is_ok()
         {
             let host_ptr = HOST_HWND.load(Ordering::SeqCst);
             if !host_ptr.is_null() {
@@ -1150,6 +1228,11 @@ fn apply_explicit_probe_result(state: &mut AppState, result: ExplicitProbeResult
     use managers::explicit_probe::ExplicitProbeOutcome as Outcome;
 
     let label = result.manager.label();
+    let lang = state.config.language.clone();
+    // 审计报告 D-01A：未取得路径的结局必须给出**可见反馈**（不阻塞、不回显任何剪贴板正文）。
+    let notify_failure = |lang: &rules::Language| {
+        ui::tray::notify("QuickPath", rules::I18n::tray_probe_result(lang, false));
+    };
     let path = match result.outcome {
         Outcome::Path(path) => path,
         Outcome::NotAuthorized => {
@@ -1158,14 +1241,24 @@ fn apply_explicit_probe_result(state: &mut AppState, result: ExplicitProbeResult
         }
         Outcome::NoForegroundTarget => {
             dialog::detector::log_debug(&format!(
-                "EXPLICIT_PROBE({}): 无可归因的目标窗口（非前台 / 记录过期 / 身份已变），已取消",
+                "EXPLICIT_PROBE({}): 目标窗口已不可归因（关闭 / 易主 / 进程重启），已取消",
                 label
             ));
+            notify_failure(&lang);
             return;
         }
         Outcome::CoolingDown => {
             dialog::detector::log_debug(&format!(
                 "EXPLICIT_PROBE({}): 处于失败冷却窗口，已跳过",
+                label
+            ));
+            notify_failure(&lang);
+            return;
+        }
+        Outcome::AlreadyRunning => {
+            // P0-06：进程级独占 lease 拒绝。这不是错误，只是一次重复点击。
+            dialog::detector::log_debug(&format!(
+                "EXPLICIT_PROBE({}): 已有一次探测在进行，本次请求被拒绝（未触碰剪贴板）",
                 label
             ));
             return;
@@ -1175,19 +1268,27 @@ fn apply_explicit_probe_result(state: &mut AppState, result: ExplicitProbeResult
                 "EXPLICIT_PROBE({}): 未取得可证明的路径（超时 / 来源不可证明），已放弃",
                 label
             ));
+            notify_failure(&lang);
             return;
         }
     };
 
     dialog::detector::log_debug(&format!("EXPLICIT_PROBE({}): 已取得路径，准备应用", label));
 
+    let mut injected = false;
     if let Some(bar) = &state.floating_bar
         && let Some((dlg, edit, kind)) = bar.target_dialog()
         && dialog_still_active(dlg)
     {
         inject_path_to_dialog(dlg, edit, &path, kind, None);
+        injected = true;
     }
     state.config.record_history(&path);
+    if !injected {
+        // 严格前台托盘流程：此刻没有可注入的对话框，路径只进历史，
+        // 因此必须用气泡给出可见反馈（审计报告 D-01A 验收标准 4）。
+        ui::tray::notify("QuickPath", rules::I18n::tray_probe_result(&lang, true));
+    }
 }
 
 /// 目标对话框是否仍与当前前台相关（与候选刷新的判定保持一致）。
@@ -1561,5 +1662,56 @@ mod tests {
                 from = end.max(start + call.len());
             }
         }
+    }
+
+    /// 审计报告 U-01A 验收标准 4：一次快照不能被两条命令或两次点击复用。
+    ///
+    /// 托盘菜单的快照只在 `WM_RBUTTONUP` 写入，`WM_COMMAND` **取出**（单次消费），
+    /// 菜单关闭（选中或取消）后立即清空。三个动作共用一个进程级静态，
+    /// 因此必须写在**同一个用例**里（并行执行时不会互相打断）。
+    #[test]
+    fn test_tray_trigger_snapshot_is_single_use() {
+        use managers::explicit_probe::{ScriptedManager, TriggerSnapshot};
+        use std::time::Instant;
+
+        fn snapshot(manager: ScriptedManager, request_id: u64) -> TriggerSnapshot {
+            TriggerSnapshot {
+                hwnd_raw: 0x1234,
+                pid: 42,
+                manager,
+                captured_at: Instant::now(),
+                request_id,
+            }
+        }
+
+        clear_pending_tray_trigger();
+        store_pending_tray_trigger([
+            Some(snapshot(ScriptedManager::TotalCmd, 7)),
+            Some(snapshot(ScriptedManager::XYplorer, 8)),
+        ]);
+        assert_eq!(
+            take_pending_tray_trigger(0).map(|s| s.request_id),
+            Some(7),
+            "第一次消费必须拿到本菜单冻结的快照"
+        );
+        assert!(
+            take_pending_tray_trigger(0).is_none(),
+            "同一快照不得被第二条命令复用"
+        );
+        assert_eq!(
+            take_pending_tray_trigger(1).map(|s| s.request_id),
+            Some(8),
+            "两个管理器的快照互不影响"
+        );
+        assert!(take_pending_tray_trigger(1).is_none());
+
+        // 菜单关闭（选中或取消）后必须清空：残留快照不得在下次弹菜单前被消费
+        store_pending_tray_trigger([Some(snapshot(ScriptedManager::TotalCmd, 11)), None]);
+        clear_pending_tray_trigger();
+        assert!(
+            take_pending_tray_trigger(0).is_none(),
+            "菜单关闭后残留快照必须失效"
+        );
+        clear_pending_tray_trigger();
     }
 }
