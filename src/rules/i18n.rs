@@ -157,6 +157,11 @@ pub struct TraySection {
     pub toggle_monitor: String,
     pub settings: String,
     pub exit: String,
+    /// 审计报告 U-01：显式获取第三方管理器当前路径（单次、前台、用户触发）
+    #[serde(default)]
+    pub probe_totalcmd: String,
+    #[serde(default)]
+    pub probe_xyplorer: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -325,6 +330,28 @@ pub struct TabModuleSection {
     pub unsupported_desc: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IntegrationSection {
+    #[serde(default)]
+    pub tab_title: String,
+    #[serde(default)]
+    pub totalcmd_switch: String,
+    #[serde(default)]
+    pub totalcmd_desc: String,
+    #[serde(default)]
+    pub xyplorer_switch: String,
+    #[serde(default)]
+    pub xyplorer_desc: String,
+    #[serde(default)]
+    pub tips_title: String,
+    #[serde(default)]
+    pub tips_line1: String,
+    #[serde(default)]
+    pub tips_line2: String,
+    #[serde(default)]
+    pub tips_line3: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocaleBundle {
     pub meta: MetaSection,
@@ -338,6 +365,9 @@ pub struct LocaleBundle {
     pub monitor: MonitorSection,
     #[serde(default)]
     pub tab_module: TabModuleSection,
+    /// 审计报告 U-01：第三方管理器联动页
+    #[serde(default)]
+    pub integration: IntegrationSection,
 }
 
 // 编译期嵌入官方自带语言文件，确保单文件绿色分发零外部依赖
@@ -353,6 +383,20 @@ fn parse_bundle_with_version(raw: &str) -> Option<LocaleBundle> {
 }
 
 pub struct I18n;
+
+/// 管理器联动页（审计报告 U-01）的解析后文案：语言包缺失时回退到内置默认。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationTexts {
+    pub tab_title: String,
+    pub totalcmd_switch: String,
+    pub totalcmd_desc: String,
+    pub xyplorer_switch: String,
+    pub xyplorer_desc: String,
+    pub tips_title: String,
+    pub tips_line1: String,
+    pub tips_line2: String,
+    pub tips_line3: String,
+}
 
 impl I18n {
     /// 获取全局语言包注册表（内置 + 外部动态扩展覆盖，并自动注入全局统一版本号）
@@ -536,8 +580,78 @@ impl I18n {
         &Self::get_bundle(lang).tray.settings
     }
 
+    /// 托盘菜单：显式获取第三方管理器当前路径的条目文案。
+    /// `index = 0` 为 Total Commander，其余为 XYplorer（审计报告 U-01）。
+    pub fn tray_probe(lang: &Language, index: usize) -> &str {
+        let tray = &Self::get_bundle(lang).tray;
+        let (value, fallback) = if index == 0 {
+            (&tray.probe_totalcmd, "从 TC 获取当前路径")
+        } else {
+            (&tray.probe_xyplorer, "从 XYplorer 获取当前路径")
+        };
+        if value.is_empty() { fallback } else { value }
+    }
+
     pub fn tray_exit(lang: &Language) -> &str {
         &Self::get_bundle(lang).tray.exit
+    }
+
+    /// 管理器联动页的文案（审计报告 U-01），缺失时回退到内置默认。
+    pub fn integration_texts(lang: &Language) -> IntegrationTexts {
+        let section = &Self::get_bundle(lang).integration;
+        let zh = Self::resolve_locale_code(lang) == "zh-CN";
+        let pick = |value: &str, zh_default: &'static str, en_default: &'static str| -> String {
+            if !value.is_empty() {
+                value.to_string()
+            } else if zh {
+                zh_default.to_string()
+            } else {
+                en_default.to_string()
+            }
+        };
+        IntegrationTexts {
+            tab_title: pick(&section.tab_title, "管理器联动", "Managers"),
+            totalcmd_switch: pick(
+                &section.totalcmd_switch,
+                "实验性：Total Commander 路径探测",
+                "Experimental: Total Commander probe",
+            ),
+            totalcmd_desc: pick(
+                &section.totalcmd_desc,
+                "手动触发一次；来源无法证明时取消，不覆盖当前内容",
+                "Manual, one-shot; cancels if the source can't be proven",
+            ),
+            xyplorer_switch: pick(
+                &section.xyplorer_switch,
+                "实验性：XYplorer 路径探测",
+                "Experimental: XYplorer probe",
+            ),
+            xyplorer_desc: pick(
+                &section.xyplorer_desc,
+                "手动触发一次；来源无法证明时取消，不覆盖当前内容",
+                "Manual, one-shot; cancels if the source can't be proven",
+            ),
+            tips_title: pick(
+                &section.tips_title,
+                "💡 使用前请先了解",
+                "💡 Before enabling",
+            ),
+            tips_line1: pick(
+                &section.tips_line1,
+                "• 开关只表示“已授权”，不会自行探测",
+                "• The switch only grants permission; it never probes",
+            ),
+            tips_line2: pick(
+                &section.tips_line2,
+                "• 每次都要手动点托盘/吸附条上的「TC」或「XY」",
+                "• Click “TC” / “XY” in the tray or floating bar to fetch once",
+            ),
+            tips_line3: pick(
+                &section.tips_line3,
+                "• 探测会短暂占用剪贴板；来源不可证明时取消并保留你当前复制的内容",
+                "• A probe briefly uses the clipboard and never overwrites it on doubt",
+            ),
+        }
     }
 
     pub fn settings_title(lang: &Language) -> &str {

@@ -2,17 +2,14 @@
 
 //! 第三方文件管理器候选路径的后台扫描 worker + 结果缓存（审计报告 P-03）。
 //!
-//! 目标：把 DOpus / Total Commander / XYplorer 的**跨进程扫描从调用线程移走**。
+//! 目标：把 DOpus（以及资源管理器）的**跨进程扫描从调用线程移走**。
 //! 调用方（宿主消息线程）只从缓存取“最后一次成功结果”，同时获得一次**有预算的等待机会**：
 //! - 正常情况下扫描只需十几毫秒，调用方几乎无感地拿到最新结果；
 //! - 管理器挂起时，调用方最多等待 `budget` 就带着上一次（或空）结果继续，绝不卡住界面。
 //!
-//! 扫描本身仍走 `managers::ipc` 的有界 IPC + 失败冷却，因此单轮扫描也绝不会无限期占住 worker。
-//!
-//! **遥测（审计报告 P-04）**：worker 侧扫描耗时、caller 侧等待耗时分别采样（各自有界环），
-//! 并统计缓存命中率、预算耗尽、队头阻塞、过期结果退回，用于回答“预算是被谁吃掉的、是否
-//! 需要拆 worker”。全部计数走无锁原子，样本环走一把独立 Mutex；只在周期性/真实耗尽时
-//! 才做字符串格式化，宿主热路径（零预算缓存读取）不产生任何日志。
+//! **审计报告 U-01**：Total Commander / XYplorer 已被**彻底移出后台扫描**——它们的路径
+//! 只能靠系统剪贴板回传，仅开启授权开关就可能持续占用剪贴板。这两个管理器改为
+//! 用户显式触发的一次性探测（见 `managers::explicit_probe`），本模块不再引用它们。
 
 use std::collections::HashSet;
 use std::io;
@@ -23,9 +20,7 @@ use std::time::{Duration, Instant};
 
 use super::dopus::get_dopus_folders;
 use super::explorer::get_explorer_folders;
-use super::totalcmd::get_totalcmd_folders;
 use super::tracker::{FolderCandidate, normalize_path};
-use super::xyplorer::get_xyplorer_folders;
 use crate::telemetry::{SampleRing, percentile_ms};
 
 /// 调用方在“等一轮后台扫描”上愿意花的时间上限（超过就先用缓存）
@@ -45,8 +40,6 @@ const SCAN_EXHAUSTED_LOG_MIN_WAIT: Duration = Duration::from_millis(1);
 struct ScanRequest {
     enable_explorer: bool,
     enable_dopus: bool,
-    enable_totalcmd: bool,
-    enable_xyplorer: bool,
     generation: u64,
 }
 
@@ -309,11 +302,9 @@ pub fn has_cached_result() -> bool {
 pub fn scan_within(
     enable_explorer: bool,
     enable_dopus: bool,
-    enable_totalcmd: bool,
-    enable_xyplorer: bool,
     budget: Duration,
 ) -> Vec<FolderCandidate> {
-    if !(enable_explorer || enable_dopus || enable_totalcmd || enable_xyplorer) {
+    if !(enable_explorer || enable_dopus) {
         return Vec::new();
     }
 
@@ -322,8 +313,6 @@ pub fn scan_within(
     let request = ScanRequest {
         enable_explorer,
         enable_dopus,
-        enable_totalcmd,
-        enable_xyplorer,
         generation,
     };
     serve_request(scanner, request, budget, &SCAN_STATS)
@@ -476,34 +465,6 @@ fn scan_sources(request: &ScanRequest) -> Vec<FolderCandidate> {
         }
     }
 
-    if request.enable_totalcmd {
-        for folder in get_totalcmd_folders() {
-            let normalized = normalize_path(&folder.path);
-            if seen.insert(normalized.to_lowercase()) {
-                list.push(FolderCandidate {
-                    path: normalized,
-                    title: folder.title,
-                    source: "Total Commander".to_string(),
-                    is_active: folder.is_active,
-                });
-            }
-        }
-    }
-
-    if request.enable_xyplorer {
-        for folder in get_xyplorer_folders() {
-            let normalized = normalize_path(&folder.path);
-            if seen.insert(normalized.to_lowercase()) {
-                list.push(FolderCandidate {
-                    path: normalized,
-                    title: folder.title,
-                    source: "XYplorer".to_string(),
-                    is_active: folder.is_active,
-                });
-            }
-        }
-    }
-
     list
 }
 
@@ -515,8 +476,6 @@ mod tests {
         ScanRequest {
             enable_explorer: true,
             enable_dopus: true,
-            enable_totalcmd: true,
-            enable_xyplorer: true,
             generation,
         }
     }
@@ -533,7 +492,7 @@ mod tests {
     #[test]
     fn test_disabled_managers_never_scan() {
         let start = Instant::now();
-        let list = scan_within(false, false, false, false, Duration::from_millis(500));
+        let list = scan_within(false, false, Duration::from_millis(500));
         assert!(list.is_empty());
         assert!(
             start.elapsed() < Duration::from_millis(50),
@@ -545,7 +504,7 @@ mod tests {
     fn test_zero_budget_returns_without_blocking() {
         // 预算为 0：无论 worker 是否完成，都必须在毫秒级返回（绝不阻塞调用线程）
         let start = Instant::now();
-        let _ = scan_within(true, true, true, true, Duration::ZERO);
+        let _ = scan_within(true, true, Duration::ZERO);
         assert!(
             start.elapsed() < Duration::from_millis(60),
             "零预算必须立即返回，实际 {:?}",

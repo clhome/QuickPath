@@ -4,7 +4,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetCursorPos, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, RegisterClassW,
+    GetCursorPos, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, RegisterClassW,
     SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu,
     WNDCLASSW, WS_OVERLAPPEDWINDOW,
 };
@@ -20,6 +20,9 @@ pub const IDM_SHOW_CANDIDATES: usize = 1003;
 pub const IDM_OPEN_SETTINGS: usize = 1004;
 pub const IDM_EXIT: usize = 1005;
 pub const IDM_TOGGLE_MONITOR: usize = 1006;
+/// 审计报告 U-01：显式获取第三方管理器当前路径（单次、前台、用户触发）
+pub const IDM_PROBE_TOTALCMD: usize = 1007;
+pub const IDM_PROBE_XYPLORER: usize = 1008;
 
 pub struct TrayIcon {
     pub hwnd: HWND,
@@ -86,11 +89,15 @@ impl TrayIcon {
     }
 
     /// 弹出右键菜单（支持多语言）
+    ///
+    /// `probe_ready` 为 `[Total Commander, XYplorer]` 的可用性：未授权或无法归因到目标
+    /// 窗口时对应菜单项置灰，避免用户点了却什么都不发生（审计报告 U-01）。
     pub fn show_context_menu(
         hwnd: HWND,
         auto_switch_enabled: bool,
         autostart_enabled: bool,
         monitor_enabled: bool,
+        probe_ready: [bool; 2],
         lang: crate::rules::Language,
         hotkey: &str,
     ) {
@@ -149,6 +156,15 @@ impl TrayIcon {
             .encode_utf16()
             .chain(Some(0))
             .collect();
+            // 审计报告 U-01：显式获取第三方管理器当前路径（只授权不探测，点击才探测）
+            let str_probe_tc: Vec<u16> = format!("📂 {}", crate::rules::I18n::tray_probe(&lang, 0))
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            let str_probe_xy: Vec<u16> = format!("📂 {}", crate::rules::I18n::tray_probe(&lang, 1))
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
             let str_settings: Vec<u16> = format!("⚙ {}", crate::rules::I18n::tray_settings(&lang))
                 .encode_utf16()
                 .chain(Some(0))
@@ -178,6 +194,28 @@ impl TrayIcon {
                 PCWSTR(str_monitor.as_ptr()),
             );
             let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING
+                    | if probe_ready[0] {
+                        MF_UNCHECKED
+                    } else {
+                        MF_GRAYED
+                    },
+                IDM_PROBE_TOTALCMD,
+                PCWSTR(str_probe_tc.as_ptr()),
+            );
+            let _ = AppendMenuW(
+                hmenu,
+                MF_STRING
+                    | if probe_ready[1] {
+                        MF_UNCHECKED
+                    } else {
+                        MF_GRAYED
+                    },
+                IDM_PROBE_XYPLORER,
+                PCWSTR(str_probe_xy.as_ptr()),
+            );
             let _ = AppendMenuW(
                 hmenu,
                 MF_STRING,

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::dialog::detector::log_debug;
+use crate::dialog::detector::{log_debug, redact_path_structure};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, POINT, RECT};
@@ -24,6 +24,76 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindow, SetCursorPos, SetForegroundWindow,
 };
 use windows::core::{BSTR, Interface};
+
+/// 调试日志用的「文本指纹」：只暴露**结构信息**，绝不记录原文（审计报告 S-LOG）。
+///
+/// `old_text` / `cur_val` / `saved_name` / 编辑框当前值都可能包含用户目录、客户名、
+/// 项目名或文档名，而故障排查时日志最可能被打包转发。因此这些位置一律改写为
+/// 「长度 + 类型类别 + 会话内关联 ID」：
+/// - `len` / 类别足以判断“是空还是目录还是文件名”，并解释“为何判定需要恢复”；
+/// - `session_id` 是**带进程内随机盐**的哈希，同一次故障的多条日志可据此串联，
+///   但无法反推原文，也无法跨进程/跨会话做字典比對。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TextFingerprint {
+    len: usize,
+    kind: &'static str,
+    session_id: u64,
+}
+
+impl TextFingerprint {
+    fn of(text: &str) -> Self {
+        Self {
+            len: text.chars().count(),
+            kind: classify_text(text),
+            session_id: session_hash(text),
+        }
+    }
+}
+
+impl std::fmt::Display for TextFingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "len={} kind={} id={:08x}",
+            self.len, self.kind, self.session_id
+        )
+    }
+}
+
+/// 文本类别（不含任何主体内容）：空 / 目录形式 / 带扩展名的文件名 / 其他。
+fn classify_text(text: &str) -> &'static str {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return "empty";
+    }
+    if trimmed.ends_with('\\') || trimmed.ends_with('/') {
+        return "dir";
+    }
+    let name = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
+    match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && !ext.is_empty()
+                && ext.len() <= 8
+                && ext.chars().all(|c| c.is_ascii_alphanumeric()) =>
+        {
+            "file"
+        }
+        _ => "text",
+    }
+}
+
+/// 会话内随机盐：每个进程一次，保证同一文本在本次会话内哈希稳定、跨会话不可关联。
+fn session_hash_salt() -> &'static std::collections::hash_map::RandomState {
+    static SALT: std::sync::OnceLock<std::collections::hash_map::RandomState> =
+        std::sync::OnceLock::new();
+    SALT.get_or_init(std::collections::hash_map::RandomState::new)
+}
+
+fn session_hash(text: &str) -> u64 {
+    use std::hash::BuildHasher;
+    session_hash_salt().hash_one(text)
+}
 
 /// 目标窗口身份指纹：句柄 + 进程 ID + 进程创建时间 + 窗口类名。
 ///
@@ -393,8 +463,14 @@ fn find_wps_edit_element(
                 }
 
                 log_debug(&format!(
-                    "UIA_EVAL[{}]: score={} name='{}' cls='{}' id='{}' val='{}' top={}",
-                    i, score, name, class_name, auto_id, val, elem_rect.top
+                    "UIA_EVAL[{}]: score={} name='{}' cls='{}' id='{}' val={} top={}",
+                    i,
+                    score,
+                    name,
+                    class_name,
+                    auto_id,
+                    TextFingerprint::of(&val),
+                    elem_rect.top
                 ));
 
                 candidates.push(ScoredCandidate {
@@ -430,8 +506,13 @@ fn find_wps_edit_element(
         }
 
         log_debug(&format!(
-            "UIA_CHOSEN: name='{}' cls='{}' id='{}' val='{}' score={} rect={:?}",
-            best.name, best.class_name, best.auto_id, best.val, best.score, best.rect
+            "UIA_CHOSEN: name='{}' cls='{}' id='{}' val={} score={} rect={:?}",
+            best.name,
+            best.class_name,
+            best.auto_id,
+            TextFingerprint::of(&best.val),
+            best.score,
+            best.rect
         ));
 
         Some((best.elem, best.val_pattern))
@@ -613,8 +694,10 @@ unsafe fn wait_readback_match(pattern: &IUIAutomationValuePattern, target: &str)
                         return true;
                     }
                     log_debug(&format!(
-                        "UIA_VERIFY[{}]: 回读不一致 current='{}' target='{}'",
-                        attempt, current, target
+                        "UIA_VERIFY[{}]: 回读不一致 current={} target={}",
+                        attempt,
+                        TextFingerprint::of(&current),
+                        redact_path_structure(target)
                     ));
                 }
                 Err(err) => {
@@ -680,8 +763,9 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
             && !old_text.ends_with('\\');
 
         log_debug(&format!(
-            "UIA_INJECT_PRE: old_text='{}', should_restore={}",
-            old_text, should_restore_name
+            "UIA_INJECT_PRE: old_text={}, should_restore={}",
+            TextFingerprint::of(&old_text),
+            should_restore_name
         ));
 
         // 5. 聚焦编辑框（语义聚焦优先，物理点击前复核身份与前台）
@@ -746,8 +830,9 @@ fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String) {
             .map(|b| b.to_string())
             .unwrap_or_default();
         log_debug(&format!(
-            "UIA_RESTORE_CHECK: cur_val='{}', saved_name='{}'",
-            current, saved_name
+            "UIA_RESTORE_CHECK: cur_val={}, saved_name={}",
+            TextFingerprint::of(&current),
+            TextFingerprint::of(&saved_name)
         ));
 
         // 智能输入防覆盖保护：用户在等待窗口期内已键入新文件名时严禁覆盖
@@ -786,8 +871,9 @@ fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String) {
         let restored = clipboard_ok && sequence_ok;
 
         log_debug(&format!(
-            "UIA_RESTORE_DONE: restore_requested='{}' clipboard_ok={}",
-            saved_name, restored
+            "UIA_RESTORE_DONE: restore_requested={} clipboard_ok={}",
+            TextFingerprint::of(&saved_name),
+            restored
         ));
     });
 }
@@ -813,8 +899,9 @@ pub fn inject_path_to_wps_dialog(
     let raw_hwnd = dialog_hwnd.0 as usize;
 
     log_debug(&format!(
-        "UIA_INJECT_START: target_folder='{}' hwnd=0x{:X}",
-        folder_with_slash, raw_hwnd
+        "UIA_INJECT_START: target_folder={} hwnd=0x{:X}",
+        redact_path_structure(&folder_with_slash),
+        raw_hwnd
     ));
 
     // 将注入逻辑放入单独线程，避免任何 UIA 查询等待阻塞调用线程（可能是宿主消息线程）
@@ -905,6 +992,68 @@ mod tests {
         assert!(
             body.contains("clipboard_injected && wait_readback_match(pattern, target)"),
             "剪贴板注入必须经回读校验后才算成功"
+        );
+    }
+
+    /// 审计报告 S-LOG：UIA 侧的正文指纹与源码守卫。
+    ///
+    /// 1. 指纹只暴露长度/类别/会话内关联 ID，绝不包含正文；
+    /// 2. 会话内同一文本哈希稳定、不同文本可区分（能把一次故障的多条日志串起来）；
+    /// 3. 生产代码不得再把正文原样拼进日志（否则守卫变红）。
+    #[test]
+    fn test_sensitive_uia_logs_never_emit_raw_text() {
+        // --- 指纹本身的语义 ---
+        let dir = TextFingerprint::of(r"D:\客户项目\甲方合同\");
+        let file = TextFingerprint::of(r"D:\客户项目\甲方合同\报价单.docx");
+        let empty = TextFingerprint::of("   ");
+        assert_eq!(dir.kind, "dir");
+        assert_eq!(file.kind, "file");
+        assert_eq!(empty.kind, "empty");
+        assert_eq!(empty.len, 3, "长度按字符计（含空白），用于区分空与未填");
+        assert_eq!(
+            TextFingerprint::of("同一个名字.docx").session_id,
+            TextFingerprint::of("同一个名字.docx").session_id,
+            "同一会话内同一文本的关联 ID 必须稳定"
+        );
+        assert_ne!(
+            TextFingerprint::of("a.docx").session_id,
+            TextFingerprint::of("b.docx").session_id,
+            "不同文本必须可区分"
+        );
+
+        let rendered = format!("{} {} {}", dir, file, empty);
+        for secret in ["客户项目", "甲方合同", "报价单"] {
+            assert!(
+                !rendered.contains(secret),
+                "指纹不得泄露正文（命中 `{}`）：{}",
+                secret,
+                rendered
+            );
+        }
+
+        // --- 源码守卫：生产代码不得再把正文原样写进日志 ---
+        const SOURCE: &str = include_str!("uia.rs");
+        let production = &SOURCE[..SOURCE.find("#[cfg(test)]").expect("必须存在测试模块")];
+        for key in [
+            "old_text",
+            "cur_val",
+            "saved_name",
+            "val",
+            "current",
+            "target",
+            "target_folder",
+        ] {
+            let raw = format!("{}='{{}}'", key);
+            assert!(
+                !production.contains(&raw),
+                "UIA 调试日志禁止记录正文原文（命中 `{}`）",
+                raw
+            );
+        }
+        assert!(
+            production.contains("TextFingerprint::of(")
+                && production.contains("redact_path_structure("),
+            "敏感位置必须经过共享脱敏入口（指纹 / 路径结构骨架）"
         );
     }
 }

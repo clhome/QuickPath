@@ -186,7 +186,7 @@ mod tests {
                 );
             }
 
-            for required in ["probe_two_panels", "ClipboardTransaction::begin"] {
+            for required in ["probe_panel_path", "ClipboardTransaction::begin"] {
                 assert!(
                     code.contains(required),
                     "{} 必须复用统一事务化探测路径（缺少 `{}`）",

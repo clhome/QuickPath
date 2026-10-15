@@ -314,6 +314,121 @@ fn sanitize_debug_message(msg: &str) -> String {
     )
 }
 
+/// 读取环境变量后做**结构骨架**脱敏（生产路径）。
+fn sanitize_path_structure(msg: &str) -> String {
+    let profile = std::env::var_os("USERPROFILE").map(|v| v.to_string_lossy().to_string());
+    let username = std::env::var_os("USERNAME").map(|v| v.to_string_lossy().to_string());
+    let system_drive = std::env::var_os("SystemDrive").map(|v| v.to_string_lossy().to_string());
+    redact_path_structure_with(
+        msg,
+        profile.as_deref(),
+        username.as_deref(),
+        system_drive.as_deref(),
+    )
+}
+
+/// 调试日志专用：把路径折叠为**结构骨架**（审计报告 S-LOG）。
+///
+/// 在既有脱敏（`%USERPROFILE%` / `<user>` / UNC 主机与共享名 / 非系统盘符）之上，
+/// 进一步抹掉每一级目录与文件名**主体**，只保留盘符或占位符、层级深度与扩展名类别。
+/// 因此日志中不可能出现用户名、主机名、共享名、项目目录名或文件名主体，
+/// 但仍能看出「哪个盘、多深、什么类型的文件」，足以定位故障阶段。
+///
+/// 供 UIA 等调试日志共用（审计报告 S-LOG 第 1 条：脱敏逻辑必须共享，不得各处另写一套）。
+pub fn redact_path_structure(path: &str) -> String {
+    sanitize_path_structure(path)
+}
+
+/// 可注入的路径结构脱敏（纯函数，便于单测）：先做既有脱敏，再折叠分量主体。
+fn redact_path_structure_with(
+    path: &str,
+    profile: Option<&str>,
+    username: Option<&str>,
+    system_drive: Option<&str>,
+) -> String {
+    fold_path_components(&sanitize_full_with(path, profile, username, system_drive))
+}
+
+/// 把已脱敏路径中的每个分量主体折叠为占位符（纯函数）。
+///
+/// - 空分量与占位符分量（`%USERPROFILE%` / `%DRIVE_X%:` / `<unc>` / `<share>` / `C:`）原样保留；
+/// - 末级分量若带可识别的扩展名 → `<file:ext>`，否则 → `<name>`；
+/// - 其余分量 → `<dir>`；分隔符原样保留（含 UNC 的 `\\` 前缀与尾部分隔符）。
+fn fold_path_components(redacted: &str) -> String {
+    let parts = split_path_components(redacted);
+    let last_named = parts.iter().rposition(|(text, _)| !text.is_empty());
+
+    let mut out = String::with_capacity(redacted.len());
+    for (idx, (text, seps)) in parts.iter().enumerate() {
+        if text.is_empty() || is_placeholder_component(text) {
+            out.push_str(text);
+        } else if Some(idx) == last_named {
+            // 以分隔符结尾的末级分量是目录，不得当成“带扩展名的文件”
+            if seps.is_empty() {
+                out.push_str(&mask_last_component(text));
+            } else {
+                out.push_str("<dir>");
+            }
+        } else {
+            out.push_str("<dir>");
+        }
+        out.push_str(seps);
+    }
+    out
+}
+
+/// 按 `\` / `/` 切分路径，返回 `(分量, 紧随其后的分隔符串)`。
+/// 连续分隔符（UNC 前缀 `\\`）与尾部分隔符都完整保留在分隔符串里。
+fn split_path_components(path: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut text = String::new();
+    for ch in path.chars() {
+        if ch == '\\' || ch == '/' {
+            if let Some(last) = parts.last_mut()
+                && text.is_empty()
+            {
+                // 前一分量的分隔符串继续累积（处理 `\\` 与 `//` 连续分隔符）
+                last.1.push(ch);
+                continue;
+            }
+            parts.push((std::mem::take(&mut text), ch.to_string()));
+        } else {
+            text.push(ch);
+        }
+    }
+    if !text.is_empty() || parts.is_empty() {
+        parts.push((text, String::new()));
+    }
+    parts
+}
+
+/// 是否为需原样保留的占位符 / 盘符分量。
+fn is_placeholder_component(text: &str) -> bool {
+    text.starts_with('%') || text.starts_with('<') || text.ends_with(':')
+}
+
+/// 末级分量脱敏：只保留扩展名**类别**，绝不保留文件名主体。
+fn mask_last_component(text: &str) -> String {
+    match extension_class(text) {
+        Some(ext) => format!("<file:{}>", ext),
+        None => "<name>".to_string(),
+    }
+}
+
+/// 提取可安全记录的扩展名类别：仅接受 1~8 位 ASCII 字母数字；其余（含无扩展名、
+/// 以点开头的隐藏文件、非 ASCII 或超长后缀）一律视为不可识别，避免把敏感主体
+/// 伪装成「扩展名」写进日志。
+fn extension_class(name: &str) -> Option<String> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.is_empty() || ext.is_empty() || ext.len() > 8 {
+        return None;
+    }
+    if !ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(ext.to_ascii_lowercase())
+}
+
 /// 写入调试日志。
 ///
 /// 治理约束（审计报告 P2-04）：
@@ -1578,6 +1693,86 @@ mod debug_log_tests {
         assert_eq!(
             sanitize_full_with(msg, Some(r"C:\Users\Bob"), Some("Bob"), Some("C:")),
             "DETECT_START: hwnd=0x1234 pid=42 title='Save As' user=<user>"
+        );
+    }
+
+    /// 审计报告 S-LOG：UIA 调试日志不得出现用户名、主机名、共享名、项目目录或文件名主体。
+    #[test]
+    fn test_redact_path_structure_hides_user_unc_and_drive_details() {
+        let profile = r"C:\Users\Bob";
+        let user = "Bob";
+        let sys = "C:";
+
+        // 1) 个人目录 + 项目目录 + 文件名主体全部折叠，只留占位符/深度/扩展名类别
+        let out = redact_path_structure_with(
+            r"C:\Users\Bob\Documents\ClientA\report.docx",
+            Some(profile),
+            Some(user),
+            Some(sys),
+        );
+        assert_eq!(out, r"%USERPROFILE%\<dir>\<dir>\<file:docx>");
+        for secret in ["Bob", "Documents", "ClientA", "report"] {
+            assert!(
+                !out.contains(secret),
+                "日志不得出现 `{}`，实际 {}",
+                secret,
+                out
+            );
+        }
+
+        // 2) UNC：主机名与共享名只留占位符，后续分量折叠
+        let unc = redact_path_structure_with(
+            r"\\FileServer\Share\proj-x\plan.xlsx",
+            None,
+            None,
+            Some(sys),
+        );
+        assert_eq!(unc, r"\\<unc>\<share>\<dir>\<file:xlsx>");
+        assert!(!unc.contains("FileServer") && !unc.contains("Share"));
+
+        // 3) 非系统盘：盘符也换成占位符（盘可能指向含用户数据的卷）
+        let drive =
+            redact_path_structure_with(r"D:\work\客户资料\plan.docx", None, None, Some(sys));
+        assert_eq!(drive, r"%DRIVE_D%:\<dir>\<dir>\<file:docx>");
+        assert!(!drive.contains("客户资料") && !drive.contains("plan"));
+
+        // 4) 系统盘普通目录：保留盘符与层级深度，抹掉每级主体
+        let sysdir =
+            redact_path_structure_with(r"C:\Windows\System32\drivers", None, None, Some(sys));
+        assert_eq!(sysdir, r"C:\<dir>\<dir>\<name>");
+
+        // 5) 单分量与边界：带扩展名→<file:ext>；无扩展名/隐藏文件/非 ASCII 后缀→<name>；空→空
+        assert_eq!(
+            redact_path_structure_with("report.docx", None, None, None),
+            "<file:docx>"
+        );
+        assert_eq!(
+            redact_path_structure_with(".gitignore", None, None, None),
+            "<name>"
+        );
+        assert_eq!(
+            redact_path_structure_with("财务汇总.2026", None, None, None),
+            "<file:2026>",
+            "纯数字后缀只能作为“扩展名类别”保留，主体仍被抹掉"
+        );
+        assert_eq!(
+            redact_path_structure_with("财务报表.初稿", None, None, None),
+            "<name>",
+            "非 ASCII 后缀不得当真扩展名写进日志"
+        );
+        assert_eq!(
+            redact_path_structure_with("", None, None, None),
+            "",
+            "空路径必须原样返回"
+        );
+    }
+
+    /// 含扩展名的目录（尾部分隔符）不得被误读为文件扩展名（`a.txt\` → `<dir>`）。
+    #[test]
+    fn test_redact_path_structure_keeps_drive_and_trailing_separator() {
+        assert_eq!(
+            redact_path_structure_with(r"C:\a.txt\", None, None, Some("C:")),
+            r"C:\<dir>\"
         );
     }
 

@@ -16,8 +16,8 @@ use monitor::MonitorManager;
 use rules::AppConfig;
 use tab::com::ComStatsSnapshot;
 use ui::tray::{
-    IDM_EXIT, IDM_OPEN_SETTINGS, IDM_SHOW_CANDIDATES, IDM_TOGGLE_AUTOSTART, IDM_TOGGLE_AUTOSWITCH,
-    IDM_TOGGLE_MONITOR, TrayIcon, WM_TRAY_CALLBACK,
+    IDM_EXIT, IDM_OPEN_SETTINGS, IDM_PROBE_TOTALCMD, IDM_PROBE_XYPLORER, IDM_SHOW_CANDIDATES,
+    IDM_TOGGLE_AUTOSTART, IDM_TOGGLE_AUTOSWITCH, IDM_TOGGLE_MONITOR, TrayIcon, WM_TRAY_CALLBACK,
 };
 use ui::{FloatingBar, SettingsWindow};
 use win32::autostart::set_autostart;
@@ -52,6 +52,8 @@ const WM_QUICKPATH_WINE_TO_TAB: u32 = tab::keyboard::WM_QUICKPATH_WINE_TO_TAB;
 const WM_QUICKPATH_MANAGER_SCAN_RESULT: u32 = 0x0400 + 105;
 /// 后台首轮扫描完成，请宿主重绘一次对话框候选列表（P1-02 冷启动补偿）
 const WM_QUICKPATH_CANDIDATES_REFRESH: u32 = 0x0400 + 106;
+/// 用户显式触发的一次性探测结果回传（审计报告 U-01）
+const WM_QUICKPATH_EXPLICIT_PROBE_RESULT: u32 = 0x0400 + 107;
 /// 对话框控件异步初始化期间的最大探测次数与间隔
 /// （合计约 1.2s：慢速机器/首次加载的 shell 扩展常需数百毫秒才出现
 ///  DirectUIHWND / ComboBoxEx32 / Edit，过短会导致完全不弹窗）
@@ -67,6 +69,9 @@ static HOST_HWND: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_m
 /// 用 `PostMessageW` 唤醒宿主排空队列。宿主已退出（接收端被 drop）时 `send`
 /// 失败，结果由发送方自然丢弃，绝不泄漏。
 static MANAGER_SCAN_TX: OnceLock<Sender<ManagerScanResult>> = OnceLock::new();
+
+/// 显式探测结果回传通道的发送端（审计报告 U-01），语义与 `MANAGER_SCAN_TX` 一致。
+static EXPLICIT_PROBE_TX: OnceLock<Sender<ExplicitProbeResult>> = OnceLock::new();
 
 thread_local! {
     /// 宿主消息线程独占的 `AppState` 拥有值。
@@ -144,6 +149,8 @@ pub struct AppState {
     pub refreshed_dialog: Option<HWND>,
     /// 后台文件管理器扫描结果回传通道的接收端（宿主消息线程独占）
     scan_rx: Receiver<ManagerScanResult>,
+    /// 显式探测结果回传通道的接收端（宿主消息线程独占，审计报告 U-01）
+    probe_rx: Receiver<ExplicitProbeResult>,
 }
 
 /// 后台文件管理器扫描结果：经 `mpsc` 通道回传（报告 P1-02）。
@@ -151,6 +158,12 @@ struct ManagerScanResult {
     generation: u64,
     hwnd_raw: usize,
     path: Option<String>,
+}
+
+/// 一次显式探测的回传结果（审计报告 U-01）。
+struct ExplicitProbeResult {
+    manager: managers::explicit_probe::ScriptedManager,
+    outcome: managers::explicit_probe::ExplicitProbeOutcome,
 }
 
 fn main() {
@@ -237,6 +250,11 @@ fn main() {
         let (scan_tx, scan_rx) = std::sync::mpsc::channel();
         let _ = MANAGER_SCAN_TX.set(scan_tx);
 
+        // 显式探测结果回传通道（审计报告 U-01）：探测在后台线程执行，结果经通道回传，
+        // 与扫描结果同构，宿主消息线程绝不因一次 500ms 级跨进程调用而卡顿。
+        let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+        let _ = EXPLICIT_PROBE_TX.set(probe_tx);
+
         let state = AppState {
             config,
             tracker: WindowTracker::new(),
@@ -251,6 +269,7 @@ fn main() {
             manager_scan_stale_dropped: 0,
             refreshed_dialog: None,
             scan_rx,
+            probe_rx,
         };
 
         APP_STATE.with(|cell| *cell.borrow_mut() = Some(state));
@@ -368,6 +387,9 @@ unsafe extern "system" fn host_wnd_proc(
                         && !state.config.is_blacklisted(&dlg_info.process_name)
                     {
                         let candidates = state.tracker.get_all_candidates(&state.config);
+                        // 审计报告 U-01：授权开关只决定是否绘制显式探测按钮，不发起任何探测
+                        let probe_authorized =
+                            [state.config.enable_totalcmd, state.config.enable_xyplorer];
                         if let Some(bar) = &mut state.floating_bar {
                             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
                             bar.show(
@@ -378,11 +400,22 @@ unsafe extern "system" fn host_wnd_proc(
                                 state.config.floating_bar_opacity,
                                 state.config.language.clone(),
                                 dlg_info.kind,
+                                probe_authorized,
                             );
                         }
                     }
                 });
             }
+            LRESULT(0)
+        }
+        WM_QUICKPATH_EXPLICIT_PROBE_RESULT => {
+            // 显式探测已在后台线程完成，这里只排空通道并应用结果（零等待）。
+            with_state(|state| {
+                let results: Vec<ExplicitProbeResult> = state.probe_rx.try_iter().collect();
+                for result in results {
+                    apply_explicit_probe_result(state, result);
+                }
+            });
             LRESULT(0)
         }
         WM_QUICKPATH_RETRY_CHECK => {
@@ -437,6 +470,12 @@ unsafe extern "system" fn host_wnd_proc(
         WM_TRAY_CALLBACK => {
             let event = lparam.0 as u32;
             if event == WM_RBUTTONUP {
+                // 审计报告 U-01：先记录“用户点开菜单这一刻的前台窗口”。
+                // 菜单弹出会短暂把前台交给 QuickPath 自身窗口，因此必须在弹菜单之前抓取，
+                // 否则后面的目标解析只能退回到更早的记录（或直接无目标）。
+                managers::explicit_probe::note_foreground_window(
+                    win32::events::get_active_foreground_window(),
+                );
                 // 先取出菜单所需配置再释放借用：`TrackPopupMenu` 会进入模态消息
                 // 循环，期间可能重入宿主窗口过程；若此时仍持有 `APP_STATE` 借用
                 // 会触发 `RefCell` panic。
@@ -445,16 +484,20 @@ unsafe extern "system" fn host_wnd_proc(
                         state.config.auto_switch_enabled,
                         state.config.autostart_enabled,
                         state.config.monitor.enabled,
+                        explicit_probe_menu_ready(state),
                         state.config.language.clone(),
                         state.config.hotkey.clone(),
                     )
                 });
-                if let Some((auto_switch, autostart, monitor, language, hotkey)) = menu_ctx {
+                if let Some((auto_switch, autostart, monitor, probe_ready, language, hotkey)) =
+                    menu_ctx
+                {
                     TrayIcon::show_context_menu(
                         hwnd,
                         auto_switch,
                         autostart,
                         monitor,
+                        probe_ready,
                         language,
                         &hotkey,
                     );
@@ -494,6 +537,12 @@ unsafe extern "system" fn host_wnd_proc(
                 }
                 IDM_SHOW_CANDIDATES => {
                     with_state(on_hotkey_triggered);
+                }
+                IDM_PROBE_TOTALCMD => {
+                    request_explicit_probe(managers::explicit_probe::ScriptedManager::TotalCmd);
+                }
+                IDM_PROBE_XYPLORER => {
+                    request_explicit_probe(managers::explicit_probe::ScriptedManager::XYplorer);
                 }
                 IDM_OPEN_SETTINGS => {
                     with_state(|state| open_settings(state));
@@ -551,6 +600,11 @@ fn log_scan_telemetry(state: &AppState) {
 }
 
 fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_count: u32) {
+    // 审计报告 U-01：记录「用户刚刚以哪个第三方管理器窗口为目标」。
+    // 显式触发的目标解析优先取当前前台窗口，其次才回退到这份**有界时效**的记录，
+    // 因此这里只做记，不做任何探测、不碰剪贴板。
+    managers::explicit_probe::note_foreground_window(fg_hwnd);
+
     // P-04 聚合遥测：限频输出（每 500 次前台事件一条），避免在每条消息上做统计与格式化。
     let event_seq = FOREGROUND_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
     if event_seq.is_multiple_of(TELEMETRY_LOG_EVERY) {
@@ -602,8 +656,6 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
                     let candidates = managers::scanner::scan_within(
                         config.enable_win11_tabs,
                         config.enable_dopus,
-                        config.enable_totalcmd,
-                        config.enable_xyplorer,
                         budget,
                     );
                     let path = candidates
@@ -663,6 +715,7 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
         ));
 
         // 3. 需求 3：无论何时打开文件对话框，悬浮吸附条均直接自动展示！
+        let probe_authorized = [state.config.enable_totalcmd, state.config.enable_xyplorer];
         if let Some(bar) = &mut state.floating_bar {
             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
             bar.show(
@@ -673,6 +726,7 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
                 state.config.floating_bar_opacity,
                 state.config.language.clone(),
                 dlg_info.kind,
+                probe_authorized,
             );
         } else {
             crate::dialog::detector::log_debug(
@@ -834,13 +888,11 @@ fn schedule_candidates_refresh(dialog_hwnd: HWND, config: &AppConfig) {
     };
     let explorer = config.enable_win11_tabs;
     let dopus = config.enable_dopus;
-    let totalcmd = config.enable_totalcmd;
-    let xyplorer = config.enable_xyplorer;
 
     thread::spawn(move || {
         // 这轮扫描在后台线程完成（可能因挂起的管理器而用到整个预算），
         // 完成后只投递一个“重绘”消息，绝不阻塞宿主消息线程。
-        let _ = managers::scanner::scan_within(explorer, dopus, totalcmd, xyplorer, budget);
+        let _ = managers::scanner::scan_within(explorer, dopus, budget);
         unsafe {
             let host_ptr = HOST_HWND.load(Ordering::SeqCst);
             if host_ptr.is_null() {
@@ -1003,6 +1055,7 @@ fn on_hotkey_triggered(state: &mut AppState) {
     let fg_hwnd = get_active_foreground_window();
     if let Some(dlg_info) = detect_file_dialog(fg_hwnd) {
         let candidates = state.tracker.get_all_candidates(&state.config);
+        let probe_authorized = [state.config.enable_totalcmd, state.config.enable_xyplorer];
         if let Some(bar) = &mut state.floating_bar {
             let edit_target = dlg_info.file_name_edit_hwnd.unwrap_or(dlg_info.hwnd);
             bar.show(
@@ -1013,6 +1066,7 @@ fn on_hotkey_triggered(state: &mut AppState) {
                 state.config.floating_bar_opacity,
                 state.config.language.clone(),
                 dlg_info.kind,
+                probe_authorized,
             );
         }
     }
@@ -1022,6 +1076,128 @@ fn open_settings(state: &AppState) {
     if let Some(settings) = &state.settings_window {
         settings.show(state.config.clone());
     }
+}
+
+/// 托盘菜单里两个「获取当前路径」条目的可用性（`[Total Commander, XYplorer]`）。
+///
+/// 只有「已授权 **且** 能归因到一个可用的目标窗口」时才可点击；否则置灰，
+/// 避免用户点了却什么都不发生（审计报告 U-01 验收标准 4/5）。
+fn explicit_probe_menu_ready(state: &AppState) -> [bool; 2] {
+    use managers::explicit_probe::{ScriptedManager, resolve_target};
+    [
+        state.config.enable_totalcmd && resolve_target(ScriptedManager::TotalCmd).is_some(),
+        state.config.enable_xyplorer && resolve_target(ScriptedManager::XYplorer).is_some(),
+    ]
+}
+
+/// 用户显式触发一次第三方管理器路径探测（托盘菜单 / 悬浮吸附条按钮，审计报告 U-01）。
+///
+/// - **授权开关只授权**：未授权时直接返回，绝不发起探测（验收标准 3）；
+/// - 探测在后台线程执行（单次协议消息上限 `MESSAGE_TIMEOUT_MS`），结果经通道回传，
+///   绝不阻塞宿主消息线程；
+/// - 冷却窗口内不重试（与后台扫描共用同一套失败冷却）。
+pub fn request_explicit_probe(manager: managers::explicit_probe::ScriptedManager) {
+    // 读配置用 `get_global_config()` 而不是 `with_state`：吸附条的鼠标处理就在宿主消息
+    // 线程上，若此刻恰好有活动借用（例如宿主正在 `with_state` 闭包里泵消息），
+    // `with_state` 会降级为 `None` 并让本次点击静默失效；`get_global_config()` 在
+    // 状态忙时会回退到磁盘配置，保证“已授权”判定不会因重入而丢失。
+    let config = crate::get_global_config();
+    let authorized = match manager {
+        managers::explicit_probe::ScriptedManager::TotalCmd => config.enable_totalcmd,
+        managers::explicit_probe::ScriptedManager::XYplorer => config.enable_xyplorer,
+    };
+    if !authorized {
+        dialog::detector::log_debug(&format!(
+            "EXPLICIT_PROBE_NOT_AUTHORIZED({}): 用户尚未在设置中心授权该能力，本次未发起探测",
+            manager.label()
+        ));
+        return;
+    }
+
+    let host_raw = HOST_HWND.load(Ordering::SeqCst) as usize;
+    if host_raw == 0 {
+        return;
+    }
+
+    thread::spawn(move || {
+        let outcome = managers::explicit_probe::probe_once(manager, true);
+        if let Some(tx) = EXPLICIT_PROBE_TX.get()
+            && tx.send(ExplicitProbeResult { manager, outcome }).is_ok()
+        {
+            let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+            if !host_ptr.is_null() {
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(host_ptr as *mut _)),
+                        WM_QUICKPATH_EXPLICIT_PROBE_RESULT,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// 应用一次显式探测的结果（宿主消息线程）。
+///
+/// - 命中路径且当前有活着的目标对话框 → 直接注入该目录（“从 TC 获取当前路径”的语义就是
+///   让对话框跳过去），同时记入历史；
+/// - 没有对话框 → **只**记入历史供下次候选，绝不偷偷改动对话框；
+/// - 其余结局（未授权 / 无可归因目标 / 冷却 / 未取得可证明路径）只记结构化日志，
+///   日志中**不出现**任何路径正文与剪贴板内容。
+fn apply_explicit_probe_result(state: &mut AppState, result: ExplicitProbeResult) {
+    use managers::explicit_probe::ExplicitProbeOutcome as Outcome;
+
+    let label = result.manager.label();
+    let path = match result.outcome {
+        Outcome::Path(path) => path,
+        Outcome::NotAuthorized => {
+            dialog::detector::log_debug(&format!("EXPLICIT_PROBE({}): 未授权，已放弃", label));
+            return;
+        }
+        Outcome::NoForegroundTarget => {
+            dialog::detector::log_debug(&format!(
+                "EXPLICIT_PROBE({}): 无可归因的目标窗口（非前台 / 记录过期 / 身份已变），已取消",
+                label
+            ));
+            return;
+        }
+        Outcome::CoolingDown => {
+            dialog::detector::log_debug(&format!(
+                "EXPLICIT_PROBE({}): 处于失败冷却窗口，已跳过",
+                label
+            ));
+            return;
+        }
+        Outcome::NoPath => {
+            dialog::detector::log_debug(&format!(
+                "EXPLICIT_PROBE({}): 未取得可证明的路径（超时 / 来源不可证明），已放弃",
+                label
+            ));
+            return;
+        }
+    };
+
+    dialog::detector::log_debug(&format!("EXPLICIT_PROBE({}): 已取得路径，准备应用", label));
+
+    if let Some(bar) = &state.floating_bar
+        && let Some((dlg, edit, kind)) = bar.target_dialog()
+        && dialog_still_active(dlg)
+    {
+        inject_path_to_dialog(dlg, edit, &path, kind, None);
+    }
+    state.config.record_history(&path);
+}
+
+/// 目标对话框是否仍与当前前台相关（与候选刷新的判定保持一致）。
+fn dialog_still_active(dlg: HWND) -> bool {
+    if !unsafe { IsWindow(Some(dlg)).as_bool() } {
+        return false;
+    }
+    let current_fg = get_active_foreground_window();
+    current_fg == dlg
+        || dialog::detector::find_dialog_root(current_fg) == dialog::detector::find_dialog_root(dlg)
 }
 
 pub fn get_global_config() -> AppConfig {
@@ -1076,6 +1252,7 @@ mod tests {
     /// 构造一个不含任何 Win32 资源的最小 `AppState`，仅用于验证 `with_state` 语义。
     fn test_state() -> AppState {
         let (_tx, rx) = std::sync::mpsc::channel();
+        let (_probe_tx, probe_rx) = std::sync::mpsc::channel();
         AppState {
             config: AppConfig::default(),
             tracker: WindowTracker::new(),
@@ -1090,6 +1267,7 @@ mod tests {
             manager_scan_stale_dropped: 0,
             refreshed_dialog: None,
             scan_rx: rx,
+            probe_rx,
         }
     }
 

@@ -534,6 +534,39 @@ mod tests {
         );
     }
 
+    /// 审计报告 U-01 验收标准 2：两个授权开关必须可持久化（设置中心点“确定”后落盘）。
+    ///
+    /// 迁移标记必须同时存在，否则启动时的安全迁移会（按设计）把它们重新置为关闭。
+    #[test]
+    fn test_authorization_switches_roundtrip() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("qp_cfg_authorize_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        set_test_config_path(Some(temp_dir.join("config.json")));
+
+        let mut config = AppConfig {
+            enable_totalcmd: true,
+            enable_xyplorer: true,
+            ..AppConfig::default()
+        };
+        // 模拟已经执行过一次性安全迁移（真实用户配置在首次升级时已写入该标记）
+        config.applied_migrations.clear();
+        config.apply_migrations_and_sanitize();
+        assert!(!config.enable_totalcmd && !config.enable_xyplorer);
+        config.enable_totalcmd = true;
+        config.enable_xyplorer = true;
+        config.save().expect("隔离路径下保存必须成功");
+
+        let loaded = AppConfig::load();
+        assert!(
+            loaded.enable_totalcmd && loaded.enable_xyplorer,
+            "用户显式授权必须在重启后保留（否则开关等于摆设）"
+        );
+
+        set_test_config_path(None);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
     #[test]
     fn test_config_roundtrip_stays_in_isolated_path() {
         let temp_dir =

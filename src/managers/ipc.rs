@@ -208,45 +208,65 @@ mod tests {
         assert!(run_bounded(&cmd, &args), "快速退出的子进程应返回成功");
     }
 
-    /// 架构不变式守卫：进程镜像核对必须**逐窗口**生效。
+    /// 架构不变式守卫（U-01 重写）：显式单次探测在投递协议消息前必须复核目标身份。
     ///
-    /// TC / XY 的探测都是「按窗口类枚举所有同类顶层窗口 → 逐个投递协议消息」，
-    /// 而同类名伪装窗口可能出现在枚举链的**任意位置**。若只核对首个命中窗口，
-    /// 其后的伪装窗口依旧会收到 WM_COMMAND / WM_COPYDATA（破坏报告 P-03 的
-    /// 「不得向同类名伪装窗口发送协议消息」要求）。因此枚举循环内必须存在核对，
-    /// 且在投递（`probe_panel_path`）之前。
+    /// 旧实现按窗口类枚举所有同类顶层窗口，因此守卫是「枚举循环内逐窗口核对进程镜像」。
+    /// U-01 改为**只对用户显式选定的那一个窗口**探测，守卫随之收紧为三条：
+    /// ① `probe_explicit_target` 入口先核身份（解析与探测之间窗口可能已易主）；
+    /// ② 每次投递前（`send_path_copy_request`）再核一次，不一致则返回 `None` 不投递；
+    /// ③ 两次核对都严格**先于** `probe_panel_path` / `send_message_timeout`。
     #[test]
-    fn test_each_enumerated_manager_window_is_verified_against_process_image() {
+    fn test_explicit_manager_probe_verifies_target_before_dispatch() {
         let sources = [
             ("managers/totalcmd.rs", include_str!("totalcmd.rs")),
             ("managers/xyplorer.rs", include_str!("xyplorer.rs")),
         ];
 
         for (name, source) in sources {
-            // 先剔除整行注释，避免架构说明文字本身触发误报
-            let code = source
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let loop_start = code
-                .find("while !hwnd.0.is_null() {")
-                .unwrap_or_else(|| panic!("{name} 必须按窗口类枚举所有同类窗口（未找到枚举循环）"));
-            let body = &code[loop_start..];
-
-            let Some(verify_at) = body.find("window_process_matches") else {
-                panic!(
-                    "{name} 的枚举循环内必须逐个核对进程镜像；\
-                     只核对首个窗口会漏掉后续同类名伪装窗口"
-                );
-            };
-            let Some(send_at) = body.find("probe_two_panels") else {
-                panic!("{name} 的枚举循环内必须通过共享探测函数投递协议消息");
-            };
+            let entry = source
+                .find("pub fn probe_explicit_target")
+                .unwrap_or_else(|| panic!("{name} 必须提供显式单次探测入口"));
+            let rest = &source[entry..];
+            let send_fn = rest
+                .find("fn send_path_copy_request")
+                .unwrap_or_else(|| panic!("{name} 必须把投递收敛到 send_path_copy_request"));
+            let entry_body = &rest[..send_fn];
+            let verify_at = entry_body
+                .find("verify_target(")
+                .unwrap_or_else(|| panic!("{name} 探测入口必须先核对目标身份"));
+            let transaction_at = entry_body
+                .find("ClipboardTransaction::begin")
+                .unwrap_or_else(|| panic!("{name} 必须通过事务 API 占用剪贴板"));
+            let probe_at = entry_body
+                .find("probe_panel_path(")
+                .unwrap_or_else(|| panic!("{name} 必须通过共享探测函数投递协议消息"));
             assert!(
-                verify_at < send_at,
-                "{name} 的进程镜像核对必须发生在投递协议消息之前（伪装的同类名窗口不得收到消息）"
+                verify_at < transaction_at,
+                "{name} 的身份核对必须早于剪贴板事务开启（无目标时零剪贴板触碰）"
+            );
+            assert!(
+                verify_at < probe_at,
+                "{name} 的身份核对必须发生在投递之前（不得向已易主/已关闭的窗口发消息）"
+            );
+            assert!(
+                entry_body.contains("ExplicitProbeOutcome::NoForegroundTarget"),
+                "{name} 身份不符时必须返回 NoForegroundTarget（零协议消息、零剪贴板写入）"
+            );
+
+            let send_body = &rest[send_fn..];
+            let send_verify = send_body
+                .find("verify_target(")
+                .unwrap_or_else(|| panic!("{name} 每次投递前都必须再核一次身份"));
+            let dispatch = send_body
+                .find("send_message_timeout(")
+                .unwrap_or_else(|| panic!("{name} 必须使用有界投递"));
+            assert!(
+                send_verify < dispatch,
+                "{name} 的投递前身份复核必须早于 send_message_timeout"
+            );
+            assert!(
+                send_body.contains("return None"),
+                "{name} 身份变化时必须取消投递（返回 None 不计入 delivered）"
             );
         }
     }

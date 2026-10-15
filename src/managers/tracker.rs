@@ -61,8 +61,6 @@ impl WindowTracker {
         for candidate in super::scanner::scan_within(
             config.enable_win11_tabs,
             config.enable_dopus,
-            config.enable_totalcmd,
-            config.enable_xyplorer,
             std::time::Duration::ZERO,
         ) {
             if candidate.is_active && is_fast_valid_folder(&candidate.path) {
@@ -98,20 +96,17 @@ impl WindowTracker {
         let mut list = Vec::new();
         let mut seen = HashSet::new();
 
-        // 1~4. 资源管理器（含 Win11 标签页）与第三方管理器：一次性读取后台快照。
+        // 1~4. 资源管理器（含 Win11 标签页）与 Directory Opus：一次性读取后台快照。
         //      缓存可能来自上一次扫描，因此当前配置已关闭的来源一律过滤掉。
+        //      （审计报告 U-01：TC / XYplorer 已不在后台扫描范围内，候选不会出现这两个来源）
         for candidate in super::scanner::scan_within(
             config.enable_win11_tabs,
             config.enable_dopus,
-            config.enable_totalcmd,
-            config.enable_xyplorer,
             std::time::Duration::ZERO,
         ) {
             let enabled = match candidate.source.as_str() {
                 "资源管理器" => config.enable_win11_tabs,
                 "Directory Opus" => config.enable_dopus,
-                "Total Commander" => config.enable_totalcmd,
-                "XYplorer" => config.enable_xyplorer,
                 _ => true,
             };
             if enabled && seen.insert(candidate.path.to_lowercase()) {

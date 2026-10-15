@@ -12,9 +12,9 @@ use windows::Win32::Graphics::Dwm::{
     DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreateSolidBrush, DT_CALCRECT, DT_END_ELLIPSIS, DT_LEFT, DT_RIGHT,
-    DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FW_NORMAL, FW_SEMIBOLD,
-    FillRect, GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
+    BeginPaint, CreateFontW, CreateSolidBrush, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FW_BOLD, FW_NORMAL,
+    FW_SEMIBOLD, FillRect, GetMonitorInfoW, GetStockObject, HBRUSH, HDC, HGDIOBJ, InvalidateRect,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SelectObject, SetBkMode,
     SetTextColor, TRANSPARENT, UpdateWindow, WHITE_BRUSH,
 };
@@ -65,6 +65,41 @@ pub struct FloatingBarState {
     pub language: Language,
     pub producer_rect: RECT,
     pub is_producer_hovered: bool,
+    /// 顶栏的「显式获取第三方管理器当前路径」按钮（审计报告 U-01）。
+    /// 顺序固定为 `[Total Commander, XYplorer]`。
+    pub probe_buttons: [ProbeButton; 2],
+}
+
+/// 顶栏「显式探测」按钮：只在用户已授权时绘制（授权 ≠ 自动探测）。
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeButton {
+    /// 是否绘制（= 配置中该能力已授权）
+    pub visible: bool,
+    pub rect: RECT,
+    pub hovered: bool,
+}
+
+impl ProbeButton {
+    const fn hidden() -> Self {
+        Self {
+            visible: false,
+            rect: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            hovered: false,
+        }
+    }
+
+    fn contains(&self, x: i32, y: i32) -> bool {
+        self.visible
+            && x >= self.rect.left
+            && x <= self.rect.right
+            && y >= self.rect.top
+            && y <= self.rect.bottom
+    }
 }
 
 pub struct FloatingBar {
@@ -154,6 +189,7 @@ impl FloatingBar {
                 language: Language::Auto,
                 producer_rect: RECT::default(),
                 is_producer_hovered: false,
+                probe_buttons: [ProbeButton::hidden(), ProbeButton::hidden()],
             });
 
             set_bar_state(hwnd, Some(&mut *state));
@@ -186,6 +222,7 @@ impl FloatingBar {
         opacity: u8,
         language: Language,
         kind: DialogKind,
+        probe_authorized: [bool; 2],
     ) {
         if candidates.is_empty() {
             self.hide();
@@ -226,6 +263,11 @@ impl FloatingBar {
         self.state.selected_index = 0;
         self.state.hovered_index = None;
         self.state.is_producer_hovered = false;
+        // 审计报告 U-01：按钮是否出现只取决于「用户是否已授权」，授权本身不发起探测。
+        for (idx, authorized) in probe_authorized.iter().enumerate() {
+            self.state.probe_buttons[idx].visible = *authorized;
+            self.state.probe_buttons[idx].hovered = false;
+        }
 
         // 单行紧凑高密度展示，最多展示 8 行
         let visible_items = self.state.candidates.len().min(8) as i32;
@@ -298,6 +340,23 @@ impl FloatingBar {
         unsafe {
             let _ = ShowWindow(self.state.hwnd, SW_HIDE);
         }
+    }
+
+    /// 当前绑定的目标对话框（对话框 / 文件名编辑框 / 对话框类型）。
+    ///
+    /// 供宿主在显式探测取得路径后决定「注入目标」；窗口已销毁或尚未绑定时返回 `None`。
+    pub fn target_dialog(&self) -> Option<(HWND, HWND, DialogKind)> {
+        let dialog = self.state.target_dialog_hwnd;
+        if dialog.0.is_null()
+            || !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(dialog)).as_bool() }
+        {
+            return None;
+        }
+        Some((
+            dialog,
+            self.state.target_edit_hwnd,
+            self.state.target_dialog_kind,
+        ))
     }
 
     pub fn handle_key_nav(&mut self, key_code: u32) -> bool {
@@ -610,8 +669,65 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
         );
 
         // 3.2 绘制左侧主标题与快捷提示（右边界留出安全间距，杜绝重叠）
+        //     若显式探测按钮可见（审计报告 U-01），标题右边界还要让开按钮区。
         let header_left = pad + (6.0 * scale) as i32;
-        let header_right = (prod_left - (16.0 * scale) as i32).max(header_left);
+        let header_height = state.header_height;
+        let mut header_right_limit = prod_left;
+        // 3.1b 显式探测按钮：[TC] [XY] 紧贴出品方左侧，仅授权后出现
+        {
+            let state_mut = &mut *state_ptr;
+            let btn_w = (46.0 * scale).round() as i32;
+            let btn_h = (20.0 * scale).round() as i32;
+            let btn_gap = (6.0 * scale).round() as i32;
+            let btn_top = (header_height - btn_h) / 2;
+            let mut right = prod_left - (12.0 * scale) as i32;
+            // 从右往左排布：数组顺序为 [TotalCmd, XYplorer]，故倒序遍历
+            for idx in (0..state_mut.probe_buttons.len()).rev() {
+                let visible = state_mut.probe_buttons[idx].visible;
+                let rect = RECT {
+                    left: right - btn_w,
+                    top: btn_top,
+                    right,
+                    bottom: btn_top + btn_h,
+                };
+                state_mut.probe_buttons[idx].rect = rect;
+                if !visible {
+                    continue;
+                }
+                header_right_limit = header_right_limit.min(rect.left);
+
+                let hovered = state_mut.probe_buttons[idx].hovered;
+                let bg = if hovered {
+                    COLORREF(0x00453e38)
+                } else {
+                    COLORREF(0x00282424)
+                };
+                let brush = CreateSolidBrush(bg);
+                FillRect(hdc, &rect, brush);
+                let _ = DeleteObject(HGDIOBJ(brush.0 as _));
+
+                SelectObject(hdc, HGDIOBJ(font_tag.0 as _));
+                SetTextColor(
+                    hdc,
+                    if hovered {
+                        COLORREF(0x00ffcd60)
+                    } else {
+                        COLORREF(0x00a49c9c)
+                    },
+                );
+                let label = if idx == 0 { "TC" } else { "XY" };
+                let mut label_buf: Vec<u16> = label.encode_utf16().collect();
+                let mut label_rect = rect;
+                DrawTextW(
+                    hdc,
+                    &mut label_buf,
+                    &mut label_rect,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+                right = rect.left - btn_gap;
+            }
+        }
+        let header_right = (header_right_limit - (16.0 * scale) as i32).max(header_left);
         let mut header_rect = RECT {
             left: header_left,
             top: (2.0 * scale) as i32,
@@ -772,13 +888,15 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
     }
 }
 
-fn translate_source<'a>(source: &str, lang: &'a Language) -> &'a str {
+fn translate_source<'a>(source: &'a str, lang: &'a Language) -> &'a str {
     match source {
         "资源管理器" => I18n::tag_explorer(lang),
         "最近历史" => I18n::tag_history(lang),
         "常用固定" => I18n::tag_pinned(lang),
         "系统目录" => I18n::tag_system(lang),
-        _ => "Explorer",
+        // 未收录的来源（如 "Directory Opus"）直接显示原名：
+        // 旧实现一律回退为 "Explorer"，会把第三方管理器的候选误标成资源管理器。
+        _ => source,
     }
 }
 
@@ -795,6 +913,21 @@ fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
         && y >= state.producer_rect.top
         && y <= state.producer_rect.bottom;
 
+    // 1b. 顶栏显式探测按钮（审计报告 U-01）
+    let mut in_probe_button = false;
+    for idx in 0..state.probe_buttons.len() {
+        let button = state.probe_buttons[idx];
+        let hit = button.contains(x, y);
+        in_probe_button |= hit;
+        if hit != button.hovered {
+            state.probe_buttons[idx].hovered = hit;
+            unsafe {
+                let r = button.rect;
+                let _ = InvalidateRect(Some(hwnd), Some(&r), false);
+            }
+        }
+    }
+
     if in_producer != state.is_producer_hovered {
         state.is_producer_hovered = in_producer;
         unsafe {
@@ -803,7 +936,11 @@ fn handle_mouse_move(hwnd: HWND, x: i32, y: i32) {
         }
     }
 
-    let cursor_id = if in_producer { IDC_HAND } else { IDC_ARROW };
+    let cursor_id = if in_producer || in_probe_button {
+        IDC_HAND
+    } else {
+        IDC_ARROW
+    };
     unsafe {
         let _ = SetCursor(Some(LoadCursorW(None, cursor_id).unwrap_or_default()));
     }
@@ -854,6 +991,21 @@ fn handle_mouse_click(hwnd: HWND, x: i32, y: i32) {
         return;
     }
     let state = unsafe { &mut *state_ptr };
+
+    // 0. 顶栏「显式探测」按钮（审计报告 U-01）：只在用户点击时发起一次探测。
+    //    授权、目标窗口归因、冷却与剪贴板事务的 fail-closed 判定全部在宿主侧复核；
+    //    这里不做任何同步等待，避免卡住吸附条的窗口过程。
+    for idx in 0..state.probe_buttons.len() {
+        if state.probe_buttons[idx].contains(x, y) {
+            let manager = if idx == 0 {
+                crate::managers::explicit_probe::ScriptedManager::TotalCmd
+            } else {
+                crate::managers::explicit_probe::ScriptedManager::XYplorer
+            };
+            crate::request_explicit_probe(manager);
+            return;
+        }
+    }
 
     // 1. 点击顶栏右侧出品方文字 -> 跳转官网 https://qp.yftec.top 并隐藏浮动栏
     if x >= state.producer_rect.left

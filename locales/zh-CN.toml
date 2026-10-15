@@ -60,6 +60,8 @@ toggle_autostart = "开机自启"
 toggle_monitor = "任务栏状态监控"
 settings = "设置中心..."
 exit = "退出 QuickPath"
+probe_totalcmd = "从 TC 获取当前路径"
+probe_xyplorer = "从 XYplorer 获取当前路径"
 
 [monitor]
 tab_general = "常规偏好"
@@ -144,4 +146,15 @@ tips_line2 = "• 按下 Ctrl+Tab 或 Ctrl+Shift+Tab 快捷键可在相邻标签
 unsupported_badge = "系统环境限制"
 unsupported_title = "当前 Windows 系统版本暂不支持多标签增强"
 unsupported_desc = "文件资源管理器多标签增强需要 Windows 11 22H2 (Build 22621) 或更高版本 原生标签架构支持。\n当前检测到您的操作系统为：{os_version}"
+
+[integration]
+tab_title = "管理器联动"
+totalcmd_switch = "实验性：Total Commander 路径探测"
+totalcmd_desc = "手动触发一次；来源无法证明时取消，不覆盖当前内容"
+xyplorer_switch = "实验性：XYplorer 路径探测"
+xyplorer_desc = "手动触发一次；来源无法证明时取消，不覆盖当前内容"
+tips_title = "💡 使用前请先了解"
+tips_line1 = "• 开关只表示“已授权”，不会自行探测"
+tips_line2 = "• 每次都要手动点托盘/吸附条上的「TC」或「XY」"
+tips_line3 = "• 探测会短暂占用剪贴板；来源不可证明时取消并保留你当前复制的内容"
 

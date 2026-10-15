@@ -1,5 +1,6 @@
 pub mod clipboard_probe;
 pub mod dopus;
+pub mod explicit_probe;
 pub mod explorer;
 pub mod ipc;
 pub mod scanner;

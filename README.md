@@ -46,7 +46,7 @@ When working across multiple applications, do you frequently face this frustrati
   - **Smart Tab Deduplication**: Automatically switches focus to existing tabs when navigating to already open folders, eliminating duplicate tabs;
   - **Double-Click Tab to Duplicate**: Double-click any tab on the Explorer tab bar to instantly clone and open the same folder to its right—ideal for side-by-side file organization.
 - **📑 WPS Office Deep Adaptation (Ver 1.1.1 Adaptation)**:
-  Overcomes the longstanding technical barrier of intercepting custom Qt-based owner-drawn file dialogs in WPS Office (Writer, Spreadsheets, Presentation, and PDF across both Personal and Enterprise editions). Features an intelligent main window negation filter to avoid false triggers, combined with native Windows UI Automation (UIA) heuristic scoring and transactional clipboard injection to achieve instant folder switching; the user's typed filename and extension are preserved whenever the clipboard can be fully snapshotted and restored (otherwise the plugin refuses to rewrite the clipboard and falls back to a semantic UIA write).
+  Overcomes the longstanding technical barrier of intercepting custom Qt-based owner-drawn file dialogs in WPS Office (Writer, Spreadsheets, Presentation, and PDF across both Personal and Enterprise editions). Features an intelligent main window negation filter to avoid false triggers, combined with native Windows UI Automation (UIA) heuristic scoring: the path is written through UIA `SetValue` first (never touching the clipboard), and only if that write cannot be verified does QuickPath fall back to a transactional clipboard injection that restores the clipboard atomically; the user's typed filename and extension are preserved, and the plugin refuses to rewrite the clipboard whenever it cannot be fully snapshotted and restored.
 - **📊 Taskbar Hardware Status Monitor (New in Ver 1.1.0)**:
   Ultra-lightweight native hardware dashboard docked right on your Windows taskbar. Displays real-time upload/download speeds, CPU, RAM, dedicated GPU, and Disk I/O across an adaptive 2-row layout. Features crisp Win32 ClearType typography, mini indicator bars, and 3-tier dynamic threshold coloring (Green/Yellow/Red). Supports dual docking modes ("Right of Taskbar" or "Above Taskbar Left Float" to prevent blocking taskbar app buttons) and automatic stealth evasion during full-screen games/media. Consumes $\le 5\text{MB}$ additional RAM when active and drops to absolute 0% CPU & 0 MB footprint when disabled.
 - **🪟 Windows 11 Modern Fluent Design**:
@@ -58,8 +58,7 @@ When working across multiple applications, do you frequently face this frustrati
 - **🔌 Full File Manager Ecosystem Support**:
   - Windows 11 / 10 Native File Explorer (including multi-tab recognition)
   - Directory Opus (DOpus)
-  - Total Commander (TC)
-  - XYplorer
+  - Total Commander (TC) / XYplorer: **experimental, off by default**. Their paths can only be returned through the system clipboard, so QuickPath never probes them in the background. Enable the switch under Settings → Managers, then use **“Get path from TC / XYplorer” in the tray menu or floating bar** to fetch the path once, on demand (a probe cancels itself when the source cannot be proven and never overwrites your clipboard).
 - **💼 Comprehensive Productivity & Creative Suite Compatibility**:
   - WPS Office (Writer, Spreadsheets, Presentation, PDF, Personal & Enterprise editions)
   - Microsoft Office (Word, Excel, PowerPoint)

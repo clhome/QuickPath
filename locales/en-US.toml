@@ -60,6 +60,8 @@ toggle_autostart = "Start on Boot"
 toggle_monitor = "Taskbar Monitor"
 settings = "Settings..."
 exit = "Exit QuickPath"
+probe_totalcmd = "Get path from TC"
+probe_xyplorer = "Get path from XYplorer"
 
 [monitor]
 tab_general = "General"
@@ -144,4 +146,15 @@ tips_line2 = "• Press Ctrl+Tab or Ctrl+Shift+Tab to cycle smoothly through adj
 unsupported_badge = "System Unsupported"
 unsupported_title = "File Explorer Tabs Not Supported on Current Windows"
 unsupported_desc = "Tab Utility requires Windows 11 22H2 (Build 22621) or higher with native Explorer tabs.\nCurrent OS detected: {os_version}"
+
+[integration]
+tab_title = "Managers"
+totalcmd_switch = "Experimental: Total Commander probe"
+totalcmd_desc = "Manual, one-shot; cancels if the source can't be proven"
+xyplorer_switch = "Experimental: XYplorer probe"
+xyplorer_desc = "Manual, one-shot; cancels if the source can't be proven"
+tips_title = "💡 Before enabling"
+tips_line1 = "• The switch only grants permission; it never probes"
+tips_line2 = "• Click “TC” / “XY” in the tray or floating bar to fetch once"
+tips_line3 = "• A probe briefly uses the clipboard and never overwrites it on doubt"
 

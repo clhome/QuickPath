@@ -40,6 +40,8 @@ pub enum SettingsTab {
     General,
     TabModule,
     Monitor,
+    /// 审计报告 U-01：第三方管理器联动（仅授权开关 + 手动触发说明）
+    Integration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +64,13 @@ enum DragMode {
         has_moved: bool,
     },
     MonitorMasterToggle {
+        start_x: i32,
+        initial_state: bool,
+        has_moved: bool,
+    },
+    /// 管理器联动页的授权开关（`which`: 0 = Total Commander，1 = XYplorer）
+    IntegrationToggle {
+        which: usize,
         start_x: i32,
         initial_state: bool,
         has_moved: bool,
@@ -98,6 +107,59 @@ fn set_draft_config(cfg: AppConfig) {
 const HOVER_ID_DEBUG_CHECKBOX: usize = 50;
 const HOVER_ID_LOG_CARD: usize = 51;
 const HOVER_ID_LOG_CLEAR: usize = 52;
+
+/// 顶部 Tab 栏悬停/命中 id（渲染、悬停、点击三处共用）
+const HOVER_ID_TAB_GENERAL: usize = 100;
+const HOVER_ID_TAB_TABMODULE: usize = 102;
+const HOVER_ID_TAB_MONITOR: usize = 101;
+const HOVER_ID_TAB_INTEGRATION: usize = 103;
+/// 管理器联动页的开关卡片 id（`which` 与 `DragMode::IntegrationToggle` 一致）
+const HOVER_ID_INTEGRATION_TC: usize = 70;
+const HOVER_ID_INTEGRATION_XY: usize = 71;
+
+/// 顶部 Tab 栏几何参数（渲染 / 悬停 / 点击共用，避免宽度不一致导致高亮错位）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TabGeometry {
+    top: i32,
+    height: i32,
+    width: i32,
+    gap: i32,
+}
+
+/// 全部 Tab（顺序即绘制顺序）
+const SETTINGS_TABS: [(SettingsTab, usize); 4] = [
+    (SettingsTab::General, HOVER_ID_TAB_GENERAL),
+    (SettingsTab::TabModule, HOVER_ID_TAB_TABMODULE),
+    (SettingsTab::Monitor, HOVER_ID_TAB_MONITOR),
+    (SettingsTab::Integration, HOVER_ID_TAB_INTEGRATION),
+];
+
+fn settings_tab_geometry(scale: f32) -> TabGeometry {
+    TabGeometry {
+        top: (56.0 * scale).round() as i32,
+        height: (30.0 * scale).round() as i32,
+        width: (118.0 * scale).round() as i32,
+        gap: (8.0 * scale).round() as i32,
+    }
+}
+
+fn settings_tab_left(pad_x: i32, geo: &TabGeometry, index: usize) -> i32 {
+    pad_x + index as i32 * (geo.width + geo.gap)
+}
+
+/// 命中测试：返回被点击/悬停的 Tab 悬停 id（不在 Tab 栏范围内时返回 `None`）。
+fn settings_tab_hit(pad_x: i32, geo: &TabGeometry, x: i32, y: i32) -> Option<(usize, SettingsTab)> {
+    if y < geo.top || y > geo.top + geo.height {
+        return None;
+    }
+    for (index, (tab, hover_id)) in SETTINGS_TABS.iter().enumerate() {
+        let left = settings_tab_left(pad_x, geo, index);
+        if x >= left && x <= left + geo.width {
+            return Some((*hover_id, *tab));
+        }
+    }
+    None
+}
 
 /// 最近一次「清理日志」的结果，用于日志卡片的可见反馈（本项目无 Toast 机制，故内联呈现）。
 static LOG_CLEAR_RESULT: Mutex<Option<bool>> = Mutex::new(None);
@@ -588,30 +650,30 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
 
-        // 顶部 Tab 选项卡栏
-        let tab_y = (56.0 * scale).round() as i32;
-        let tab_h = (30.0 * scale).round() as i32;
-        let tab_w = (118.0 * scale).round() as i32;
-        let tab_gap = (8.0 * scale).round() as i32;
+        // 顶部 Tab 选项卡栏（几何与命中测试共享 `settings_tab_geometry`）
+        let tab_geo = settings_tab_geometry(scale);
+        let tab_y = tab_geo.top;
+        let tab_h = tab_geo.height;
         let label_tabs = if bundle.meta.code.starts_with("zh") {
             "多标签增强"
         } else {
             "Tab Utility"
         };
+        let integration_texts = I18n::integration_texts(&config.language);
         render_segmented_tabs(
             hdc,
             pad_x,
-            tab_y,
-            tab_w,
-            tab_h,
-            tab_gap,
+            &tab_geo,
             scale,
             current_tab,
             hovered,
             font_card_title,
-            &bundle.monitor.tab_general,
-            label_tabs,
-            &bundle.monitor.tab_monitor,
+            [
+                &bundle.monitor.tab_general,
+                label_tabs,
+                &bundle.monitor.tab_monitor,
+                &integration_texts.tab_title,
+            ],
         );
 
         // 细微分割线
@@ -944,7 +1006,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     // 卡片 3：操作指南与实用技巧 (Card T3: High-Efficiency Tips Card)
                     let card3_top = card2_top + card2_h + card_gap;
                     let card3_h = (68.0 * scale).round() as i32;
-                    render_tab_tips_card(
+                    render_tips_card(
                         hdc,
                         pad_x,
                         card3_top,
@@ -953,7 +1015,11 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                         scale,
                         font_card_title,
                         font_small,
-                        bundle,
+                        &bundle.tab_module.tips_title,
+                        &[
+                            bundle.tab_module.tips_line1.as_str(),
+                            bundle.tab_module.tips_line2.as_str(),
+                        ],
                         config.tab_module.enabled,
                     );
                 }
@@ -1027,6 +1093,68 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     font_card_title,
                     font_small,
                     bundle,
+                );
+            }
+            SettingsTab::Integration => {
+                // 审计报告 U-01：开关只表示「已授权」，必须配合手动触发才能探测。
+                let texts = I18n::integration_texts(&config.language);
+                let card_h = (56.0 * scale).round() as i32;
+
+                let card_i0_top = card_top_base;
+                render_toggle_card(
+                    hdc,
+                    pad_x,
+                    card_i0_top,
+                    pad_x + card_w,
+                    card_i0_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &texts.totalcmd_switch,
+                    &texts.totalcmd_desc,
+                    config.enable_totalcmd,
+                    &bundle.settings.status_enabled,
+                    &bundle.settings.status_disabled,
+                    hovered == Some(HOVER_ID_INTEGRATION_TC),
+                );
+
+                let card_i1_top = card_i0_top + card_h + card_gap;
+                render_toggle_card(
+                    hdc,
+                    pad_x,
+                    card_i1_top,
+                    pad_x + card_w,
+                    card_i1_top + card_h,
+                    scale,
+                    font_card_title,
+                    font_text,
+                    &texts.xyplorer_switch,
+                    &texts.xyplorer_desc,
+                    config.enable_xyplorer,
+                    &bundle.settings.status_enabled,
+                    &bundle.settings.status_disabled,
+                    hovered == Some(HOVER_ID_INTEGRATION_XY),
+                );
+
+                // 风险与使用方式提示（报告 §2.3 第 2 条：开关旁必须明确提示）
+                let card_i2_top = card_i1_top + card_h + card_gap;
+                let card_i2_h = (92.0 * scale).round() as i32;
+                render_tips_card(
+                    hdc,
+                    pad_x,
+                    card_i2_top,
+                    pad_x + card_w,
+                    card_i2_top + card_i2_h,
+                    scale,
+                    font_card_title,
+                    font_small,
+                    &texts.tips_title,
+                    &[
+                        texts.tips_line1.as_str(),
+                        texts.tips_line2.as_str(),
+                        texts.tips_line3.as_str(),
+                    ],
+                    config.enable_totalcmd || config.enable_xyplorer,
                 );
             }
         }
@@ -2560,7 +2688,11 @@ unsafe fn render_tab_group_card(
 }
 
 /// 辅助渲染多标签页高效技巧指南卡片 (Tips Card)
-unsafe fn render_tab_tips_card(
+/// 渲染底部「提示卡片」：标题 + 若干单行提示（空行自动跳过）。
+///
+/// 审计报告 U-01 要求开关旁必须有风险提示，因此提示卡改为**通用**实现，
+/// Tab 增强页与管理器联动页共用（避免为每个页面各写一份绘制代码）。
+unsafe fn render_tips_card(
     hdc: HDC,
     left: i32,
     top: i32,
@@ -2569,7 +2701,8 @@ unsafe fn render_tab_tips_card(
     scale: f32,
     font_bold: windows::Win32::Graphics::Gdi::HFONT,
     font_small: windows::Win32::Graphics::Gdi::HFONT,
-    bundle: &crate::rules::LocaleBundle,
+    title_text: &str,
+    lines: &[&str],
     is_master_enabled: bool,
 ) {
     unsafe {
@@ -2598,11 +2731,6 @@ unsafe fn render_tab_tips_card(
             COLORREF(0x003e6845)
         };
         SetTextColor(hdc, title_color);
-        let title_text = if !bundle.tab_module.tips_title.is_empty() {
-            bundle.tab_module.tips_title.as_str()
-        } else {
-            "💡 高效操作技巧指南"
-        };
         let mut title_buf: Vec<u16> = title_text.encode_utf16().collect();
         let mut title_rect = RECT {
             left: inner_x,
@@ -2625,76 +2753,49 @@ unsafe fn render_tab_tips_card(
         };
         SetTextColor(hdc, line_color);
 
-        let line1 = if !bundle.tab_module.tips_line1.is_empty() {
-            bundle.tab_module.tips_line1.as_str()
-        } else {
-            "• 鼠标中键单击标签页可快速关闭"
-        };
-        let mut l1_buf: Vec<u16> = line1.encode_utf16().collect();
-        let mut l1_rect = RECT {
-            left: inner_x,
-            top: top + (28.0 * scale).round() as i32,
-            right: right - (16.0 * scale).round() as i32,
-            bottom: top + (45.0 * scale).round() as i32,
-        };
-        DrawTextW(
-            hdc,
-            &mut l1_buf,
-            &mut l1_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-
-        let line2 = if !bundle.tab_module.tips_line2.is_empty() {
-            bundle.tab_module.tips_line2.as_str()
-        } else {
-            "• 按下 Ctrl+Tab 或 Ctrl+Shift+Tab 快捷键可在相邻标签页之间顺畅正反向轮转"
-        };
-        let mut l2_buf: Vec<u16> = line2.encode_utf16().collect();
-        let mut l2_rect = RECT {
-            left: inner_x,
-            top: top + (46.0 * scale).round() as i32,
-            right: right - (16.0 * scale).round() as i32,
-            bottom: top + (63.0 * scale).round() as i32,
-        };
-        DrawTextW(
-            hdc,
-            &mut l2_buf,
-            &mut l2_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
+        for (idx, line) in lines.iter().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+            let row_top = top + (28.0 * scale).round() as i32 + idx as i32 * (18.0 * scale) as i32;
+            let mut line_buf: Vec<u16> = line.encode_utf16().collect();
+            let mut line_rect = RECT {
+                left: inner_x,
+                top: row_top,
+                right: right - (16.0 * scale).round() as i32,
+                bottom: row_top + (17.0 * scale).round() as i32,
+            };
+            DrawTextW(
+                hdc,
+                &mut line_buf,
+                &mut line_rect,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
     }
 }
 
 /// 辅助渲染 Fluent 胶囊 Tab 切换栏
 unsafe fn render_segmented_tabs(
     hdc: HDC,
-    left: i32,
-    top: i32,
-    tab_w: i32,
-    tab_h: i32,
-    gap: i32,
+    pad_x: i32,
+    geo: &TabGeometry,
     scale: f32,
     current_tab: SettingsTab,
     hovered: Option<usize>,
     font: windows::Win32::Graphics::Gdi::HFONT,
-    label_general: &str,
-    label_tabs: &str,
-    label_monitor: &str,
+    labels: [&str; 4],
 ) {
     unsafe {
-        let tabs = [
-            (0usize, SettingsTab::General, label_general, 100usize),
-            (1usize, SettingsTab::TabModule, label_tabs, 102usize),
-            (2usize, SettingsTab::Monitor, label_monitor, 101usize),
-        ];
+        for (idx, (tab_type, hov_id)) in SETTINGS_TABS.iter().enumerate() {
+            let label = labels[idx];
+            let tab_left = settings_tab_left(pad_x, geo, idx);
+            let tab_right = tab_left + geo.width;
+            let top = geo.top;
+            let tab_bottom = top + geo.height;
 
-        for (idx, tab_type, label, hov_id) in tabs {
-            let tab_left = left + idx as i32 * (tab_w + gap);
-            let tab_right = tab_left + tab_w;
-            let tab_bottom = top + tab_h;
-
-            let is_active = current_tab == tab_type;
-            let is_hov = hovered == Some(hov_id);
+            let is_active = current_tab == *tab_type;
+            let is_hov = hovered == Some(*hov_id);
 
             let (bg, border, text_color) = if is_active {
                 (
@@ -3404,11 +3505,10 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let card_w = rect.right - pad_x * 2;
     let card_gap = (8.0 * scale).round() as i32;
 
-    // 顶部 Tab 栏坐标
-    let tab_y = (56.0 * scale).round() as i32;
-    let tab_h = (30.0 * scale).round() as i32;
-    let tab_w = (136.0 * scale).round() as i32;
-    let tab_gap = (8.0 * scale).round() as i32;
+    // 顶部 Tab 栏坐标（与渲染/点击共享同一几何）
+    let tab_geo = settings_tab_geometry(scale);
+    let tab_y = tab_geo.top;
+    let tab_h = tab_geo.height;
     let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
     let card_top_base = line_y + (10.0 * scale).round() as i32;
 
@@ -3621,6 +3721,42 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
                 return;
             }
+            DragMode::IntegrationToggle {
+                which,
+                start_x,
+                initial_state,
+                ref mut has_moved,
+            } => {
+                let dx = x - start_x;
+                if dx.abs() > 4 {
+                    *has_moved = true;
+                }
+                let new_state = if dx > 8 {
+                    true
+                } else if dx < -8 {
+                    false
+                } else {
+                    initial_state
+                };
+                let mut config = get_draft_config();
+                let current = if which == 0 {
+                    config.enable_totalcmd
+                } else {
+                    config.enable_xyplorer
+                };
+                if current != new_state {
+                    if which == 0 {
+                        config.enable_totalcmd = new_state;
+                    } else {
+                        config.enable_xyplorer = new_state;
+                    }
+                    set_draft_config(config);
+                    unsafe {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+                return;
+            }
             DragMode::MonitorOpacitySlider => {
                 let slider_w = (140.0 * scale).round() as i32;
                 let right_pad = (18.0 * scale).round() as i32;
@@ -3650,22 +3786,9 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
     let mut is_pointer = false;
 
     // 1. 顶部 Tab 选项卡检测
-    if y >= tab_y && y <= tab_y + tab_h {
-        let tab0_r = pad_x + tab_w;
-        let tab1_l = tab0_r + tab_gap;
-        let tab1_r = tab1_l + tab_w;
-        let tab2_l = tab1_r + tab_gap;
-        let tab2_r = tab2_l + tab_w;
-        if x >= pad_x && x <= tab0_r {
-            new_hover = Some(100);
-            is_pointer = true;
-        } else if x >= tab1_l && x <= tab1_r {
-            new_hover = Some(102);
-            is_pointer = true;
-        } else if x >= tab2_l && x <= tab2_r {
-            new_hover = Some(101);
-            is_pointer = true;
-        }
+    if let Some((hover_id, _)) = settings_tab_hit(pad_x, &tab_geo, x, y) {
+        new_hover = Some(hover_id);
+        is_pointer = true;
     }
 
     // 2. 根据 Tab 内容检测卡片与交互控件
@@ -3900,6 +4023,21 @@ fn handle_settings_mouse_move(hwnd: HWND, x: i32, y: i32) {
                 }
             }
         }
+        SettingsTab::Integration => {
+            // 审计报告 U-01：两个授权开关卡片
+            let card_h = (56.0 * scale).round() as i32;
+            let card_i0_top = card_top_base;
+            let card_i1_top = card_i0_top + card_h + card_gap;
+            if x >= pad_x && x <= pad_x + card_w {
+                if y >= card_i0_top && y <= card_i0_top + card_h {
+                    new_hover = Some(HOVER_ID_INTEGRATION_TC);
+                    is_pointer = true;
+                } else if y >= card_i1_top && y <= card_i1_top + card_h {
+                    new_hover = Some(HOVER_ID_INTEGRATION_XY);
+                    is_pointer = true;
+                }
+            }
+        }
     }
 
     // 3. 底部确定与取消按钮检测
@@ -3964,10 +4102,10 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
     let card_w = rect.right - pad_x * 2;
     let card_gap = (8.0 * scale).round() as i32;
 
-    let tab_y = (56.0 * scale).round() as i32;
-    let tab_h = (30.0 * scale).round() as i32;
-    let tab_w = (118.0 * scale).round() as i32;
-    let tab_gap = (8.0 * scale).round() as i32;
+    // 顶部 Tab 栏坐标（与渲染/悬停共享同一几何）
+    let tab_geo = settings_tab_geometry(scale);
+    let tab_y = tab_geo.top;
+    let tab_h = tab_geo.height;
     let line_y = tab_y + tab_h + (8.0 * scale).round() as i32;
     let card_top_base = line_y + (10.0 * scale).round() as i32;
 
@@ -3976,47 +4114,18 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
         .map(|t| *t)
         .unwrap_or(SettingsTab::General);
 
-    // 1. 顶部 Tab 选项卡点击
-    if y >= tab_y && y <= tab_y + tab_h {
-        let tab0_r = pad_x + tab_w;
-        let tab1_l = tab0_r + tab_gap;
-        let tab1_r = tab1_l + tab_w;
-        let tab2_l = tab1_r + tab_gap;
-        let tab2_r = tab2_l + tab_w;
-        if x >= pad_x && x <= tab0_r {
-            if let Ok(mut t) = CURRENT_TAB.lock() {
-                *t = SettingsTab::General;
-            }
-            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                let _ = UpdateWindow(hwnd);
-            }
-            return;
-        } else if x >= tab1_l && x <= tab1_r {
-            if let Ok(mut t) = CURRENT_TAB.lock() {
-                *t = SettingsTab::TabModule;
-            }
-            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                let _ = UpdateWindow(hwnd);
-            }
-            return;
-        } else if x >= tab2_l && x <= tab2_r {
-            if let Ok(mut t) = CURRENT_TAB.lock() {
-                *t = SettingsTab::Monitor;
-            }
-            IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
-            IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
-            unsafe {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                let _ = UpdateWindow(hwnd);
-            }
-            return;
+    // 1. 顶部 Tab 选项卡点击（几何与渲染完全一致，避免“点 A 高亮 B”）
+    if let Some((_, tab)) = settings_tab_hit(pad_x, &tab_geo, x, y) {
+        if let Ok(mut t) = CURRENT_TAB.lock() {
+            *t = tab;
         }
+        IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
+        IS_DROPDOWN_OPEN.store(false, Ordering::SeqCst);
+        unsafe {
+            let _ = InvalidateRect(Some(hwnd), None, false);
+            let _ = UpdateWindow(hwnd);
+        }
+        return;
     }
 
     // 2. 根据 Tab 内容分流处理
@@ -4458,6 +4567,48 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 }
             }
         }
+        SettingsTab::Integration => {
+            // 审计报告 U-01：点击授权开关卡片即切换草稿配置（与其它 Toggle 卡片一致），
+            // 但**仅写入配置**，不触发任何探测。
+            let card_h = (56.0 * scale).round() as i32;
+            let card_i0_top = card_top_base;
+            let card_i1_top = card_i0_top + card_h + card_gap;
+            if x >= pad_x && x <= pad_x + card_w {
+                let which = if y >= card_i0_top && y <= card_i0_top + card_h {
+                    Some(0usize)
+                } else if y >= card_i1_top && y <= card_i1_top + card_h {
+                    Some(1usize)
+                } else {
+                    None
+                };
+                if let Some(which) = which {
+                    let old_state = if which == 0 {
+                        config.enable_totalcmd
+                    } else {
+                        config.enable_xyplorer
+                    };
+                    if which == 0 {
+                        config.enable_totalcmd = !old_state;
+                    } else {
+                        config.enable_xyplorer = !old_state;
+                    }
+                    set_draft_config(config.clone());
+                    need_redraw = true;
+
+                    if let Ok(mut drag) = DRAG_MODE.lock() {
+                        *drag = DragMode::IntegrationToggle {
+                            which,
+                            start_x: x,
+                            initial_state: old_state,
+                            has_moved: false,
+                        };
+                    }
+                    unsafe {
+                        let _ = SetCapture(hwnd);
+                    }
+                }
+            }
+        }
     }
 
     // 3. 底部「确定」与「取消」按钮点击处理（通用）
@@ -4516,6 +4667,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn test_about_os_version_rendering() {
@@ -4698,5 +4850,160 @@ mod tests {
         assert_eq!(general_footer_hit(pad_x - 1, clear_cy, &layout), None);
         // 清理按钮与调试开关命中 id 必须不同，否则点清理会误触调试开关。
         assert_ne!(HOVER_ID_LOG_CLEAR, HOVER_ID_DEBUG_CHECKBOX);
+    }
+
+    /// 审计报告 U-01：管理器联动页的文案必须在两个语言包中都非空。
+    #[test]
+    fn test_integration_settings_i18n_present_in_both_locales() {
+        let bundles = crate::rules::I18n::get_bundles();
+        let zh = bundles.get("zh-CN").expect("zh-CN bundle should exist");
+        let en = bundles.get("en-US").expect("en-US bundle should exist");
+
+        for (name, section) in [("zh-CN", &zh.integration), ("en-US", &en.integration)] {
+            for (field, value) in [
+                ("tab_title", &section.tab_title),
+                ("totalcmd_switch", &section.totalcmd_switch),
+                ("totalcmd_desc", &section.totalcmd_desc),
+                ("xyplorer_switch", &section.xyplorer_switch),
+                ("xyplorer_desc", &section.xyplorer_desc),
+                ("tips_title", &section.tips_title),
+                ("tips_line1", &section.tips_line1),
+                ("tips_line2", &section.tips_line2),
+                ("tips_line3", &section.tips_line3),
+            ] {
+                assert!(
+                    !value.trim().is_empty(),
+                    "{name} 语言包的 integration.{field} 不得为空"
+                );
+            }
+        }
+        assert!(
+            zh.integration.tips_line3.contains("不覆盖")
+                || zh.integration.tips_line3.contains("保留"),
+            "中文提示必须说清“来源不可证明时取消、不覆盖当前剪贴板”"
+        );
+
+        // 解析后的文案必须真的被回退逻辑补上（且两语言不同，避免英文界面出现中文）
+        let zh_texts = crate::rules::I18n::integration_texts(&crate::rules::Language::ZhCN);
+        let en_texts = crate::rules::I18n::integration_texts(&crate::rules::Language::EnUS);
+        assert_eq!(zh_texts.tab_title, zh.integration.tab_title);
+        assert_eq!(en_texts.tab_title, en.integration.tab_title);
+        assert_ne!(zh_texts.tab_title, en_texts.tab_title);
+        assert_ne!(zh_texts.totalcmd_desc, en_texts.totalcmd_desc);
+    }
+
+    /// 审计报告 U-01：新增的第四个 Tab 必须与渲染、悬停、点击共用同一几何，
+    /// 否则会出现“点 A 高亮 B”（旧代码渲染宽 118、悬停宽 136 就已错位）。
+    #[test]
+    fn test_settings_tab_geometry_and_hit_testing_are_consistent() {
+        let scale = 1.0;
+        let pad_x = 28;
+        let geo = settings_tab_geometry(scale);
+        let cy = geo.top + geo.height / 2;
+
+        for (index, (tab, hover_id)) in SETTINGS_TABS.iter().enumerate() {
+            let left = settings_tab_left(pad_x, &geo, index);
+            assert_eq!(
+                settings_tab_hit(pad_x, &geo, left + geo.width / 2, cy),
+                Some((*hover_id, *tab)),
+                "第 {} 个 Tab 的命中结果必须与其自身一致",
+                index
+            );
+        }
+
+        // 四个 Tab 必须互不重叠：每个 Tab 右边界之后的第一个像素属于下一个 Tab。
+        for index in 0..SETTINGS_TABS.len() - 1 {
+            let left = settings_tab_left(pad_x, &geo, index);
+            let next_left = settings_tab_left(pad_x, &geo, index + 1);
+            assert!(
+                next_left >= left + geo.width,
+                "Tab 之间不得重叠（否则点击会落到错误的页面）"
+            );
+            assert_eq!(
+                settings_tab_hit(pad_x, &geo, next_left, cy).map(|(_, t)| t),
+                Some(SETTINGS_TABS[index + 1].0)
+            );
+        }
+
+        // Tab 栏之外不得命中任何 Tab
+        assert_eq!(settings_tab_hit(pad_x, &geo, pad_x, geo.top - 1), None);
+        assert_eq!(
+            settings_tab_hit(pad_x, &geo, pad_x, geo.top + geo.height + 1),
+            None
+        );
+        let last_right = settings_tab_left(pad_x, &geo, SETTINGS_TABS.len() - 1) + geo.width;
+        assert_eq!(settings_tab_hit(pad_x, &geo, last_right + 1, cy), None);
+    }
+
+    /// 审计报告 U-01 验收标准 2：设置界面必须能开启/关闭并持久化两个字段。
+    ///
+    /// 设置页只写**草稿配置**（点“确定”才落盘），绝不从设置页发起探测：
+    /// 因此这里同时守住“设置页不得调用探测入口”这条边界。
+    #[test]
+    fn test_integration_settings_source_guard() {
+        const SOURCE: &str = include_str!("settings.rs");
+        let production = &SOURCE[..SOURCE.find("#[cfg(test)]").expect("必须存在测试模块")];
+
+        for required in [
+            "HOVER_ID_INTEGRATION_TC",
+            "HOVER_ID_INTEGRATION_XY",
+            "DragMode::IntegrationToggle",
+            "config.enable_totalcmd = !old_state",
+            "config.enable_xyplorer = !old_state",
+        ] {
+            assert!(
+                production.contains(required),
+                "设置页必须提供两个授权开关（缺少 `{}`）",
+                required
+            );
+        }
+        assert!(
+            !production.contains("request_explicit_probe"),
+            "设置页只授权，绝不发起探测（探测只能来自托盘菜单 / 吸附条按钮）"
+        );
+    }
+
+    /// 审计报告 U-01 验收标准 7：两个管理器都要有 UI + 配置 + 调用链覆盖。
+    ///
+    /// 这里守住“UI 入口 → 宿主探测入口”的调用链：托盘菜单与吸附条按钮都必须接到
+    /// `request_explicit_probe`，且托盘菜单在未授权/无目标时必须置灰。
+    #[test]
+    fn test_explicit_probe_call_chain_is_wired_from_ui() {
+        const MAIN_SRC: &str = include_str!("../main.rs");
+        const BAR_SRC: &str = include_str!("floating_bar.rs");
+        const TRAY_SRC: &str = include_str!("tray.rs");
+
+        assert!(
+            MAIN_SRC.contains("IDM_PROBE_TOTALCMD =>")
+                && MAIN_SRC.contains("IDM_PROBE_XYPLORER =>"),
+            "托盘菜单的两个探测项必须接到宿主处理分支"
+        );
+        // 源码断言需对 rustfmt（换行/缩进）鲁棒：先折叠空白再比对
+        let main_norm = MAIN_SRC.split_whitespace().collect::<Vec<_>>().join(" ");
+        for manager in ["TotalCmd", "XYplorer"] {
+            let expected = format!(
+                "request_explicit_probe(managers::explicit_probe::ScriptedManager::{});",
+                manager
+            );
+            assert!(
+                main_norm.contains(&expected),
+                "{} 菜单项必须调用显式探测入口（缺少 `{}`）",
+                manager,
+                expected
+            );
+        }
+        assert!(
+            BAR_SRC.contains("crate::request_explicit_probe(manager)"),
+            "吸附条按钮必须调用显式探测入口"
+        );
+        assert!(
+            BAR_SRC.contains("ScriptedManager::TotalCmd")
+                && BAR_SRC.contains("ScriptedManager::XYplorer"),
+            "吸附条必须分别提供 TC 与 XYplorer 两个入口"
+        );
+        assert!(
+            TRAY_SRC.contains("MF_GRAYED"),
+            "托盘菜单在未授权或无可归因目标时必须置灰"
+        );
     }
 }

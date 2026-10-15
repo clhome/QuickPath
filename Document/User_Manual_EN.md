@@ -137,6 +137,8 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 ### 4.3 IME Guard & Filename Preservation (ImeGuard)
 - **Input Method Editor Guard (ImeGuard)**:
   When communicating with Win32 edit and address bar controls, QuickPath suspends the active thread's IME candidate window for microseconds and restores it immediately upon injection. This prevents Chinese, Japanese, or third-party IMEs from producing pinyin letter sequences or corrupted characters;
+- **Write order for WPS owner-drawn dialogs (matches the implementation)**:
+  For WPS-style Qt owner-drawn dialogs that expose no native Win32 control handles, QuickPath writes the path through UIA `SetValue` **first — without touching the system clipboard at all**. Only when that write cannot be verified does it fall back to a transactional clipboard injection that restores the clipboard atomically. Either way, `Enter` is sent only after a successful read-back;
 - **Intelligent Filename Preservation**:
   In "Save As" scenarios where you have already typed a custom filename (e.g., `Financial_Report_Q4.xlsx`), QuickPath isolates the filename, synchronizes only the target directory, and **never clears or overwrites your filename**.
 
@@ -147,8 +149,8 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 | **Windows 11 File Explorer** | Native **Multi-Tab** recognition. Overcomes legacy COM limitations to pinpoint the currently focused tab |
 | **Windows 10 File Explorer** | Full support for standard single-window `CabinetWClass` enumeration |
 | **Directory Opus (DOpus)** | Bridges via `dopusrt` command-line IPC to retrieve active Lister paths in milliseconds |
-| **Total Commander (TC)** | Auto-detects active pane paths via window messages, restoring clipboard state seamlessly |
-| **XYplorer** | Uses `WM_COPYDATA` scripting interface for zero-delay path extraction |
+| **Total Commander (TC)** | **Experimental and off by default.** Its path can only be returned through the system clipboard, so QuickPath never probes it in the background. Enable it in Settings → Managers, then use **“Get path from TC” in the tray menu or floating bar** to fetch the path once, on demand. Each probe snapshots the clipboard first, and cancels itself (without overwriting your current clipboard) whenever the source cannot be proven — e.g. a concurrent copy, a missing update event or an unknown owner |
+| **XYplorer** | **Experimental and off by default**, same rules as Total Commander: authorize in Settings → Managers, then trigger “Get path from XYplorer” manually |
 
 ### 4.5 Taskbar Hardware Status Monitor (New in Ver 1.1.0)
 
@@ -363,6 +365,10 @@ Settings are serialized in standard JSON format:
     "C:\\Users\\Public\\Downloads"
   ],
   "history_folders": [],
+  "enable_win11_tabs": true,
+  "enable_dopus": true,
+  "enable_totalcmd": false,
+  "enable_xyplorer": false,
   "tab_module": {
     "enabled": true,
     "wine_to_tab": true,
@@ -383,6 +389,15 @@ Settings are serialized in standard JSON format:
   }
 }
 ```
+
+#### Experimental Clipboard-Based Probes (Total Commander / XYplorer)
+
+| Property | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enable_totalcmd` | boolean | `false` | Authorizes the Total Commander clipboard-based probe. **Granting permission never triggers a probe by itself**: the path is only fetched when you click “Get path from TC” in the tray menu or the floating bar. The same applies to `enable_xyplorer` |
+| `enable_xyplorer` | boolean | `false` | Authorizes the XYplorer clipboard-based probe (same rules as above) |
+
+A probe briefly uses the system clipboard and restores it afterwards. If the source of the update cannot be proven (concurrent copy, missing update notification, unknown owner, timeout), QuickPath cancels the probe and **never overwrites what you currently have on the clipboard**. If you upgrade from an older version, both switches are migrated to `false` once.
 
 #### File Explorer Tab Utility Configuration Properties (New in Ver 1.2.0)
 | Property | Type | Default | Description |
