@@ -3,10 +3,12 @@
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::WM_COMMAND;
 
-use super::clipboard_probe::{log_probe_abort, log_restore_outcome, probe_panel_path};
+use super::clipboard_probe::{
+    log_lease_rejected, log_probe_abort, log_restore_outcome, probe_panel_path,
+};
 use super::explicit_probe::{ExplicitProbeOutcome, TargetWindow, verify_target};
 use super::ipc::{self, Manager};
-use crate::win32::clipboard::ClipboardTransaction;
+use crate::win32::clipboard::{ClipboardSafetyError, ClipboardTransaction};
 
 const CM_COPY_SRC_PATH_TO_CLIP: usize = 2029;
 
@@ -30,13 +32,22 @@ pub fn probe_explicit_target(target: &TargetWindow) -> ExplicitProbeOutcome {
         return ExplicitProbeOutcome::NoForegroundTarget;
     }
 
-    // 安全守卫：探测前开启剪贴板事务（完整快照，含文件列表 CF_HDROP、截图位图等）。
-    // 若剪贴板被占用或关键格式无法保真备份，宁可放弃扫描，绝不破坏用户剪贴板！
+    // 安全守卫:探测前开启剪贴板事务(完整快照,含文件列表 CF_HDROP、截图位图等)。
+    // 若剪贴板被占用或关键格式无法保真备份,宁可放弃扫描,绝不破坏用户剪贴板!
+    //
+    // 审计报告 P0-07:事务构造内部会取得**进程级独占 lease**;
+    // `AlreadyInUse` 表示已有一次剪贴板事务(WPS 注入 / 另一次探测)在进行,
+    // 必须映射为 `AlreadyRunning` 而不是 `NoPath` —— 否则会污染管理器失败冷却,
+    // 且给出误导性的“超时/来源不可证明”提示。
     let mut tx = match ClipboardTransaction::begin() {
         Ok(tx) => tx,
+        Err(ClipboardSafetyError::AlreadyInUse) => {
+            log_lease_rejected("totalcmd");
+            return ExplicitProbeOutcome::AlreadyRunning;
+        }
         Err(err) => {
             crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_PROBE_UNAVAILABLE(totalcmd): 无法开启剪贴板事务({:?})，本次显式探测未执行",
+                "CLIPBOARD_PROBE_UNAVAILABLE(totalcmd): 无法开启剪贴板事务({:?}),本次显式探测未执行",
                 err
             ));
             return ExplicitProbeOutcome::NoPath;

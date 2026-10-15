@@ -119,7 +119,8 @@ QuickPath includes a modern Fluent **four-tab** card-based Settings Center:
 - **"Managers" Tab (New in Ver 1.2.3)**:
   - Two authorization switches (Total Commander / XYplorer), **off by default**: turning a switch on never probes and never touches the system clipboard;
   - One-shot triggers: the **tray menu** (requires that manager's window to be in the foreground, otherwise the item is grayed) or the `[TC]` / `[XY]` buttons in the **floating bar** header (bound to the current dialog-open event, not a strict foreground trigger);
-  - Both entries are grayed while a probe is in flight (only one probe may run at a time); on cancel / timeout / unprovable source **no old snapshot is restored** over your current clipboard, and a tray balloon reports the outcome;
+  - **Only one clipboard transaction may run at a time**: explicit probes and WPS injection / filename restore share a single process-wide exclusive lease held by the clipboard transaction itself; a conflicting request is rejected outright and **never touches the clipboard**. Both entries are grayed while a probe or injection is in flight (the floating-bar button shows `...`); on cancel / timeout / unprovable source **no old snapshot is restored** over your current clipboard, and a tray balloon reports the outcome;
+  - Only one WPS injection may run at a time: repeated triggers on the same dialog are de-duplicated (no double Enter, no wrong-directory navigation);
 ![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
 
 ---

@@ -98,11 +98,11 @@ impl ProbeButton {
         }
     }
 
-    /// 命中测试：探测进行中（P0-06 lease 已被占用）时一律不响应，
+    /// 命中测试:探测进行中(剪贴板事务独占 lease 已被占用)时一律不响应,
     /// 即使绘制态尚未刷新也不会发起第二个请求。
     fn contains(&self, x: i32, y: i32) -> bool {
         self.visible
-            && !crate::managers::probe_lease::is_in_flight()
+            && !crate::win32::clipboard::is_transaction_in_flight()
             && x >= self.rect.left
             && x <= self.rect.right
             && y >= self.rect.top
@@ -715,7 +715,7 @@ unsafe fn render_floating_bar(hwnd: HWND, hdc: HDC) {
                 }
                 header_right_limit = header_right_limit.min(rect.left);
 
-                let in_flight = crate::managers::probe_lease::is_in_flight();
+                let in_flight = crate::win32::clipboard::is_transaction_in_flight();
                 let hovered = state_mut.probe_buttons[idx].hovered && !in_flight;
                 let bg = if in_flight {
                     COLORREF(0x001a1a1a)

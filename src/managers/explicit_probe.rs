@@ -9,11 +9,12 @@
 //! 2. 每次探测都必须可追溯到一次用户点击（托盘菜单 / 悬浮吸附条按钮），且目标窗口
 //!    只能来自**触发事件那一刻冻结的不可变快照**（`TriggerSnapshot`），不再有
 //!    「600 秒内曾在前台」这类墙钟回退（审计报告 U-01A）；
-//! 3. 探测的**整个生命周期**（快照 → 清空 → 请求管理器 → 读回 → 恢复）由进程级
-//!    独占 lease 保护（审计报告 P0-06），拿不到 lease 立即返回 `AlreadyRunning`
-//!    且零剪贴板触碰；
-//! 4. 剪贴板事务的 fail-closed 检查（唯一事件 / sequence / owner / 事件环完整性 /
-//!    失败后不恢复）全部保持不变，仍由 `ClipboardTransaction` 承载。
+//! 3. 探测的**整个生命周期**(快照 → 清空 → 请求管理器 → 读回 → 恢复)与所有其它
+//!    剪贴板事务(WPS 粘帖板兜底 / 文件名恢复)**共用同一个进程级独占 lease**
+//!    (审计报告 P0-06 → P0-07);lease 由 `ClipboardTransaction` 自持,拿不到时
+//!    事务构造返回 `AlreadyInUse`,本模块映射为 `AlreadyRunning` 且零剪贴板触碰;
+//! 4. 剪贴板事务的 fail-closed 检查(唯一事件 / sequence / owner / 事件环完整性 /
+//!    失败后不恢复)全部保持不变,仍由 `ClipboardTransaction` 承载。
 //!
 //! ## 触发口径（两类入口刻意不同，文档必须如实标注）
 //!
@@ -34,7 +35,6 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, IsWindow, IsWindowVisible};
 
 use super::ipc::{self, Manager};
-use super::probe_lease::ProbeLease;
 
 /// 可显式触发的管理器（仅限「只能靠系统剪贴板回传路径」的两个）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,8 @@ pub enum ExplicitProbeOutcome {
     NoForegroundTarget,
     /// 处于上次失败后的冷却窗口
     CoolingDown,
-    /// **已有一次显式探测正在进行**（进程级独占 lease 拒绝，P0-06）
+    /// **已有一次剪贴板事务正在进行**(进程级独占 lease 拒绝,P0-06 → P0-07:
+    /// 现在由 `ClipboardTransaction` 自持,因此 WPS 事务也会挡住本探测)
     AlreadyRunning,
     /// 探测已执行，但未取得可证明的路径（超时 / 来源不可证明 / 归属丢失）
     NoPath,
@@ -316,13 +317,18 @@ fn identify(hwnd: HWND, manager: ScriptedManager) -> Option<TargetWindow> {
     })
 }
 
-/// 用户显式触发一次探测（唯一入口）：消费一份**不可变触发快照**。
+/// 用户显式触发一次探测(唯一入口):消费一份**不可变触发快照**。
 ///
-/// `authorized` 来自配置开关（只表示用户已授权）；**授权本身绝不触发任何探测**。
+/// `authorized` 来自配置开关(只表示用户已授权);**授权本身绝不触发任何探测**。
 ///
-/// 顺序（每一步都不得越前）：
-/// 1. 授权闸门 → 2. 失败冷却 → 3. **进程级独占 lease（P0-06）** → 4. 快照身份核验 →
-/// 5. 管理器事务（`ClipboardTransaction::begin()` 及之后的全部剪贴板操作）。
+/// 顺序(每一步都不得越前):
+/// 1. 授权闸门 → 2. 失败冷却 → 3. 快照身份核验 →
+/// 4. 管理器事务(`ClipboardTransaction::begin()`,**它自己持有进程级独占 lease**)。
+///
+/// 审计报告 P0-07:业务层**不再**抢锁,唯一所有权模型是「事务持有 lease」——
+/// 否则外层 lease + 事务 lease 会形成**自拒绝**(非阻塞 CAS 必然失败,功能完全失效)。
+/// lease 的拒绍由管理器事务构造返回的 [`ClipboardSafetyError::AlreadyInUse`]
+/// 映射为 `AlreadyRunning`(见 `totalcmd` / `xyplorer` 的映射)。
 pub fn probe_with_snapshot(snapshot: &TriggerSnapshot, authorized: bool) -> ExplicitProbeOutcome {
     if !authorized {
         return ExplicitProbeOutcome::NotAuthorized;
@@ -330,15 +336,7 @@ pub fn probe_with_snapshot(snapshot: &TriggerSnapshot, authorized: bool) -> Expl
     if !ipc::try_enter(snapshot.manager.ipc()) {
         return ExplicitProbeOutcome::CoolingDown;
     }
-    // P0-06：lease 覆盖「快照 → 清空 → 请求 → 读回 → 恢复」整个生命周期。
-    // 拿不到就立即返回，**绝不读取 / 清空 / 写入剪贴板**。
-    let Some(_lease) = ProbeLease::try_acquire() else {
-        crate::dialog::detector::log_debug(&format!(
-            "EXPLICIT_PROBE_ALREADY_RUNNING({}): 已有一次显式探测在进行，本次请求被拒绝（零剪贴板触碰）",
-            snapshot.manager.label()
-        ));
-        return ExplicitProbeOutcome::AlreadyRunning;
-    };
+    // 身份核验必须早于剪贴板事务开启:无目标时零剪贴板触碰。
     if !verify_target(snapshot.manager, snapshot.hwnd_raw, snapshot.pid) {
         return ExplicitProbeOutcome::NoForegroundTarget;
     }

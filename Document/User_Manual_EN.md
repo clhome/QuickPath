@@ -341,7 +341,8 @@ The Settings Center utilizes a modern Fluent **four-tab** card layout (freely to
    - **Floating bar**: after a file dialog appears, the `[TC]` / `[XY]` buttons appear in the bar header. The bar is a `WS_EX_NOACTIVATE` window, so the foreground at click time is always the dialog; those buttons therefore use the "**most recent source bound to the current dialog-open event**" semantics and are **not** a strict foreground trigger. The binding expires as soon as the dialog changes or closes.
 3. **Clipboard limits during a probe**:
    - A probe briefly uses the system clipboard (full snapshot → empty → ask the manager to write → restore);
-   - **Only one probe may run at a time**: both entries are grayed while a probe is in flight (the bar button shows `…`), and a repeated click is rejected outright **without touching the clipboard**;
+   - **Only one clipboard transaction may run at a time**: explicit probes and WPS injection / filename restore share a single process-wide exclusive lease, so a conflicting request is rejected outright **without touching the clipboard**. Both entries are grayed while a probe is in flight (the bar button shows `...`);
+   - WPS injection is likewise single-flight: repeated triggers on the same dialog are de-duplicated (no double Enter, no wrong-directory navigation);
    - Avoid copying anything important until the probe finishes.
 4. **Visible result of cancel / timeout / unprovable source**:
    - Path found: injected into the active dialog when one exists, otherwise recorded to history only, plus a tray balloon "Manager path fetched";

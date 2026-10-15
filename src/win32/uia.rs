@@ -248,6 +248,15 @@ impl WindowIdentity {
         unsafe { GetForegroundWindow() == self.hwnd() }
     }
 
+    /// 对话框 generation 指纹:任一要素变化(HWND 复用 / 进程重启 / 类名变化)
+    /// 即视为**不同**对话框,从而不影响新对话框的去重判定。
+    fn fingerprint(&self) -> String {
+        format!(
+            "{:x}:{}:{:?}:{}",
+            self.hwnd_raw, self.pid, self.create_time, self.class_name
+        )
+    }
+
     /// 将目标窗口带到前台并核验 `GetForegroundWindow()` 确实等于它。
     ///
     /// 绝不信任 `BringWindowToTop` / `SetForegroundWindow` 的返回值：
@@ -322,6 +331,110 @@ struct ScoredCandidate {
     auto_id: String,
     val: String,
     rect: RECT,
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// WPS 注入的**操作级**去重与 generation 核验(审计报告 P0-07 风险 6)
+//
+// 剪贴板 lease 只能串行化「使用剪贴板的短区间」,挡不住两个线程都走 UIA
+// `SetValue` 后继续对同一个对话框操作(重复 Enter / 导航到错误目录),
+// 也挡不住延迟 650ms 的文件名恢复干扰后一次操作 —— 那个区间里没有剪贴板事务。
+//
+// 因此另设两层防护:
+// 1 **操作级独占 lease**:同一时刻只允许一次 WPS 注入走完 UIA 查询与全局输入
+//   (不排队、不等待,拿不到立即零动作拒绝)。取全局唯一而非逐对话框一份:
+//   `bring_to_front` 与 `keybd_event` 操作的是**进程级**前台与键盘,两个不同
+//   对话框同时注入同样会互相抢夺前台并把全局按键发给错误窗口。
+// 2 **对话框 generation**:每次注入开始就把该身份指纹的代次 +1;延迟的文件名
+//   恢复在写入前复核代次,代次已变(有新注入接管)则放弃 —— 旧恢复绝不会覆盖
+//   新注入的结果,也不需要把 lease 握过整个 650ms 延迟窗口。
+//
+// 身份指纹由 HWND + PID + 进程创建时间 + 类名组成:HWND 被复用 / 进程重启后
+// 指纹自动不同,不会被旧代次误伤。
+// ══════════════════════════════════════════════════════════════════════
+
+#[derive(Default)]
+struct WpsInjectState {
+    /// 当前持有 lease 的对话框指纹(空闲为 `None`)
+    holder: Option<String>,
+    /// 各对话框最近一次注入的代次(让延迟的旧恢复自动失效)
+    generations: std::collections::HashMap<String, u64>,
+}
+
+fn wps_inject_state() -> &'static std::sync::Mutex<WpsInjectState> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<WpsInjectState>> =
+        std::sync::OnceLock::new();
+    STATE.get_or_init(|| std::sync::Mutex::new(WpsInjectState::default()))
+}
+
+/// WPS 对话框操作级独占 lease。持有期间不得再有第二次注入。
+#[derive(Debug)]
+struct WpsInjectLease {
+    fingerprint: String,
+}
+
+impl WpsInjectLease {
+    /// 非阻塞获取:已有注入在进行时返回 `None`,**不排队也不等待**。
+    fn try_acquire(identity: &WindowIdentity) -> Option<Self> {
+        Self::try_acquire_fingerprint(&identity.fingerprint())
+    }
+
+    /// 去重与代次的**唯一实现**:生产路径与测试共用,避免测试测到复制品
+    /// (否则把去重改坏也测不出红)。
+    fn try_acquire_fingerprint(fingerprint: &str) -> Option<Self> {
+        let mut state = wps_inject_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.holder.is_some() {
+            return None;
+        }
+        state.holder = Some(fingerprint.to_string());
+        // 代次表只需保留最近活跃的少数对话框,避免随进程寿命无界增长
+        if state.generations.len() > 16 {
+            state.generations.clear();
+        }
+        let generation = state
+            .generations
+            .entry(fingerprint.to_string())
+            .or_insert(0);
+        *generation = generation.wrapping_add(1);
+        Some(Self {
+            fingerprint: fingerprint.to_string(),
+        })
+    }
+
+    /// 该对话框当前的注入代次(供延迟恢复复核)。
+    fn generation(&self) -> u64 {
+        current_generation(&self.fingerprint)
+    }
+
+    /// 测试专用:按指纹获取 lease(不涉及真实窗口句柄)。
+    ///
+    /// **复用** [`Self::try_acquire_fingerprint`],因此行为用例钉住的就是生产实现。
+    #[cfg(test)]
+    fn begin_for_test(fingerprint: &str) -> Option<Self> {
+        Self::try_acquire_fingerprint(fingerprint)
+    }
+}
+
+impl Drop for WpsInjectLease {
+    fn drop(&mut self) {
+        let mut state = wps_inject_state()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 只清除自己登记的那一份,避免身份变化后的新持有者被旧 guard 抹掉
+        if state.holder.as_deref() == Some(self.fingerprint.as_str()) {
+            state.holder = None;
+        }
+    }
+}
+
+/// 按身份指纹读取当前注入代次;从未注入过返回 0。
+fn current_generation(fingerprint: &str) -> u64 {
+    let state = wps_inject_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.generations.get(fingerprint).copied().unwrap_or(0)
 }
 
 /// 模拟快捷键 Ctrl + A 全选（仅在确认目标窗口为前台后调用）
@@ -789,7 +902,15 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
         let _com = ComApartment::new();
 
         let Some(identity) = WindowIdentity::capture(dialog_hwnd) else {
-            log_debug("UIA_REJECT: 无法确立目标窗口身份（窗口已失效）");
+            log_debug("UIA_REJECT: 无法确立目标窗口身份(窗口已失效)");
+            return false;
+        };
+
+        // 审计报告 P0-07 风险 6:**操作级去重**。必须在任何 UIA 查询 / 全局输入之前取得,
+        // 否则同一对话框上的两次注入会各自 SetValue 并各发一次 Enter(导航到错误目录)。
+        // 拿不到表示同一对话框已有注入在进行:立即返回,**零 UIA 查询、零全局输入**。
+        let Some(lease) = WpsInjectLease::try_acquire(&identity) else {
+            log_debug("UIA_REJECT: 已有一次 WPS 注入在进行,本次请求被拒绝(零全局输入)");
             return false;
         };
 
@@ -863,22 +984,30 @@ unsafe fn run_wps_injection(dialog_hwnd: HWND, target_folder: &str) -> bool {
         }
         log_debug("UIA_INJECT: 路径已写入并回读一致，Enter 终审通过，触发目录导航");
 
-        // 8. 优雅恢复原文件名（尽力而为，不影响本次注入结果）
+        // 8. 优雅恢复原文件名(尽力而为,不影响本次注入结果)
         if should_restore_name {
-            spawn_restore_original_name(identity, old_text);
+            spawn_restore_original_name(identity, old_text, lease.generation());
         }
 
         true
     }
 }
 
-/// 目录导航完成后把原文件名恢复回编辑框（尽力而为）。
+/// 目录导航完成后把原文件名恢复回编辑框(尽力而为)。
 ///
-/// 恢复前复核窗口身份与前台状态；若检测到用户已输入新内容则绝不覆盖。
-fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String) {
+/// 审计报告 P0-07 风险 6:恢复在 650ms 后执行,该窗口期内用户可能已再次触发注入
+/// (新注入会把该对话框的 generation +1)。因此写入前必须复核代次:
+/// 代次变化即放弃 —— 旧恢复绝不覆盖新注入的结果。
+fn spawn_restore_original_name(identity: WindowIdentity, saved_name: String, generation: u64) {
     thread::spawn(move || unsafe {
         // 等待 WPS Qt 视图载入新目录并刷新
         thread::sleep(Duration::from_millis(650));
+
+        // generation 核验:已有新注入接管该对话框则放弃(不写编辑框、不发按键)
+        if current_generation(&identity.fingerprint()) != generation {
+            log_debug("UIA_RESTORE_SKIP: 对话框 generation 已变化,放弃恢复文件名");
+            return;
+        }
 
         if !identity.verify() || !identity.is_foreground() {
             log_debug("UIA_RESTORE_SKIP: 窗口身份或前台状态已变化，放弃恢复文件名");
@@ -1185,5 +1314,146 @@ mod tests {
         assert!(!degraded.contains(&long_class));
         assert!(!degraded.contains(non_ascii));
         assert!(degraded.contains("cls=len=64"));
+    }
+
+    /// 构造一个**测试专用**身份指纹(不涉及真实窗口,仅验证去重/代次语义)。
+    fn test_fingerprint(tag: &str) -> String {
+        format!("test:{tag}")
+    }
+
+    /// 串行化「碰 WPS 注入 lease 全局状态」的用例。
+    ///
+    /// 该状态是进程级静态(生产语义如此),并行执行时两个用例会互抢,
+    /// 因此必须串行;锁中毒也不掩盖其他用例的真实结果。
+    fn wps_inject_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 审计报告 P0-07 风险 6:WPS 注入的**操作级去重**必须严格互斥且非阻塞。
+    ///
+    /// 这是剪贴板 lease 盖不住的区间(两次注入都走 UIA `SetValue` 时不碰剪贴板),
+    /// 两个线程同时通过会造成重复 Enter / 导航到错误目录。
+    #[test]
+    fn test_wps_inject_lease_is_exclusive_non_blocking_and_independent_of_clipboard() {
+        let _guard = wps_inject_test_lock();
+        // 同时拿剪贴板测试锁:保证此刻确实没有别的事务在跑(否则下面的断言不稳定)
+        let _clip_guard = crate::win32::clipboard::clipboard_test_lock();
+
+        let fp = test_fingerprint("wps_dedup");
+        let first = WpsInjectLease::begin_for_test(&fp).expect("空闲时必须能拿到注入 lease");
+        assert!(
+            WpsInjectLease::begin_for_test(&fp).is_none(),
+            "已有注入在跑时第二次获取必须**立即**失败(不排队、不等待)"
+        );
+        // 与剪贴板 lease 完全独立:注入进行中仍可开启剪贴板事务
+        // (注入需要剪贴板兜底时不必自拒绍),反之亦然。
+        assert!(
+            !crate::win32::clipboard::is_transaction_in_flight(),
+            "WPS 注入 lease 不得影响剪贴板事实来源"
+        );
+        {
+            let mut tx = crate::win32::clipboard::ClipboardTransaction::begin()
+                .expect("注入期间仍应能开启剪贴板事务");
+            assert!(
+                WpsInjectLease::begin_for_test(&fp).is_none(),
+                "剪贴板事务进行中仍不得再开第二次注入(两把锁互不代偿)"
+            );
+            let _ = tx.restore_if_still_owned();
+        }
+        drop(first);
+        let second = WpsInjectLease::begin_for_test(&fp).expect("释放后必须能再次获取");
+        drop(second);
+    }
+
+    /// 审计报告 P0-07 风险 6:延迟恢复必须按 **generation** 复核,旧恢复不得覆盖新结果。
+    #[test]
+    fn test_delayed_restore_is_invalidated_by_newer_injection_generation() {
+        let _guard = wps_inject_test_lock();
+        let fp = test_fingerprint("wps_generation");
+
+        // 第一次注入:取得 lease,记下代次后立即释放(模拟注入主体已结束)
+        let lease = WpsInjectLease::begin_for_test(&fp).expect("首次注入必须能拿到 lease");
+        let generation_of_first = lease.generation();
+        drop(lease);
+        assert_eq!(
+            current_generation(&fp),
+            generation_of_first,
+            "旧恢复自己的代次在当前代次未变时必须匹配(否则恢复永远不会执行)"
+        );
+
+        // 第二次注入接管同一对话框:代次提升,旧恢复随之失效
+        let second = WpsInjectLease::begin_for_test(&fp).expect("前次已释放,必须能再次获取");
+        let generation_of_second = second.generation();
+        drop(second);
+        assert_ne!(
+            generation_of_first, generation_of_second,
+            "新注入必须提升代次,使上一次的延迟恢复不再匹配"
+        );
+        assert_ne!(
+            current_generation(&fp),
+            generation_of_first,
+            "旧恢复在写入前复核代次时必须判为已失效(放弃恢复)"
+        );
+
+        // 身份指纹变化(HWND 复用 / 进程重启) → 属于另一个对话框,不影响本对话框的代次
+        let other = test_fingerprint("wps_generation_other");
+        assert_eq!(
+            current_generation(&other),
+            0,
+            "从未注入过的对话框代次必须为 0(新对话框不得被旧代次误伤)"
+        );
+    }
+
+    /// 审计报告 P0-07 风险 6:源码守卫 —— 去重与代次复核必须真的接在 WPS 链路上。
+    #[test]
+    fn test_wps_injection_wires_lease_and_generation_checks() {
+        const SOURCE: &str = include_str!("uia.rs");
+        let production = &SOURCE[..SOURCE.find("\nmod tests {").expect("必须存在测试模块")];
+
+        // 1) 注入入口必须在任何 UIA 查询 / 全局输入之前取得操作级 lease
+        let run_start = production
+            .find("unsafe fn run_wps_injection")
+            .expect("run_wps_injection 必须存在");
+        let run_body = &production[run_start..];
+        let lease_at = run_body
+            .find("WpsInjectLease::try_acquire")
+            .expect("注入入口必须取得操作级独占 lease");
+        let com_at = run_body
+            .find("CoCreateInstance::<_, IUIAutomation>")
+            .expect("注入入口必须创建 UIA 客户端");
+        assert!(
+            lease_at < com_at,
+            "lease 必须早于任何 UIA 查询(否则两个线程已经各自搜完控件)"
+        );
+        let rejected = &run_body[lease_at..com_at];
+        assert!(
+            rejected.contains("return false"),
+            "拿不到 lease 时必须零动作退出(不得继续 SetValue / 发 Enter)"
+        );
+
+        // 2) 延迟恢复必须复核 generation 且复核失败即 return
+        let restore_start = production
+            .find("fn spawn_restore_original_name")
+            .expect("spawn_restore_original_name 必须存在");
+        let restore_body = &production[restore_start..];
+        let gen_check = restore_body
+            .find("current_generation(")
+            .expect("延迟恢复必须按 generation 复核");
+        let clipboard_at = restore_body
+            .find("with_temporary_clipboard_text")
+            .expect("延迟恢复必须走剪贴板事务");
+        assert!(
+            gen_check < clipboard_at,
+            "generation 复核必须早于任何编辑框写入"
+        );
+        assert!(
+            restore_body[gen_check..clipboard_at].contains("return"),
+            "generation 已变化时必须放弃恢复(旧恢复绝不覆盖新注入结果)"
+        );
+        assert!(
+            production.contains("WpsInjectLease::try_acquire(&identity)"),
+            "去重必须绑定窗口身份指纹(HWND + PID + 创建时间 + 类名)"
+        );
     }
 }

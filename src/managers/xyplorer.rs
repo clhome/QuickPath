@@ -4,10 +4,12 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::WM_COPYDATA;
 
-use super::clipboard_probe::{log_probe_abort, log_restore_outcome, probe_panel_path};
+use super::clipboard_probe::{
+    log_lease_rejected, log_probe_abort, log_restore_outcome, probe_panel_path,
+};
 use super::explicit_probe::{ExplicitProbeOutcome, TargetWindow, verify_target};
 use super::ipc::{self, Manager};
-use crate::win32::clipboard::ClipboardTransaction;
+use crate::win32::clipboard::{ClipboardSafetyError, ClipboardTransaction};
 
 const XYPLORER_COPYDATA_FLAG: usize = 4194305;
 
@@ -27,11 +29,17 @@ pub fn probe_explicit_target(target: &TargetWindow) -> ExplicitProbeOutcome {
         return ExplicitProbeOutcome::NoForegroundTarget;
     }
 
+    // 审计报告 P0-07:事务构造内部会取得**进程级独占 lease**;
+    // `AlreadyInUse` 必须映射为 `AlreadyRunning`,绝不归入管理器失败/冷却。
     let mut tx = match ClipboardTransaction::begin() {
         Ok(tx) => tx,
+        Err(ClipboardSafetyError::AlreadyInUse) => {
+            log_lease_rejected("xyplorer");
+            return ExplicitProbeOutcome::AlreadyRunning;
+        }
         Err(err) => {
             crate::dialog::detector::log_debug(&format!(
-                "CLIPBOARD_PROBE_UNAVAILABLE(xyplorer): 无法开启剪贴板事务({:?})，本次显式探测未执行",
+                "CLIPBOARD_PROBE_UNAVAILABLE(xyplorer): 无法开启剪贴板事务({:?}),本次显式探测未执行",
                 err
             ));
             return ExplicitProbeOutcome::NoPath;

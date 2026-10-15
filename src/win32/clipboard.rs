@@ -58,13 +58,19 @@ const MAX_TOTAL_BYTES: usize = 40 * 1024 * 1024;
 /// 剪贴板安全操作错误类型
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardSafetyError {
-    /// 剪贴板被其他应用锁定占用，超时无法打开
+    /// 剪贴板被其他应用锁定占用,超时无法打开
     Busy,
-    /// 剪贴板数据备份不完整或存在无法保真克隆的格式，为保护用户数据放弃写入
+    /// **QuickPath 自己已有一次剪贴板事务在进行**(进程级独占 lease 拒绝,审计报告 P0-07)
+    ///
+    /// 与 `Busy` 刻意分开:`Busy` 表示外部进程占用 Win32 剪贴板(需要重试/提示),
+    /// `AlreadyInUse` 表示内部竞争(安静拒绝或有限重试,绝不计入失败冷却,
+    /// 否则会把一次重复点击伪造成目标管理器故障)。
+    AlreadyInUse,
+    /// 剪贴板数据备份不完整或存在无法保真克隆的格式,为保护用户数据放弃写入
     BackupIncomplete(String),
     /// 剪贴板临时文本写入失败
     WriteFailed,
-    /// 临时使用结束后恢复原剪贴板失败（逐格式恢复未全部成功）
+    /// 临时使用结束后恢复原剪贴板失败(逐格式恢复未全部成功)
     RestoreFailed(ClipboardRestoreError),
 }
 
@@ -94,7 +100,8 @@ pub enum RestoreStatus {
 impl std::fmt::Display for ClipboardSafetyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Busy => write!(f, "剪贴板被其他进程占用，打开超时"),
+            Self::Busy => write!(f, "剪贴板被其他进程占用,打开超时"),
+            Self::AlreadyInUse => write!(f, "已有一次剪贴板事务在进行,本次请求未触碰剪贴板"),
             Self::BackupIncomplete(msg) => write!(f, "剪贴板备份未完整完成: {}", msg),
             Self::WriteFailed => write!(f, "临时写入剪贴板文本失败"),
             Self::RestoreFailed(err) => write!(f, "恢复原剪贴板失败: {:?}", err),
@@ -290,7 +297,56 @@ fn wait_for_events_after(marker: u64, count: u64, timeout: Duration) -> bool {
 
 impl std::error::Error for ClipboardSafetyError {}
 
-/// 测试期强制「剪贴板被占用」注入（同进程内无法真实模拟跨进程独占）
+// ══════════════════════════════════════════════════════════════════════════
+// 进程级剪贴板事务独占 lease(审计报告 P0-07)
+//
+// 真正的共享资源是「剪贴板事务」,不是「显式探测」。旧实现(`managers::probe_lease`)
+// 只保护 TC / XYplorer 的探测入口,而 WPS 注入与文件名恢复走的是另一条路径:
+// 两个事务可以重叠 → 后启动的事务只快照到前一事务的临时值 → **无人恢复用户最初内容**。
+//
+// 因此 lease 下沉到本模块并由 `ClipboardTransaction` **自持**:
+// - lease 是私有类型,业务模块不得构造,只能通过创建事务获得,
+//   未来新增调用方也**不可能**绕过(结构性防护,而非逐点补丁);
+// - 获取严格早于 `ClipboardSnapshot::capture()`:拿不到时零触碰剪贴板;
+// - guard 持有到事务 `Drop` 完成(包括兜底恢复)为止。
+// ══════════════════════════════════════════════════════════════════════════
+
+/// 进程内「已有剪贴板事务在进行」标志。`false → true` 的 CAS 即 lease 获取。
+static CLIPBOARD_TX_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// 剪贴板事务独占 lease。持有期间任何新事务都必须被拒绝。
+///
+/// 私有字段:本模块外**无法构造**,也**非 `Copy`**(复制会让两个持有者各自释放)。
+#[derive(Debug)]
+struct ClipboardLease {
+    _private: (),
+}
+
+impl ClipboardLease {
+    /// 非阻塞获取:已被占用时返回 `None`,**不做任何等待**,也不触碰剪贴板。
+    fn try_acquire() -> Option<Self> {
+        CLIPBOARD_TX_IN_FLIGHT
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self { _private: () })
+    }
+}
+
+impl Drop for ClipboardLease {
+    fn drop(&mut self) {
+        CLIPBOARD_TX_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// 是否已有一次剪贴板事务在进行(供 UI 置灰两个显式入口 / 显示忙碌态)。
+///
+/// 这是 UI 反馈的**唯一事实来源**;底层 `ClipboardTransaction::begin()` 仍是最终安全边界,
+/// 置灰只负责反馈,绝不能代替底层拒绝。
+pub fn is_transaction_in_flight() -> bool {
+    CLIPBOARD_TX_IN_FLIGHT.load(Ordering::Acquire)
+}
+
+/// 测试期强制「剪贴板被占用」注入(同进程内无法真实模拟跨进程独占)
 #[cfg(test)]
 static TEST_FORCE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1441,6 +1497,8 @@ enum OwnershipState {
 /// capture → check → write → restore 流程。
 ///
 /// 语义：
+/// - **自持进程级独占 lease**（审计报告 P0-07）：构造即取得、`Drop` 完成才释放，
+///   因此 TC / XYplorer 探测、WPS 粘帖板兜底与文件名恢复**天然互斥**；
 /// - 快照与 `capture_sequence` 绑定，首次写入在同一次持锁期内复核该序列号；
 /// - 归属判定严格按 `GetClipboardSequenceNumber`，序列号变化即视为外部改写，
 ///   **不存在**「文本相等仍视为持有」的 fail-open 回退（§3.4.4）；
@@ -1460,23 +1518,33 @@ pub struct ClipboardTransaction {
     ownership_unknown: bool,
     /// 是否因请求窗口内的事件史不可证明而终止认领（P0-04-B fail-closed）
     event_history_unprovable: bool,
-    /// 是否已进入「永久放弃快照」状态（恢复检出外部改写 / owner 不匹配）
+    /// 是否已进入「永久放弃快照」状态(恢复检出外部改写 / owner 不匹配)
     abandoned_snapshot: bool,
-    /// 最终结局；一旦确定即幂等返回，`Drop` 不会再重复动作
+    /// 最终结局;一旦确定即幂等返回,`Drop` 不会再重复动作
     outcome: Option<ClipboardTransactionOutcome>,
+    /// **进程级独占 lease**:字段顺序保证它在 `snapshot` 之后才被 drop,
+    /// 因此兜底恢复(`Drop` 里的 `restore_if_still_owned`)仍持有 lease。
+    /// 不得提前手工释放(报告 P0-07 风险 5)。
+    _lease: ClipboardLease,
 }
 
 impl ClipboardTransaction {
-    /// 开启事务：完整快照当前剪贴板（含与 `capture_sequence` 的绑定）。
-    /// 快照失败（`Busy` / `BackupIncomplete`）直接返回 `Err`，绝不触碰剪贴板内容。
+    /// 开启事务:先取**进程级独占 lease**,再完整快照当前剪贴板。
+    ///
+    /// 顺序不可颠倒(审计报告 P0-07):若先 `capture` 再取 lease,被拒绝的第二个请求
+    /// 已经读到了前一事务的临时值 —— 虽未写入,却破坏了「忙时零触碰」的验收语义。
+    ///
+    /// 拿不到 lease 返回 [`ClipboardSafetyError::AlreadyInUse`];快照失败
+    /// (`Busy` / `BackupIncomplete`)直接返回 `Err`,两种情况都绝不触碰剪贴板内容。
     pub fn begin() -> Result<Self, ClipboardSafetyError> {
+        let lease = ClipboardLease::try_acquire().ok_or(ClipboardSafetyError::AlreadyInUse)?;
         let snapshot = ClipboardSnapshot::capture()?;
-        // 期望序列号直接取自**持锁捕获期**读到的值，不再另读一次（否则“捕获”与
-        // “记录基准”之间又会多出一个 check-then-act 窗口）。
+        // 期望序列号直接取自**持锁捕获期**读到的值,不再另读一次(否则“捕获”与
+        // “记录基准”之间又会多出一个 check-then-act 窗口)。
         let capture_sequence = snapshot.capture_sequence();
         Ok(Self {
             snapshot: Some(snapshot),
-            // 序列号不可读（返回 0）时不建立基准，后续写入一律 fail-closed
+            // 序列号不可读(返回 0)时不建立基准,后续写入一律 fail-closed
             owned_seq: (capture_sequence != 0).then_some(capture_sequence),
             owned_text: None,
             lost_ownership: false,
@@ -1484,6 +1552,7 @@ impl ClipboardTransaction {
             event_history_unprovable: false,
             abandoned_snapshot: false,
             outcome: None,
+            _lease: lease,
         })
     }
 
@@ -1690,7 +1759,16 @@ impl ClipboardTransaction {
         }
     }
 
-    /// 最终恢复：先按严格 sequence 校验归属，校验通过才恢复。
+    /// 测试专用:把事务置为「事件史不可证明」终止态(仅用于覆盖 lease 生命周期)。
+    ///
+    /// 生产代码不会调用:该状态只能由 `note_observed_owned_text_proven` 在来源链
+    /// 不可证明时置位。
+    #[cfg(test)]
+    pub fn force_event_history_unprovable_for_test(&mut self) {
+        self.event_history_unprovable = true;
+    }
+
+    /// 最终恢复:先按严格 sequence 校验归属,校验通过才恢复。
     ///
     /// 结局见 [`ClipboardTransactionOutcome`]。幂等：重复调用返回同一结局。
     pub fn restore_if_still_owned(&mut self) -> ClipboardTransactionOutcome {
@@ -1906,14 +1984,18 @@ fn set_clipboard_text_checked(
 
 /// 安全地在受保护的环境下临时使用剪贴板注入文本。
 ///
-/// 审计需求 `9549648` §4.1：本函数只是 [`ClipboardTransaction`] 的薄封装，**不再**
-/// 手工拼装 capture → check → write → restore：
-/// 1. 开启事务（完整快照 + `capture_sequence` 绑定；失败则绝不修改剪贴板）；
-/// 2. `write_owned_text` 在统一原子原语的**同一次持锁期**内复核 `capture_sequence`，
-///    不一致就零修改失败（消除「快照完成 → 临时写入」之间的竞态，§3.3）；
-/// 3. 执行物理操作闭包；
-/// 4. 无论成功与否立即按严格 sequence 归属校验恢复（`Drop` 还要再兑底一次）；
-/// 5. 恢复本身失败向上传播为 `RestoreFailed`，调用方不得据此认为“已无损还原”。
+/// 审计需求 `9549648` §4.1：本函数只是 [`ClipboardTransaction`] 的薄封装,**不再**
+/// 手工拼装 capture → check → write → restore:
+/// 1. 开启事务(先取**进程级独占 lease**,再完整快照 + `capture_sequence` 绑定;
+///    失败则绝不修改剪贴板);
+/// 2. `write_owned_text` 在统一原子原语的**同一次持锁期**内复核 `capture_sequence`,
+///    不一致就零修改失败(消除「快照完成 → 临时写入」之间的竞态,§3.3);
+/// 3. 执行物理操作闭包;
+/// 4. 无论成功与否立即按严格 sequence 归属校验恢复(`Drop` 还要再兑底一次);
+/// 5. 恢复本身失败向上传播为 `RestoreFailed`,调用方不得据此认为“已无损还原”。
+///
+/// 审计报告 P0-07 风险 1:拿不到 lease 时返回 [`ClipboardSafetyError::AlreadyInUse`]
+/// (而不是 `WriteFailed`),以便调用方安静拒绝,且**绝不**执行物理操作闭包。
 pub fn with_temporary_clipboard_text<R, F>(text: &str, action: F) -> Result<R, ClipboardSafetyError>
 where
     F: FnOnce() -> R,
@@ -1990,7 +2072,7 @@ fn get_clipboard_text_checked() -> Option<(String, u32)> {
 
 /// 跨模块共享的「真实剪贴板用例串行锁」（仅测试构建）。
 ///
-/// 本文件内部的用例与其它模块（如 `managers::probe_lease` / `managers::clipboard_probe`）
+/// 本文件内部的用例与其它模块(如 `managers::clipboard_probe`)
 /// 里同样操作真实剪贴板的用例必须共用同一把锁，否则并行执行时会互相抢剪贴板。
 #[cfg(test)]
 pub(crate) fn clipboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -3902,34 +3984,41 @@ mod tests {
         assert_eq!(get_clipboard_text().as_deref(), Some("qp_p005_seed"));
     }
 
-    /// 审计报告 P0-06：确定性并发会合测试。
+    /// 审计报告 P0-06 / P0-07:确定性并发会合测试。
     ///
-    /// 把首个请求暂停在「已写空、未收到回写」处，此时启动第二个请求：它必须被
-    /// **进程级独占 lease** 拒绝（`AlreadyRunning`），且剪贴板序列号不变（零触碰）。
-    /// 这直接复现报告描述的「两次并发探测各自快照 → 双双放弃恢复 → 原内容丢失」场景。
+    /// 把首个事务暂停在「已写空、未收到回写」处,此时任何新的剪贴板事务都必须被
+    /// **进程级独占 lease**(现由 `ClipboardTransaction` 自持)立即拒绝,且剪贴板
+    /// 序列号不变(零触碰)。这直接复现报告描述的「两次并发事务各自快照
+    /// → 双双放弃恢复 → 原内容丢失」场景。
+    ///
+    /// 覆盖三个入口:
+    /// 1 `ClipboardTransaction::begin()`(所有事务的唯一构造点);
+    /// 2 `with_temporary_clipboard_text()`(WPS 粘帖板兜底 / 文件名恢复);
+    /// 3 lease 在事务销毁后必须可再次获取。
+    ///
+    /// 诚实边界:TC / XYplorer 的 `probe_explicit_target` 现在**先核身份再开事务**,
+    /// 因此上述映射(`AlreadyInUse` → `AlreadyRunning`)无法在无真实管理器的
+    /// 单测里端到端驱动,改由源码守卫
+    /// `test_manager_lease_rejection_maps_to_already_running` 钉住。
     #[test]
     fn test_second_probe_is_rejected_with_zero_clipboard_touch() {
-        use crate::managers::explicit_probe::{
-            ExplicitProbeOutcome, ScriptedManager, TriggerSnapshot, probe_with_snapshot,
-        };
-        use crate::managers::probe_lease::ProbeLease;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let _guard = clip_test_lock();
         assert!(set_raw_clipboard_text("qp_p006_original"));
 
-        crate::managers::clipboard_probe::test_gate::arm();
+        // RAII:即使下面的断言失败,也会自动放行被暂停的请求,不会挂死整个测试进程。
+        let gate = crate::managers::clipboard_probe::test_gate::GateGuard::armed();
         let first = std::thread::spawn(move || {
-            let _lease = ProbeLease::try_acquire().expect("首请求必须拿到独占 lease");
             let mut tx = ClipboardTransaction::begin().expect("空闲剪贴板必须能开启事务");
-            // request 闭包永不执行：请求在 gate 处就被挂起
+            // request 闭包永不执行:请求在 gate 处就被挂起
             let _ = probe_panel_path(&mut tx, |_| false, || None);
             let _ = tx.restore_if_still_owned();
         });
 
         let reached =
             crate::managers::clipboard_probe::test_gate::wait_until_paused(Duration::from_secs(10));
-        // 无论是否到达会合点，都必须释放 gate，否则线程会永久阻塞
+        // 未到达会合点时也要先放行,否则线程会永久阻塞
         if !reached {
             crate::managers::clipboard_probe::test_gate::release();
             let _ = first.join();
@@ -3938,30 +4027,286 @@ mod tests {
 
         let sequence_at_pause = clipboard_sequence_number();
         assert_ne!(sequence_at_pause, 0, "会合点处剪贴板序列号必须可读");
+        assert!(
+            is_transaction_in_flight(),
+            "事务持有期间必须能被 UI / 其它调用方看到忙碌态"
+        );
 
-        let snapshot = TriggerSnapshot {
-            hwnd_raw: 0,
-            pid: 0,
-            manager: ScriptedManager::TotalCmd,
-            captured_at: Instant::now(),
-            request_id: 1,
-        };
         assert_eq!(
-            probe_with_snapshot(&snapshot, true),
-            ExplicitProbeOutcome::AlreadyRunning,
-            "首请求仍持有 lease 时第二个请求必须被拒绝"
+            ClipboardTransaction::begin().err(),
+            Some(ClipboardSafetyError::AlreadyInUse),
+            "首请求仍持有 lease 时第二个事务必须被拒绝(非阻塞)"
+        );
+
+        // P0-07:WPS 路径同样必须在**执行闭包之前**零动作拒绝
+        let action_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = action_ran.clone();
+        let outcome: Result<u32, ClipboardSafetyError> =
+            with_temporary_clipboard_text("C:\\p007_busy", move || {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                7
+            });
+        assert_eq!(
+            outcome,
+            Err(ClipboardSafetyError::AlreadyInUse),
+            "已有事务时 WPS 路径必须得到独立的 AlreadyInUse(不得贬为 WriteFailed)"
+        );
+        assert!(
+            !action_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "被拒绝时必须零动作退出:不执行闭包(因此不可能发送 Ctrl+A / Ctrl+V)"
         );
         assert_eq!(
             clipboard_sequence_number(),
             sequence_at_pause,
-            "被拒绝的第二个请求不得触碰剪贴板（零写入、零清空）"
+            "被拒绝的请求一律不得触碰剪贴板(零写入、零清空)"
         );
 
         crate::managers::clipboard_probe::test_gate::release();
         first.join().expect("首请求线程不得 panic");
-        let released = ProbeLease::try_acquire();
-        assert!(released.is_some(), "首请求结束后必须释放 lease");
-        drop(released);
+        drop(gate);
+        assert!(
+            !is_transaction_in_flight(),
+            "事务销毁后必须释放 lease(否则后续探测被永久锁死)"
+        );
+        let mut after = ClipboardTransaction::begin().expect("lease 释放后必须能再次开启事务");
+        assert_eq!(
+            after.restore_if_still_owned(),
+            ClipboardTransactionOutcome::Committed,
+            "lease 释放后新事务必须能正常走完恢复"
+        );
+    }
+
+    /// 审计报告 P0-07 风险 2:两个管理器必须把 `AlreadyInUse` 映射为 `AlreadyRunning`,
+    /// **不得**贬为 `WriteFailed` / `NoPath`,也不得计入失败冷却。
+    ///
+    /// 这是源码级守卫(而不是行为用例):`probe_explicit_target` 现在先核身份再开事务,
+    /// 因此无真实管理器窗口时无法端到端到达该分支。
+    #[test]
+    fn test_manager_lease_rejection_maps_to_already_running() {
+        for (name, source) in [
+            (
+                "managers/totalcmd.rs",
+                include_str!("../managers/totalcmd.rs"),
+            ),
+            (
+                "managers/xyplorer.rs",
+                include_str!("../managers/xyplorer.rs"),
+            ),
+        ] {
+            let start = source
+                .find("pub fn probe_explicit_target")
+                .unwrap_or_else(|| panic!("{name} 必须提供显式单次探测入口"));
+            let rest = &source[start..];
+            let end = rest
+                .find("fn send_path_copy_request")
+                .unwrap_or_else(|| panic!("{name} 必须把投递收敛到 send_path_copy_request"));
+            let body = &rest[..end];
+
+            let mapped = body
+                .find("ClipboardSafetyError::AlreadyInUse) =>")
+                .unwrap_or_else(|| {
+                    panic!("{name} 必须单独处理 AlreadyInUse(不得归入通用错误分支)")
+                });
+            let tail = &body[mapped..];
+            let marker = "ClipboardSafetyError::AlreadyInUse) =>";
+            let branch_end = tail[marker.len()..]
+                .find("Err(")
+                .map(|offset| offset + marker.len())
+                .unwrap_or(tail.len());
+            assert!(
+                tail[..branch_end].contains("ExplicitProbeOutcome::AlreadyRunning"),
+                "{name} 的 AlreadyInUse 分支必须返回 AlreadyRunning"
+            );
+            assert!(
+                tail[..branch_end].contains("log_lease_rejected("),
+                "{name} 的 AlreadyInUse 分支必须走共享日志(两个管理器文案不得漂移)"
+            );
+            assert!(
+                !tail[..branch_end].contains("report_failure"),
+                "{name} 不得把内部竞争计为目标管理器失败(会污染冷却语义)"
+            );
+        }
+    }
+
+    /// 审计报告 P0-07 风险 5:lease 必须活到**恢复动作**结束,而不是构造返回就释放。
+    ///
+    /// 逐个覆盖七种终止态（`Committed` / `SkippedForeignChange` / `SkippedUnknownOwner` /
+    /// `AbortedEventHistoryUnprovable` / `RestoreAbandoned` 由既有事务用例覆盖,
+    /// 本用例补 `RestorePartialFailure` + panic 展开 + Drop 兜底):
+    /// 每一种结束后都必须能重新拿到 lease,而**在其间**必须拿到 `AlreadyInUse`。
+    #[test]
+    fn test_lease_lives_through_restore_and_releases_on_every_terminal_state() {
+        let _guard = clip_test_lock();
+        assert!(set_raw_clipboard_text("qp_p007_lifecycle_seed"));
+
+        // (a) Committed:显式恢复后、drop 之前仍持有 lease
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            assert!(is_transaction_in_flight());
+            assert!(tx.write_owned_text("qp_p007_tmp").is_ok());
+            assert_eq!(
+                tx.restore_if_still_owned(),
+                ClipboardTransactionOutcome::Committed
+            );
+            assert!(
+                is_transaction_in_flight(),
+                "恢复已返回但事务未 drop:lease 必须仍被持有(否则恢复兜底不再互斥)"
+            );
+        }
+        assert!(!is_transaction_in_flight(), "事务 drop 后必须释放 lease");
+
+        // (b) SkippedForeignChange:外部改写后放弃恢复,仍持有到 drop
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            assert!(tx.write_owned_text("qp_p007_tmp2").is_ok());
+            assert!(set_raw_clipboard_text("qp_p007_foreign"));
+            assert_eq!(
+                tx.restore_if_still_owned(),
+                ClipboardTransactionOutcome::SkippedForeignChange
+            );
+            assert!(is_transaction_in_flight());
+        }
+        assert!(!is_transaction_in_flight());
+
+        // (c) SkippedUnknownOwner:序列号不可读时保守放弃,仍持有到 drop
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            let forced = SeqZeroInjection::enable();
+            assert_eq!(
+                tx.restore_if_still_owned(),
+                ClipboardTransactionOutcome::SkippedUnknownOwner
+            );
+            drop(forced);
+            assert!(is_transaction_in_flight());
+        }
+        assert!(!is_transaction_in_flight());
+
+        // (d) AbortedEventHistoryUnprovable:事件史不可证明,仍持有到 drop
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            tx.force_event_history_unprovable_for_test();
+            assert_eq!(
+                tx.restore_if_still_owned(),
+                ClipboardTransactionOutcome::AbortedEventHistoryUnprovable
+            );
+            assert!(is_transaction_in_flight());
+        }
+        assert!(!is_transaction_in_flight());
+
+        // (e) RestorePartialFailure:恢复本身失败时,`Drop` 仍要在**持有 lease 期间**
+        //     补写一次未成功格式(报告风险 5 的核心情形)。
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            assert!(tx.write_owned_text("qp_p007_tmp4").is_ok());
+            {
+                let _inject = FailInjection::enable(CF_UNICODETEXT);
+                assert!(
+                    matches!(
+                        tx.restore_if_still_owned(),
+                        ClipboardTransactionOutcome::RestorePartialFailure(_)
+                    ),
+                    "注入故障后必须得到 RestorePartialFailure"
+                );
+            }
+            assert!(
+                is_transaction_in_flight(),
+                "部分失败后事务未 drop:lease 必须仍被持有(Drop 还要补写)"
+            );
+        }
+        assert!(!is_transaction_in_flight());
+
+        // (f) panic 展开:RAII 必须释放 lease
+        let caught = std::panic::catch_unwind(|| {
+            let _tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            assert!(is_transaction_in_flight());
+            panic!("模拟事务持有者 panic");
+        });
+        assert!(caught.is_err());
+        assert!(
+            !is_transaction_in_flight(),
+            "panic 展开时 RAII guard 必须释放 lease"
+        );
+
+        // (g) 调用方忘记显式恢复(Drop 兜底):恢复动作在 lease 持有期内完成
+        assert!(set_raw_clipboard_text("qp_p007_lifecycle_seed"));
+        {
+            let mut tx = ClipboardTransaction::begin().expect("空闲时必须能开启事务");
+            assert!(tx.write_owned_text("qp_p007_tmp3").is_ok());
+        }
+        assert!(!is_transaction_in_flight());
+        assert_eq!(
+            get_clipboard_text().as_deref(),
+            Some("qp_p007_lifecycle_seed"),
+            "Drop 兜底必须把用户原内容还回去"
+        );
+    }
+
+    /// 审计报告 P0-07:架构守卫 —— 全仓只允许**一个**所有权模型。
+    ///
+    /// 1. 不得再存在第二个 lease 原子变量 / 旧的业务层独占模块;
+    /// 2. 除本文件外不得出现 `ClipboardLease`(私有类型,无法从外部构造);
+    /// 3. `begin()` 必须先取 lease 再 `capture()`;
+    /// 4. UI 忙碌态必须读唯一事实来源。
+    #[test]
+    fn test_single_clipboard_ownership_model_guard() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect_rs_files(&src_root, &mut files);
+        assert!(files.len() > 20, "必须能枚举到源码文件");
+
+        let clipboard_path = src_root.join("win32").join("clipboard.rs");
+        // 字面量拆分:否则本守卫自己的禁止名单会让它自己变红(库内已有同类先例)
+        let forbidden = [
+            concat!("probe", "_lease"),
+            concat!("Probe", "Lease"),
+            concat!("PROBE_IN", "_FLIGHT"),
+        ];
+        for file in &files {
+            if *file == clipboard_path {
+                continue;
+            }
+            let source = std::fs::read_to_string(file).expect("源码必须可读");
+            let code = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for needle in forbidden {
+                assert!(
+                    !code.contains(needle),
+                    "{} 不得再存在第二个所有权模型(命中 `{}`,报告 P0-07 风险 1)",
+                    file.display(),
+                    needle
+                );
+            }
+            assert!(
+                !code.contains("ClipboardLease"),
+                "{} 不得直接触碰私有 lease 类型(只能通过 ClipboardTransaction)",
+                file.display()
+            );
+        }
+
+        let source = std::fs::read_to_string(&clipboard_path).expect("clipboard.rs 必须可读");
+        let production_end = source.find("\nmod tests {").expect("必须存在测试模块");
+        let production = &source[..production_end];
+        let begin_at = production
+            .find("pub fn begin()")
+            .expect("必须存在事务构造入口");
+        let body = &production[begin_at..];
+        let lease_at = body
+            .find("ClipboardLease::try_acquire()")
+            .expect("事务构造必须取得独占 lease");
+        let capture_at = body
+            .find("ClipboardSnapshot::capture()")
+            .expect("事务构造必须快照剪贴板");
+        assert!(
+            lease_at < capture_at,
+            "必须先取 lease 再 capture(否则被拒绝的请求已经读到了前一事务的临时值)"
+        );
+        assert!(
+            production.contains("_lease: ClipboardLease") || production.contains("_lease: lease"),
+            "lease 必须是事务的**私有字段**并至少持到 Drop 完成"
+        );
     }
 
     /// 审计报告 P0-04 竞态 B：请求窗口内出现非目标来源的剪贴板更新

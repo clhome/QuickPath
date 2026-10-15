@@ -111,9 +111,13 @@ fn clean_dir_path(raw: &str) -> Option<String> {
     Some(clean)
 }
 
-/// 测试专用的确定性会合点（仅测试构建存在）。
+/// 测试专用的确定性会合点(仅测试构建存在)。
 ///
-/// 生产代码不得依赖本模块；`probe_panel_path` 只在 `#[cfg(test)]` 下调用 [`arrive`]。
+/// 生产代码不得依赖本模块;`probe_panel_path` 只在 `#[cfg(test)]` 下调用 [`arrive`]。
+///
+/// 注意:会合点被武装后,**任何**断言失败都必须先把 `GateGuard` 干掉(RAII 释放),
+/// 否则被暂停的请求线程永远不会返回,一次失败的用例会把整个测试进程挂死,
+/// 后续用例的结果全部拿不到。
 #[cfg(test)]
 pub(crate) mod test_gate {
     use std::sync::{Condvar, Mutex, OnceLock};
@@ -174,16 +178,46 @@ pub(crate) mod test_gate {
         true
     }
 
-    /// 放行被暂停的请求，并解除武装。
+    /// 放行被暂停的请求,并解除武装。
     pub(crate) fn release() {
         let (mutex, condvar) = gate();
         let mut state = mutex.lock().unwrap_or_else(|p| p.into_inner());
         state.released = true;
         condvar.notify_all();
     }
+
+    /// 武装会合点后**必须**持有该 guard:无论用例是正常结束、断言失败还是 panic,
+    /// 都会在离开作用域时自动 [`release`],从而不会把整个测试进程挂死。
+    pub(crate) struct GateGuard(());
+
+    impl GateGuard {
+        /// 武装并返回 RAII guard。
+        pub(crate) fn armed() -> Self {
+            arm();
+            Self(())
+        }
+    }
+
+    impl Drop for GateGuard {
+        fn drop(&mut self) {
+            release();
+        }
+    }
 }
 
-/// 归属冲突导致探测中止时的统一日志（不记录真实剪贴板内容）。
+/// 审计报告 P0-07:事务构造因**进程级独占 lease** 被拒绝时的统一日志。
+///
+/// 这不是目标管理器的故障(也不是外部进程占用剪贴板),因此调用方必须返回
+/// `AlreadyRunning` 且**不得**调用 `ipc::report_failure()` —— 否则一次重复点击
+/// 会污染失败冷却语义。两个管理器共用本函数,避免日志文案漂移。
+pub fn log_lease_rejected(manager: &str) {
+    crate::dialog::detector::log_debug(&format!(
+        "CLIPBOARD_PROBE_ALREADY_IN_USE({}): 已有一次剪贴板事务在进行,本次请求被拒绝(零剪贴板触碰)",
+        manager
+    ));
+}
+
+/// 归属冲突导致探测中止时的统一日志(不记录真实剪贴板内容)。
 pub fn log_probe_abort(manager: &str, err: &ClipboardTransactionError) {
     crate::dialog::detector::log_debug(&format!(
         "CLIPBOARD_PROBE_ABORTED({}): {:?}，已中止本轮扫描以保护用户新内容",

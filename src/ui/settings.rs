@@ -5021,8 +5021,33 @@ mod tests {
             "托盘菜单在未授权或无可归因目标时必须置灰"
         );
         assert!(
-            MAIN_SRC.contains("probe_lease::is_in_flight()"),
-            "探测进行中必须同时置灰两个入口（P0-06）"
+            MAIN_SRC.contains("clipboard::is_transaction_in_flight()")
+                && BAR_SRC.contains("clipboard::is_transaction_in_flight()"),
+            "探测/事务进行中必须同时置灰两个入口,且读唯一事实来源(P0-06 → P0-07)"
+        );
+        // 三处状态源必须**都**读同一事实来源(命中次数,而不是“出现过”):
+        // 托盘菜单可用性、吸附条命中测试、吸附条绘制忙碌态。
+        // 统计前剔除整行注释,避免说明文字把计数灌水。
+        let count_code = |src: &str, needle: &str| {
+            src.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .filter(|line| line.contains(needle))
+                .count()
+        };
+        assert_eq!(
+            count_code(MAIN_SRC, "clipboard::is_transaction_in_flight()"),
+            1,
+            "托盘菜单可用性必须读剪贴板事务状态"
+        );
+        assert_eq!(
+            count_code(BAR_SRC, "clipboard::is_transaction_in_flight()"),
+            2,
+            "吸附条命中测试与绘制忙碌态必须都读剪贴板事务状态"
+        );
+        assert!(
+            !MAIN_SRC.contains(concat!("managers::probe", "_lease"))
+                && !BAR_SRC.contains(concat!("managers::probe", "_lease")),
+            "不得再存在第二个 AtomicBool 所有权模型(报告 P0-07 风险 1)"
         );
         assert!(
             MAIN_SRC.contains("ui::tray::notify(") && MAIN_SRC.contains("tray_probe_result("),
