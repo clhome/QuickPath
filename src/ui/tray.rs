@@ -25,6 +25,11 @@ pub const IDM_TOGGLE_MONITOR: usize = 1006;
 /// 审计报告 U-01：显式获取第三方管理器当前路径（单次、前台、用户触发）
 pub const IDM_PROBE_TOTALCMD: usize = 1007;
 pub const IDM_PROBE_XYPLORER: usize = 1008;
+/// 新版本下载直达命令 ID
+pub const IDM_DOWNLOAD_UPDATE: usize = 1009;
+
+/// Windows 气泡通知点击事件代码
+pub const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 
 /// 托盘消息宿主窗口（供宿主在显式探测结束后弹出结果提示）。
 ///
@@ -136,6 +141,7 @@ impl TrayIcon {
     ///
     /// `probe_ready` 为 `[Total Commander, XYplorer]` 的可用性：未授权或无法归因到目标
     /// 窗口时对应菜单项置灰，避免用户点了却什么都不发生（审计报告 U-01）。
+    #[allow(clippy::too_many_arguments)]
     pub fn show_context_menu(
         hwnd: HWND,
         auto_switch_enabled: bool,
@@ -144,6 +150,7 @@ impl TrayIcon {
         probe_ready: [bool; 2],
         lang: crate::rules::Language,
         hotkey: &str,
+        update_info: Option<&crate::win32::updater::UpdateCheckResult>,
     ) {
         unsafe {
             let hmenu = CreatePopupMenu().unwrap_or_default();
@@ -153,6 +160,22 @@ impl TrayIcon {
 
             let mut cursor_pos = POINT::default();
             let _ = GetCursorPos(&mut cursor_pos);
+
+            // 若有可用新版本，置于菜单最顶端高亮提醒
+            if let Some(update) = update_info {
+                let str_update: Vec<u16> =
+                    crate::rules::I18n::tray_new_version(&lang, &update.latest_version)
+                        .encode_utf16()
+                        .chain(Some(0))
+                        .collect();
+                let _ = AppendMenuW(
+                    hmenu,
+                    MF_STRING,
+                    IDM_DOWNLOAD_UPDATE,
+                    PCWSTR(str_update.as_ptr()),
+                );
+                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
 
             let auto_switch_flag = if auto_switch_enabled {
                 MF_CHECKED

@@ -16,8 +16,9 @@ use monitor::MonitorManager;
 use rules::AppConfig;
 use tab::com::ComStatsSnapshot;
 use ui::tray::{
-    IDM_EXIT, IDM_OPEN_SETTINGS, IDM_PROBE_TOTALCMD, IDM_PROBE_XYPLORER, IDM_SHOW_CANDIDATES,
-    IDM_TOGGLE_AUTOSTART, IDM_TOGGLE_AUTOSWITCH, IDM_TOGGLE_MONITOR, TrayIcon, WM_TRAY_CALLBACK,
+    IDM_DOWNLOAD_UPDATE, IDM_EXIT, IDM_OPEN_SETTINGS, IDM_PROBE_TOTALCMD, IDM_PROBE_XYPLORER,
+    IDM_SHOW_CANDIDATES, IDM_TOGGLE_AUTOSTART, IDM_TOGGLE_AUTOSWITCH, IDM_TOGGLE_MONITOR,
+    NIN_BALLOONUSERCLICK, TrayIcon, WM_TRAY_CALLBACK,
 };
 use ui::{FloatingBar, SettingsWindow};
 use win32::autostart::set_autostart;
@@ -55,6 +56,8 @@ const WM_QUICKPATH_MANAGER_SCAN_RESULT: u32 = 0x0400 + 105;
 const WM_QUICKPATH_CANDIDATES_REFRESH: u32 = 0x0400 + 106;
 /// 用户显式触发的一次性探测结果回传（审计报告 U-01）
 const WM_QUICKPATH_EXPLICIT_PROBE_RESULT: u32 = 0x0400 + 107;
+/// 发现新版本回传通知（由后台启动检测线程投递）
+const WM_QUICKPATH_NEW_VERSION_AVAILABLE: u32 = 0x0400 + 108;
 /// 对话框控件异步初始化期间的最大探测次数与间隔
 /// （合计约 1.2s：慢速机器/首次加载的 shell 扩展常需数百毫秒才出现
 ///  DirectUIHWND / ComboBoxEx32 / Edit，过短会导致完全不弹窗）
@@ -80,6 +83,9 @@ static EXPLICIT_PROBE_TX: OnceLock<Sender<ExplicitProbeResult>> = OnceLock::new(
 /// 菜单关闭（选中或取消）后立即清空。因此同一 `request_id` 不可能被两条命令复用。
 static PENDING_TRAY_TRIGGER: Mutex<[Option<managers::explicit_probe::TriggerSnapshot>; 2]> =
     Mutex::new([None, None]);
+
+/// 异步检测到的新版本信息暂存（供宿主消息泵读取并提醒）
+static PENDING_UPDATE: Mutex<Option<win32::updater::UpdateCheckResult>> = Mutex::new(None);
 
 thread_local! {
     /// 宿主消息线程独占的 `AppState` 拥有值。
@@ -155,6 +161,8 @@ pub struct AppState {
     pub manager_scan_stale_dropped: u64,
     /// 已为哪个对话框补刷过一次候选列表（冷启动补偿只做一次）
     pub refreshed_dialog: Option<HWND>,
+    /// 启动时异步查询到的可用新版本信息（若有）
+    pub available_update: Option<win32::updater::UpdateCheckResult>,
     /// 后台文件管理器扫描结果回传通道的接收端（宿主消息线程独占）
     scan_rx: Receiver<ManagerScanResult>,
     /// 显式探测结果回传通道的接收端（宿主消息线程独占，审计报告 U-01）
@@ -276,6 +284,7 @@ fn main() {
             manager_scan_generation: 0,
             manager_scan_stale_dropped: 0,
             refreshed_dialog: None,
+            available_update: None,
             scan_rx,
             probe_rx,
         };
@@ -294,7 +303,31 @@ fn main() {
             with_state(|state| open_settings(state));
         }
 
-        // 7. 进入 Win32 标准消息驱动循环
+        // 7. 异步检查 GitHub Release 最新版本（非阻塞、单次轻量、失败静默放弃，绝不重试打扰）
+        let host_raw = host_hwnd.0 as usize;
+        thread::Builder::new()
+            .name("quickpath-update-checker".into())
+            .spawn(move || {
+                if let Some(res) =
+                    win32::updater::check_for_updates_quietly(rules::version::APP_VERSION)
+                {
+                    if let Ok(mut lock) = PENDING_UPDATE.lock() {
+                        *lock = Some(res);
+                    }
+                    let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                    if !host_ptr.is_null() {
+                        let _ = PostMessageW(
+                            Some(HWND(host_raw as *mut _)),
+                            WM_QUICKPATH_NEW_VERSION_AVAILABLE,
+                            WPARAM(0),
+                            LPARAM(0),
+                        );
+                    }
+                }
+            })
+            .ok();
+
+        // 8. 进入 Win32 标准消息驱动循环
         //
         // `GetMessageW` 返回的是三态 `BOOL`：>0 有消息、0 收到 `WM_QUIT`、-1 表示出错。
         // `BOOL(-1)` 非零，用 `as_bool()` 判真会把错误态当成“有消息”，使宿主循环在消息
@@ -510,10 +543,18 @@ unsafe extern "system" fn host_wnd_proc(
                         explicit_probe_menu_ready(state, &snapshots),
                         state.config.language.clone(),
                         state.config.hotkey.clone(),
+                        state.available_update.clone(),
                     )
                 });
-                if let Some((auto_switch, autostart, monitor, probe_ready, language, hotkey)) =
-                    menu_ctx
+                if let Some((
+                    auto_switch,
+                    autostart,
+                    monitor,
+                    probe_ready,
+                    language,
+                    hotkey,
+                    available_update,
+                )) = menu_ctx
                 {
                     TrayIcon::show_context_menu(
                         hwnd,
@@ -523,18 +564,55 @@ unsafe extern "system" fn host_wnd_proc(
                         probe_ready,
                         language,
                         &hotkey,
+                        available_update.as_ref(),
                     );
                 }
                 // 菜单关闭（选中或取消）后清空快照：同一 request_id 只能被消费一次。
                 clear_pending_tray_trigger();
             } else if event == WM_LBUTTONUP {
                 with_state(|state| open_settings(state));
+            } else if event == NIN_BALLOONUSERCLICK {
+                // 用户点击托盘气泡提示：直达 GitHub 下载最新版
+                with_state(|state| {
+                    let url = state
+                        .available_update
+                        .as_ref()
+                        .map(|u| u.download_url.as_str())
+                        .unwrap_or(win32::updater::DEFAULT_RELEASES_URL);
+                    open_url_in_browser(url);
+                });
             }
+            LRESULT(0)
+        }
+        WM_QUICKPATH_NEW_VERSION_AVAILABLE => {
+            // 后台更新检测线程发回通知：提取最新版本，更新状态并弹出托盘气泡
+            with_state(|state| {
+                if let Ok(mut lock) = PENDING_UPDATE.lock()
+                    && let Some(update) = lock.take()
+                {
+                    let (title, text) = crate::rules::I18n::tray_update_bubble(
+                        &state.config.language,
+                        &update.latest_version,
+                    );
+                    ui::tray::notify(&title, &text);
+                    state.available_update = Some(update);
+                }
+            });
             LRESULT(0)
         }
         WM_COMMAND => {
             let cmd_id = wparam.0 & 0xffff;
             match cmd_id {
+                IDM_DOWNLOAD_UPDATE => {
+                    with_state(|state| {
+                        let url = state
+                            .available_update
+                            .as_ref()
+                            .map(|u| u.download_url.as_str())
+                            .unwrap_or(win32::updater::DEFAULT_RELEASES_URL);
+                        open_url_in_browser(url);
+                    });
+                }
                 IDM_TOGGLE_AUTOSWITCH => {
                     with_state(|state| {
                         state.config.auto_switch_enabled = !state.config.auto_switch_enabled;
@@ -1112,6 +1190,18 @@ fn open_settings(state: &AppState) {
     }
 }
 
+/// 在系统默认浏览器中安全打开指定 URL
+fn open_url_in_browser(url_str: &str) {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::HSTRING;
+
+    let url = HSTRING::from(url_str);
+    unsafe {
+        ShellExecuteW(None, w!("open"), &url, None, None, SW_SHOWNORMAL);
+    }
+}
+
 /// 托盘菜单里两个「获取当前路径」条目的可用性（`[Total Commander, XYplorer]`）。
 ///
 /// 只有「已授权 **且** 当前没有探测在跑 **且** 该快照有效」时才可点击；否则置灰
@@ -1371,6 +1461,7 @@ mod tests {
             manager_scan_generation: 0,
             manager_scan_stale_dropped: 0,
             refreshed_dialog: None,
+            available_update: None,
             scan_rx: rx,
             probe_rx,
         }

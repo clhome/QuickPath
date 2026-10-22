@@ -615,6 +615,32 @@ impl I18n {
         if value.is_empty() { fallback } else { value }
     }
 
+    /// 托盘右键菜单：发现新版本提示文案
+    pub fn tray_new_version(lang: &Language, version: &str) -> String {
+        let zh = Self::resolve_locale_code(lang) == "zh-CN";
+        if zh {
+            format!("🎉 发现新版本 {} (点击下载)", version)
+        } else {
+            format!("🎉 New Version {} (Click to Download)", version)
+        }
+    }
+
+    /// 托盘气泡：发现新版本通知的标题与正文
+    pub fn tray_update_bubble(lang: &Language, version: &str) -> (String, String) {
+        let zh = Self::resolve_locale_code(lang) == "zh-CN";
+        if zh {
+            (
+                format!("QuickPath 发现新版本 {}", version),
+                "点击此处前往 GitHub 下载最新版本".to_string(),
+            )
+        } else {
+            (
+                format!("QuickPath New Version {}", version),
+                "Click here to download the latest release from GitHub".to_string(),
+            )
+        }
+    }
+
     /// 管理器联动页的文案（审计报告 U-01），缺失时回退到内置默认。
     pub fn integration_texts(lang: &Language) -> IntegrationTexts {
         let section = &Self::get_bundle(lang).integration;

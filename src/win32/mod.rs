@@ -7,4 +7,5 @@ pub mod icon;
 pub mod ime;
 pub mod trusted;
 pub mod uia;
+pub mod updater;
 pub mod version;

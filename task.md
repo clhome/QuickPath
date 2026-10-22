@@ -1983,4 +1983,27 @@
   - [x] 清理 `test/` 临时排查探针文件 `test/inspect_adapter.rs`
   - [x] 更新 `task.md` 完成状态与交付记录
 
+---
+
+## 阶段七十四：软件启动时 GitHub Release 新版本自动检测与静默直达提醒 (Startup Version Check & Quiet Update Notice)
+
+> **目标**：在软件启动时，异步查询 GitHub releases（`https://api.github.com/repos/clhome/QuickPath/releases/latest`），若失败（超时、网络不通）立即静默放弃、绝不重试、绝不打扰用户；若有新版本，通过托盘气泡提醒，支持点击气泡直达网页下载，并在托盘右键菜单增加醒目直达条目。
+
+- [x] **74.1 核心更新检测引擎 (`src/win32/updater.rs`)**
+  - [x] 基于 Windows 原生 `WinHttp` 实现轻量安全 HTTP GET 请求（`WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` 自动复用代理；严格 5s 超时；失败立即静默放弃，0 重试不阻塞）
+  - [x] 实现 GitHub Releases API 数据反序列化与提取（`tag_name` 与 `html_url`）
+  - [x] 实现健壮的语义化版本比较算法 `is_newer_version(remote, current)`（剥离 v 前缀，支持 SemVer 比较）
+- [x] **74.2 宿主事件循环与托盘交互联动 (`src/main.rs`, `src/ui/tray.rs`)**
+  - [x] 注册新版本状态与通知消息 `WM_QUICKPATH_NEW_VERSION_AVAILABLE`
+  - [x] 启动阶段拉起后台无阻断检查线程，检测到新版本时投递消息并触发托盘气泡通知
+  - [x] 托盘回调捕获 `NIN_BALLOONUSERCLICK`，点击气泡调用 `ShellExecuteW` 直达下载网页
+  - [x] 托盘右键菜单增加动态项目 `IDM_DOWNLOAD_UPDATE`（“🎉 发现新版本 vX.Y.Z (点击下载)”）及点击事件处理
+- [x] **74.3 自动化测试与质量门禁 (`src/win32/updater.rs`, `Cargo.toml`)**
+  - [x] 编写语义化版本比较单测（正向更新、相同版本、旧版本、畸形字符串、带 v 前缀等边界）
+  - [x] 变异自证（故意将版本比较颠倒，断言单元测试精准变红并自愈）
+  - [x] 全量门禁校验：`cargo fmt -- --check` 干净、`cargo clippy --all-targets -- -D warnings` 0 告警、`cargo test --bin quickpath -- --test-threads=1` 237 → 242 全绿、`cargo build --release` 编译通过
+- [x] **74.4 进度同步与交付收尾**
+  - [x] 更新 `task.md` 各子项勾选状态与完成记录
+  - [x] 验证运行状态并向用户汇报交付总结
+
 
