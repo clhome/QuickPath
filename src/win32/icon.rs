@@ -17,6 +17,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
+/// 主应用程序图标在嵌入资源脚本中的标识符（对应 build.rs 中的 `1 ICON "logo.ico"`）
+pub const IDI_APP_MAIN: u16 = 1;
+
+/// Win32 `MAKEINTRESOURCEW` 宏实现：将 16 位无符号整数资源 ID 转为 `PCWSTR`。
+///
+/// Win32 规范约定：若指针高 16 位（在高 64 位体系中为除低 16 位外的所有高位）为 0，
+/// 则低 16 位直接表示整数资源 ID，供 `LoadImageW` / `FindResourceW` 等函数识别。
+#[inline]
+pub const fn make_int_resource_w(id: u16) -> PCWSTR {
+    PCWSTR(id as usize as *const u16)
+}
+
 /// 智能获取应用专属 Logo 图标
 /// small = true: 小图标（系统托盘、窗口左上角徽标，自适应 16x16 / 32x32）
 /// small = false: 大图标（任务栏切换徽标，自适应 32x32 / 48x48）
@@ -31,7 +43,7 @@ pub fn get_app_icon(small: bool) -> HICON {
 
         if let Ok(handle) = LoadImageW(
             Some(HINSTANCE(hinstance.0)),
-            PCWSTR(std::ptr::dangling::<u16>()),
+            make_int_resource_w(IDI_APP_MAIN),
             IMAGE_ICON,
             cx,
             cy,
@@ -206,4 +218,65 @@ pub unsafe fn draw_github_png(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_make_int_resource_w_conforms_to_win32_is_int_resource() {
+        let pcwstr = make_int_resource_w(IDI_APP_MAIN);
+        let ptr_val = pcwstr.0 as usize;
+        // Win32 IS_INTRESOURCE 宏规范: (((ULONG_PTR)(x) >> 16) == 0)
+        assert_eq!(
+            ptr_val >> 16,
+            0,
+            "高位必须全为 0，Win32 才会将其识别为整数资源 ID"
+        );
+        assert_eq!(
+            ptr_val & 0xFFFF,
+            1,
+            "低 16 位必须与 IDI_APP_MAIN 保持严格一致"
+        );
+    }
+
+    #[test]
+    fn test_icon_source_guards_resource_id_consistency_with_build_rs() {
+        let icon_src = include_str!("icon.rs");
+        let build_src = include_str!("../../build.rs");
+
+        // 仅截取非测试代码（mod tests 之前）进行生产代码安全性检查
+        let prod_src = icon_src.split("#[cfg(test)]").next().unwrap_or(icon_src);
+
+        // 源码级守卫：杜绝再次将资源 ID 误写为悬垂指针 dangling（探针用 concat! 运行时拼装避免测试自命中）
+        let forbidden_dangling = concat!("std::ptr", "::dangling");
+        assert!(
+            !prod_src.contains(forbidden_dangling),
+            "icon.rs 生产代码禁止使用 dangling 作为资源 ID 指针"
+        );
+        assert!(
+            prod_src.contains("make_int_resource_w(IDI_APP_MAIN)"),
+            "get_app_icon 必须通过 make_int_resource_w(IDI_APP_MAIN) 传入资源 ID"
+        );
+
+        // 守卫与 build.rs 中 RC 脚本声明一致：1 ICON "logo.ico"
+        assert!(
+            build_src.contains("1 ICON \"logo.ico\""),
+            "build.rs 必须包含 1 ICON \"logo.ico\""
+        );
+        assert_eq!(
+            IDI_APP_MAIN, 1,
+            "IDI_APP_MAIN 必须与 build.rs 中的 ICON 资源 ID 1 匹配"
+        );
+    }
+
+    #[test]
+    fn test_get_app_icon_returns_non_null_hicon() {
+        let sm = get_app_icon(true);
+        assert!(!sm.0.is_null(), "小图标（托盘）获取失败，句柄为空");
+
+        let lg = get_app_icon(false);
+        assert!(!lg.0.is_null(), "大图标（窗口）获取失败，句柄为空");
+    }
 }

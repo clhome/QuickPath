@@ -1933,3 +1933,25 @@
 **未闭合**:需在 GitHub Actions 复跑同一提交确认转绿;真机 §10~§15 不变。
 **纪律偏离声明**:本轮探针为一次性排查工具(放在 `test/` 后已删,未进提交),
 代码与文档改动全部使用原生工具;变异施加与还原也用 `edit` 完成。
+
+---
+
+# 阶段三十三：系统托盘与窗口主图标资源加载修复 (Tray & Window Icon Fix)
+
+**现象**：用户反馈状态栏图标丢失，系统托盘图标回退为 Windows 默认应用白板占位图标（`IDI_APPLICATION`）。  
+**根因排查**：在历史提交 `5272e83`（“加固”）中，`src/win32/icon.rs` 的 `PCWSTR(1 as *const u16)` 被误修改为 `PCWSTR(std::ptr::dangling::<u16>())`。`std::ptr::dangling::<u16>()` 返回地址为 `0x0002`，传给 `LoadImageW` 时被作为资源 ID 2 传递给 Win32 子系统。而 `build.rs` 生成的 RC 脚本中图标资源 ID 为 1（`1 ICON "logo.ico"`），无 ID 2 资源，`LoadImageW` 失败（错误码 1813 `ERROR_RESOURCE_NAME_NOT_FOUND`），导致进入 fallback 分支 `LoadIconW(None, IDI_APPLICATION)`，托盘图标与窗口小图标均降级为默认白板图标。  
+实测探针（`test/probe_icon.ps1`）：Win32 原生调用 ID 1 成功返回非空图标句柄，调用 ID 2 必报 1813 错误。
+
+- [x] **33.1 修复资源 ID 宏定义与图标加载**
+  - [x] 在 `src/win32/icon.rs` 封装 Win32 `MAKEINTRESOURCEW` 宏：`make_int_resource_w(id: u16) -> PCWSTR` 并定义主图标常量 `IDI_APP_MAIN = 1`
+  - [x] 修复 `get_app_icon` 中 `LoadImageW` 资源引用，替换悬垂指针为 `make_int_resource_w(IDI_APP_MAIN)`
+- [x] **33.2 增加单元测试与源码守卫**
+  - [x] 验证 `make_int_resource_w` 指针低 16 位与高 16 位符合 Win32 资源 ID 规范（`test_make_int_resource_w_conforms_to_win32_is_int_resource`）
+  - [x] 源码静态守卫：严禁 `icon.rs` 生产代码中出现 `dangling`，且图标资源 ID 必须与 `build.rs` 的 `1 ICON` 保持一致（`test_icon_source_guards_resource_id_consistency_with_build_rs`）
+  - [x] 运行时测试验证 `get_app_icon` 可成功返回有效图标句柄（`test_get_app_icon_returns_non_null_hicon`）
+- [x] **33.3 全量验证、变异自证与清理收尾**
+  - [x] 变异自证 1：将 `IDI_APP_MAIN` 改为 2 时，`test_make_int_resource_w_conforms_to_win32_is_int_resource` 与 `test_icon_source_guards_resource_id_consistency_with_build_rs` 双双变红；
+  - [x] 变异自证 2：将参数改回 `PCWSTR(std::ptr::dangling::<u16>())` 时，守卫测试精准变红并拦截；
+  - [x] 门禁执行：`cargo fmt -- --check` 干净、`cargo clippy --all-targets -- -D warnings` 0 告警、`cargo test --all-targets` 230 → 233 全绿、`cargo build --release` 编译通过；
+  - [x] 洁净收尾：排查探针 `test/probe_icon.ps1` 已彻底清理，无遗留文件。
+
