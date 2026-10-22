@@ -104,8 +104,13 @@ impl TooltipData {
             &bundle.monitor.tooltip_net_speed
         };
         let net_line = format!(
-            "{}: ↑ {:.1} Mbps  ↓ {:.1} Mbps{}",
-            net_lbl, snapshot.network.upload_mbps, snapshot.network.download_mbps, net_top
+            "{}: ↑ {:.1} Mbps ({:.2} MB/s)  ↓ {:.1} Mbps ({:.2} MB/s){}",
+            net_lbl,
+            snapshot.network.upload_mbps,
+            snapshot.network.upload_mb_s,
+            snapshot.network.download_mbps,
+            snapshot.network.download_mb_s,
+            net_top
         );
 
         let total_mb = snapshot.network.total_bytes_session as f64 / (1024.0 * 1024.0);
@@ -1315,7 +1320,7 @@ mod tests {
         assert_eq!(data.lines[1].icon, MetricIconKind::NetworkSpeed);
         assert_eq!(
             data.lines[1].text,
-            "实时网速: ↑ 0.1 Mbps  ↓ 0.1 Mbps (Top: chrome.exe)"
+            "实时网速: ↑ 0.1 Mbps (0.01 MB/s)  ↓ 0.1 Mbps (0.02 MB/s) (Top: chrome.exe)"
         );
 
         assert_eq!(data.lines[2].icon, MetricIconKind::Cpu);
@@ -1371,7 +1376,7 @@ mod tests {
         assert_eq!(data.lines[1].icon, MetricIconKind::NetworkSpeed);
         assert_eq!(
             data.lines[1].text,
-            "Network Speed: ↑ 0.1 Mbps  ↓ 0.1 Mbps (Top: chrome.exe)"
+            "Network Speed: ↑ 0.1 Mbps (0.01 MB/s)  ↓ 0.1 Mbps (0.02 MB/s) (Top: chrome.exe)"
         );
 
         assert_eq!(data.lines[2].icon, MetricIconKind::Cpu);

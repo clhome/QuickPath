@@ -1955,3 +1955,32 @@
   - [x] 门禁执行：`cargo fmt -- --check` 干净、`cargo clippy --all-targets -- -D warnings` 0 告警、`cargo test --all-targets` 230 → 233 全绿、`cargo build --release` 编译通过；
   - [x] 洁净收尾：排查探针 `test/probe_icon.ps1` 已彻底清理，无遗留文件。
 
+---
+
+## 阶段七十三：网络速率采集算法重构与任务管理器精度对齐 (Network Speed Accurate Metrics Fix)
+
+> **现象**：网速计算与 Windows 任务管理器存在严重偏差（实测偏大 500%，且在网络连接变化时瞬时脉冲跳变）。  
+> **根因**：
+> 1. `GetIfTable2` 枚举出的不仅是物理网卡，还包括该网卡上的所有 NDIS 轻量级过滤驱动（LWF，如 QoS 计划程序、火绒安全、WFP 过滤层等）。旧算法仅按字符串关键字过滤，未检查 `InterfaceAndOperStatusFlags` 的 `FilterInterface` 和 `HardwareInterface`，导致同一份数据包流量被重复累加 5 次（偏大 500%）；
+> 2. 旧算法将所有在线网卡的历史累计总流量直接全局累加，在网卡上下线/重连时将数 GB 历史累计流量误当作当期增量，产生高达数千 Mbps 的虚假流量尖峰；
+> 3. 主网卡名称根据开机历史累计流量判断，而非当期实时流量，导致网卡切换后张冠李戴；
+> 4. Tooltip 缺少 MB/s 双单位对照。
+
+- [x] **73.1 核心网络采集器重构 (`src/monitor/collector/network.rs`)**
+  - [x] 严格按 `HardwareInterface == true && FilterInterface == false` 过滤 NDIS 过滤器与虚拟驱动，彻底根治 5 倍流量重复累加
+  - [x] 接口类型严格限定为 Ethernet (6)、WiFi (71)、WWAN (243/244)，彻底排除隧道 (131) 与回环 (24)
+  - [x] 引入 `NetworkDeltaTracker` 按 Interface LUID 独立跟踪单网卡增量，新上线网卡首轮建立基准不产生突发增量（0 虚假暴增）
+  - [x] 动态选择当前周期流量增量最大的物理网卡作为活跃主网卡，空闲时平滑保持
+  - [x] 会话累计流量基于物理网卡增量真实累加，杜绝污染
+- [x] **73.2 悬浮窗 Tooltip 双单位格式化展示 (`src/monitor/window/tooltip.rs`)**
+  - [x] Tooltip 实时网速补充展示 MB/s：`↑ {:.1} Mbps ({:.2} MB/s)  ↓ {:.1} Mbps ({:.2} MB/s)`
+- [x] **73.3 自动化测试与质量门禁 (`src/monitor/collector/network.rs`, `src/monitor/window/tooltip.rs`)**
+  - [x] 编写 NDIS 过滤器隔离单测（`test_physical_active_adapter_filtering`），覆盖 9 种网卡状态与驱动类型
+  - [x] 编写网卡热插拔/新网卡上线防突发暴增单测（`test_network_delta_tracker_baseline_no_spike`、`test_network_delta_tracker_adapter_offline_resilience`）
+  - [x] 完成两次变异自证（变异 1 移除过滤驱动拦截精准变红；变异 2 模拟旧代码新网卡首轮累加历史流量精准变红）
+  - [x] 执行 `cargo fmt -- --check` 干净、`cargo clippy --all-targets -- -D warnings` 0 告警、`cargo test --bin quickpath -- --test-threads=1` 233 → 237 全绿
+- [x] **73.4 收尾清理与进度同步**
+  - [x] 清理 `test/` 临时排查探针文件 `test/inspect_adapter.rs`
+  - [x] 更新 `task.md` 完成状态与交付记录
+
+
