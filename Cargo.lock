@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "quickpath"
-version = "1.2.3"
+version = "1.2.4"
 dependencies = [
  "arc-swap",
  "directories",

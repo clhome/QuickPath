@@ -18,11 +18,10 @@ pub fn get_app_version_tag() -> String {
 mod tests {
     use super::*;
 
-    /// D-01 守卫：README 徽章必须跟随单一版本源（`Cargo.toml`），不得再次漂移。
+    /// D-01 守卫：README 必须挂载官方动态 GitHub Release 自动抓取徽章与一致的 edition。
     ///
-    /// 背景（审计报告 D-01）：曾出现 `Cargo.toml` 已是 1.2.1 / edition 2024，
-    /// 而两份 README 徽章仍停在 v1.2.0 / Rust 2021。这里在编译期把 README 纳入追踪，
-    /// 一旦版本或 edition 变更而 README 未同步，测试直接报红。
+    /// 背景：采用 Shields.io 官方动态 GitHub Release 抓取徽章，GitHub 发版即秒级自动联动，
+    /// 彻底消除 markdown 硬编码死版本与手动修改成本。
     #[test]
     fn test_readme_badges_track_single_version_source() {
         const README: &str = include_str!("../../README.md");
@@ -35,15 +34,23 @@ mod tests {
             .and_then(|rest| rest.split('"').nth(1))
             .expect("Cargo.toml 必须声明 edition");
 
-        let version_badge = format!("Version-{}", get_app_version_tag());
+        const DYNAMIC_RELEASE_BADGE: &str =
+            "https://img.shields.io/github/v/release/clhome/QuickPath?color=success&label=Version";
+        const RELEASES_TARGET_URL: &str = "https://github.com/clhome/QuickPath/releases/latest";
         let language_badge = format!("Language-Rust%20{}", edition);
 
         for (name, content) in [("README.md", README), ("README_CN.md", README_CN)] {
             assert!(
-                content.contains(&version_badge),
-                "{} 的版本徽章必须为 {}（单一版本源）",
+                content.contains(DYNAMIC_RELEASE_BADGE),
+                "{} 必须挂载官方动态 GitHub Release 徽章: {}",
                 name,
-                get_app_version_tag()
+                DYNAMIC_RELEASE_BADGE
+            );
+            assert!(
+                content.contains(RELEASES_TARGET_URL),
+                "{} 的版本徽章点击必须直达 GitHub 最新发布页: {}",
+                name,
+                RELEASES_TARGET_URL
             );
             assert!(
                 content.contains(&language_badge),
@@ -90,24 +97,32 @@ mod tests {
         );
     }
 
-    /// M-01 守卫：`app.manifest` 模板的 assemblyIdentity 版本号必须跟随单一版本源，
-    /// 且必须是四段式（不足四位补 `0`，与 `build.rs` 写入 OUT_DIR 的规范化结果一致）。
+    /// M-01 守卫（单一版本源自动化）：验证最终编译进二进制的 `OUT_DIR/app.manifest` 清单，
+    /// 其 assemblyIdentity 版本号由 `build.rs` 自动根据 `Cargo.toml` 注入四段式版本号。
     ///
-    /// 背景（审计报告 M-01）：版本升级时 `app.manifest` 模板仍停留在旧值，属同一处漂移。
-    /// `build.rs` 只改写 OUT_DIR 里的清单副本、**不改写源码树模板**（审计报告 P2-03），
-    /// 所以源码树这份模板必须由守卫测试锁定，否则模板会再次静默落后。
+    /// 开发者升级版本时只需修改 `Cargo.toml` 一处，源码根目录的 `app.manifest` 作为模板存在，
+    /// 无论根目录模板写什么，本测试都保证编译注入后的真实清单严格等于单一版本源。
     #[test]
     fn test_app_manifest_version_tracks_single_version_source() {
-        const APP_MANIFEST: &str = include_str!("../../app.manifest");
+        const GENERATED_MANIFEST: &str = include_str!(concat!(env!("OUT_DIR"), "/app.manifest"));
+        const TEMPLATE_MANIFEST: &str = include_str!("../../app.manifest");
 
-        // 与 build.rs 相同的四段式规范化：不足四段补 "0"，取前四段。
+        // 1. 验证源码根目录模板结构健全，包含 version= 替换锚点
+        assert!(
+            TEMPLATE_MANIFEST
+                .lines()
+                .any(|l| l.trim_start().starts_with("version=")),
+            "源码根目录 app.manifest 模板必须包含以 version= 开头的替换锚点行"
+        );
+
+        // 2. 验证 build.rs 输出到 OUT_DIR 的真实清单版本严格等于 Cargo.toml 的四段式规范化版本
         let mut parts: Vec<&str> = APP_VERSION.split('.').collect();
         while parts.len() < 4 {
             parts.push("0");
         }
         let expected = format!("version=\"{}\"", parts[..4].join("."));
 
-        let actual = APP_MANIFEST
+        let actual = GENERATED_MANIFEST
             .lines()
             .map(str::trim)
             .find(|line| line.starts_with("version="))
@@ -115,7 +130,7 @@ mod tests {
 
         assert_eq!(
             actual, expected,
-            "app.manifest 的版本必须为四段式 {}（跟随 Cargo.toml 的 {}），实际为 {}",
+            "OUT_DIR 生成的清单版本必须为四段式 {}（跟随 Cargo.toml 的 {}），实际为 {}",
             expected, APP_VERSION, actual
         );
     }

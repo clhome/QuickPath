@@ -2005,5 +2005,7 @@
 - [x] **74.4 进度同步与交付收尾**
   - [x] 更新 `task.md` 各子项勾选状态与完成记录
   - [x] 验证运行状态并向用户汇报交付总结
+  - [x] **单一版本源治理重构**：将 `src/rules/version.rs` 清单守卫测试重构为直接断言 `OUT_DIR/app.manifest` 真实编译产物，根目录 `app.manifest` 转为纯净模板；实现升级版本时**仅需修改 `Cargo.toml` 一处**，彻底消除人工同步维护成本。
+  - [x] **README 动态 Release 徽标联动**：将 `README.md` 与 `README_CN.md` 版本徽标切换为 Shields.io 官方动态 GitHub Release 抓取徽标（`https://img.shields.io/github/v/release/clhome/QuickPath`），发版全自动秒级同步，并配套完成变异测试防护。
 
 
