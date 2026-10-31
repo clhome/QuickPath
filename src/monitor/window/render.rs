@@ -274,13 +274,13 @@ pub unsafe fn render_bar_window(
 }
 
 // 核心状态指示多色 (与底部色块完全统一)
-const COLOR_METRIC_GREEN: COLORREF = COLORREF(0x0059C734); // 鲜绿 (20% ~ 70% / 10 ~ 50 Mbps)
-const COLOR_METRIC_YELLOW: COLORREF = COLORREF(0x0000CCFF); // 亮黄 (70% ~ 85% / 50 ~ 80 Mbps)
-const COLOR_METRIC_RED: COLORREF = COLORREF(0x00303BFF); // 鲜红 (> 85% / > 80 Mbps)
+pub(crate) const COLOR_METRIC_GREEN: COLORREF = COLORREF(0x0059C734); // 鲜绿 (20% ~ 70% / 10 ~ 50 Mbps)
+pub(crate) const COLOR_METRIC_YELLOW: COLORREF = COLORREF(0x0000CCFF); // 亮黄 (70% ~ 85% / 50 ~ 80 Mbps)
+pub(crate) const COLOR_METRIC_RED: COLORREF = COLORREF(0x00303BFF); // 鲜红 (> 85% / > 80 Mbps)
 
 /// 根据百分比利用率计算动态四档状态色 (<20% 基色/白, 20%~70% 绿, 70%~85% 黄, >85% 红)
 #[inline]
-fn get_metric_status_color(percent: f32, base_color: COLORREF) -> COLORREF {
+pub(crate) fn get_metric_status_color(percent: f32, base_color: COLORREF) -> COLORREF {
     if percent > 85.0 {
         COLOR_METRIC_RED
     } else if percent >= 70.0 {

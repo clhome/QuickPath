@@ -2058,6 +2058,26 @@
   - [x] 执行全量门禁：`cargo fmt -- --check` 0 差异、`cargo clippy --all-targets -- -D warnings` 0 告警、Release 构建通过
   - [x] 同步更新 `task.md` 记录实施进展与技术沉淀
 
+---
+
+## 阶段七十七：硬件看板指标动态负载状态色同步 (Tooltip Hardware Metrics Dynamic Status Color)
+
+> **目标**：在悬停呼出的硬件看板中，CPU（处理器）、物理内存、独立显卡、磁盘 I/O 4 行文本与任务栏指示保持一致的数值分级动态变色逻辑（<20% 默认基色、20%~70% 绿色、70%~85% 亮黄色、>85% 红色），并且整行文字均渲染该状态颜色，兼顾深色/浅色主题。
+
+- [x] **77.1 状态色计算函数与常量可见性暴露 (`src/monitor/window/render.rs`)**
+  - [x] 将 `COLOR_METRIC_GREEN`、`COLOR_METRIC_YELLOW`、`COLOR_METRIC_RED` 及 `get_metric_status_color` 标记为 `pub(crate)` 供跨模块复用
+- [x] **77.2 硬件看板行模型与快照映射扩展 (`src/monitor/window/tooltip.rs`)**
+  - [x] `TooltipLine` 结构体新增 `pub usage_percent: Option<f32>`
+  - [x] `TooltipData::from_snapshot` 准确映射 CPU、内存、显卡、磁盘 I/O 实时百分比数值，其余行设为 `None`
+- [x] **77.3 看板整行文本动态着色渲染实现 (`src/monitor/window/tooltip.rs`)**
+  - [x] 行绘制循环中依据 `line.usage_percent` 动态计算行前景色，整行文字调用 `SetTextColor` 并上屏
+  - [x] 自适应浅色与深色主题基色回退机制
+- [x] **77.4 自动化单测、门禁检验与交付验收 (`src/monitor/window/tooltip.rs`, `task.md`)**
+  - [x] 编写看板行百分比映射单测与动态行颜色计算测试
+  - [x] 运行 `cargo test`（251 个单测全绿）、`cargo clippy --all-targets -- -D warnings`（0 告警）、`cargo fmt -- --check`（0 差异）验证通过
+  - [x] 更新 `task.md` 打勾完成状态并沉淀规范
+
+
 
 
 

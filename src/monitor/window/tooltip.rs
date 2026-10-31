@@ -4,6 +4,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use crate::monitor::metrics::MetricsSnapshot;
+use crate::monitor::window::render::get_metric_status_color;
 use crate::rules::{I18n, Language};
 use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
@@ -56,6 +57,7 @@ pub enum MetricIconKind {
 pub struct TooltipLine {
     pub icon: MetricIconKind,
     pub text: String,
+    pub usage_percent: Option<f32>,
 }
 
 struct TooltipInner {
@@ -274,30 +276,37 @@ impl TooltipData {
             TooltipLine {
                 icon: MetricIconKind::NetworkAdapter,
                 text: adapter_line,
+                usage_percent: None,
             },
             TooltipLine {
                 icon: MetricIconKind::NetworkSpeed,
                 text: net_line,
+                usage_percent: None,
             },
             TooltipLine {
                 icon: MetricIconKind::Cpu,
                 text: cpu_line,
+                usage_percent: Some(snapshot.cpu.usage_percent),
             },
             TooltipLine {
                 icon: MetricIconKind::Memory,
                 text: mem_line,
+                usage_percent: Some(snapshot.memory.usage_percent as f32),
             },
             TooltipLine {
                 icon: MetricIconKind::Gpu,
                 text: gpu_line,
+                usage_percent: snapshot.gpu.usage_percent,
             },
             TooltipLine {
                 icon: MetricIconKind::Disk,
                 text: disk_line,
+                usage_percent: Some(snapshot.disk.activity_percent),
             },
             TooltipLine {
                 icon: MetricIconKind::Uptime,
                 text: uptime_line,
+                usage_percent: None,
             },
         ];
 
@@ -323,6 +332,7 @@ impl TooltipData {
             lines.push(TooltipLine {
                 icon: MetricIconKind::Power,
                 text: format!("{}: {}% ({})", power_lbl, percent, state_str),
+                usage_percent: None,
             });
         }
 
@@ -827,13 +837,17 @@ impl TooltipInner {
         });
 
         let _ = SelectObject(mem_dc, HGDIOBJ(font_text.0 as _));
-        SetTextColor(mem_dc, text_color_body);
         for (i, line) in data.lines.iter().enumerate() {
             draw_metric_icon(
                 mem_dc, line.icon, pad_x, cur_y, icon_box_w, line_h, scale, is_dark,
             );
             let _ = SelectObject(mem_dc, HGDIOBJ(font_text.0 as _));
-            SetTextColor(mem_dc, text_color_body);
+            let line_color = if let Some(percent) = line.usage_percent {
+                get_metric_status_color(percent, text_color_body)
+            } else {
+                text_color_body
+            };
+            SetTextColor(mem_dc, line_color);
             draw_gdi_line(mem_dc, &line.text, text_x, cur_y, text_w, line_h);
             cur_y += line_h;
 
@@ -1452,5 +1466,74 @@ mod tests {
         let data_en2 = TooltipData::from_snapshot(&snap, &Language::EnUS);
         assert_eq!(data_zh2.lines[6].text, "连续运行: 45分");
         assert_eq!(data_en2.lines[6].text, "Uptime: 45m");
+    }
+
+    #[test]
+    fn test_tooltip_metrics_usage_percent_mapping() {
+        let snap = create_mock_snapshot();
+        let data = TooltipData::from_snapshot(&snap, &Language::ZhCN);
+
+        // 网络接口与网速不绑定动态状态百分比
+        assert_eq!(data.lines[0].usage_percent, None);
+        assert_eq!(data.lines[1].usage_percent, None);
+
+        // 核心硬件 4 项指标准确绑定百分比
+        assert_eq!(data.lines[2].usage_percent, Some(3.0));
+        assert_eq!(data.lines[3].usage_percent, Some(52.0));
+        assert_eq!(data.lines[4].usage_percent, Some(2.0));
+        assert_eq!(data.lines[5].usage_percent, Some(2.0));
+
+        // 运行时间与供电状态不绑定
+        assert_eq!(data.lines[6].usage_percent, None);
+        assert_eq!(data.lines[7].usage_percent, None);
+
+        // GPU 不可用或无显卡时，GPU usage_percent 优雅回退为 None
+        let mut snap_no_gpu = create_mock_snapshot();
+        snap_no_gpu.gpu.usage_percent = None;
+        let data_no_gpu = TooltipData::from_snapshot(&snap_no_gpu, &Language::ZhCN);
+        assert_eq!(data_no_gpu.lines[4].usage_percent, None);
+    }
+
+    #[test]
+    fn test_tooltip_line_status_color_thresholds() {
+        use crate::monitor::window::render::{
+            COLOR_METRIC_GREEN, COLOR_METRIC_RED, COLOR_METRIC_YELLOW,
+        };
+
+        let dark_base = COLORREF(0x00F0F0F0);
+        let light_base = COLORREF(0x002B2B2B);
+
+        // 1. 低于 20% 时，整行文本保持基色（深浅色自适应）
+        assert_eq!(get_metric_status_color(0.0, dark_base), dark_base);
+        assert_eq!(get_metric_status_color(3.0, dark_base), dark_base);
+        assert_eq!(get_metric_status_color(19.9, dark_base), dark_base);
+        assert_eq!(get_metric_status_color(11.0, light_base), light_base);
+
+        // 2. 20% ~ 70%：鲜绿状态色
+        assert_eq!(get_metric_status_color(20.0, dark_base), COLOR_METRIC_GREEN);
+        assert_eq!(get_metric_status_color(54.0, dark_base), COLOR_METRIC_GREEN);
+        assert_eq!(
+            get_metric_status_color(69.9, light_base),
+            COLOR_METRIC_GREEN
+        );
+
+        // 3. 70% ~ 85%：亮黄状态色
+        assert_eq!(
+            get_metric_status_color(70.0, dark_base),
+            COLOR_METRIC_YELLOW
+        );
+        assert_eq!(
+            get_metric_status_color(75.0, dark_base),
+            COLOR_METRIC_YELLOW
+        );
+        assert_eq!(
+            get_metric_status_color(85.0, light_base),
+            COLOR_METRIC_YELLOW
+        );
+
+        // 4. > 85%：鲜红预警色
+        assert_eq!(get_metric_status_color(85.01, dark_base), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(95.0, dark_base), COLOR_METRIC_RED);
+        assert_eq!(get_metric_status_color(100.0, light_base), COLOR_METRIC_RED);
     }
 }
