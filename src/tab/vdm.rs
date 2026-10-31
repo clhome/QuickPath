@@ -21,11 +21,7 @@ pub fn is_window_cloaked(hwnd: HWND) -> bool {
             std::mem::size_of::<u32>() as u32,
         )
     };
-    if hr.is_ok() {
-        cloaked != 0
-    } else {
-        false
-    }
+    if hr.is_ok() { cloaked != 0 } else { false }
 }
 
 /// 权威核验窗口是否位于当前活跃的虚拟桌面
@@ -45,9 +41,11 @@ pub fn is_window_on_current_desktop(hwnd: HWND) -> bool {
 
     // 2. 尝试使用 COM 官方 IVirtualDesktopManager 进行权威校验
     unsafe {
-        if let Ok(vdm) =
-            CoCreateInstance::<_, IVirtualDesktopManager>(&VirtualDesktopManager, None, CLSCTX_INPROC_SERVER)
-            && let Ok(on_current) = vdm.IsWindowOnCurrentVirtualDesktop(hwnd)
+        if let Ok(vdm) = CoCreateInstance::<_, IVirtualDesktopManager>(
+            &VirtualDesktopManager,
+            None,
+            CLSCTX_INPROC_SERVER,
+        ) && let Ok(on_current) = vdm.IsWindowOnCurrentVirtualDesktop(hwnd)
         {
             return on_current.as_bool();
         }

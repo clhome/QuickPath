@@ -648,7 +648,9 @@ unsafe fn update_position_and_render(hwnd: HWND) {
     } else {
         (dpi as f32 / 96.0).max(1.0)
     };
-    let layout = calculate_layout(&inner.config, scale);
+    let snap = inner.snapshot_handle.load();
+    let has_battery = snap.details.battery_percent.is_some();
+    let layout = calculate_layout(&inner.config, scale, has_battery);
 
     if layout.total_width <= 0 {
         let _ = ShowWindow(hwnd, SW_HIDE);
@@ -726,7 +728,6 @@ unsafe fn update_position_and_render(hwnd: HWND) {
         );
     }
 
-    let snap = inner.snapshot_handle.load();
     render_bar_window(hwnd, &snap, &inner.config, scale, inner.is_dark_theme);
 }
 

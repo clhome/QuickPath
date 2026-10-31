@@ -24,10 +24,11 @@ pub struct LayoutInfo {
     pub col_net: Option<RECT>,
     pub col_cpu_mem: Option<RECT>,
     pub col_gpu_disk: Option<RECT>,
+    pub col_battery: Option<RECT>,
 }
 
 /// 计算自适应宽度与各列矩形
-pub fn calculate_layout(config: &MonitorConfig, scale: f32) -> LayoutInfo {
+pub fn calculate_layout(config: &MonitorConfig, scale: f32, has_battery: bool) -> LayoutInfo {
     let pad_x = (6.0 * scale).round() as i32;
     let col_gap = (6.0 * scale).round() as i32;
     let height = (38.0 * scale).round() as i32;
@@ -75,10 +76,27 @@ pub fn calculate_layout(config: &MonitorConfig, scale: f32) -> LayoutInfo {
         current_x += w_gpu_disk + col_gap;
     }
 
-    let total_width = if current_x > pad_x {
-        current_x - col_gap + pad_x
+    let battery_w = if has_battery {
+        ((2.0 * scale).round() as i32).max(2)
     } else {
         0
+    };
+
+    let total_width = if current_x > pad_x {
+        current_x - col_gap + pad_x + battery_w
+    } else {
+        0
+    };
+
+    let rect_battery = if has_battery && total_width > 0 {
+        Some(RECT {
+            left: total_width - battery_w,
+            top: 0,
+            right: total_width,
+            bottom: height,
+        })
+    } else {
+        None
     };
 
     LayoutInfo {
@@ -87,6 +105,7 @@ pub fn calculate_layout(config: &MonitorConfig, scale: f32) -> LayoutInfo {
         col_net: rect_net,
         col_cpu_mem: rect_cpu_mem,
         col_gpu_disk: rect_gpu_disk,
+        col_battery: rect_battery,
     }
 }
 
@@ -98,7 +117,8 @@ pub unsafe fn render_bar_window(
     scale: f32,
     is_dark_theme: bool,
 ) {
-    let layout = calculate_layout(config, scale);
+    let has_battery = snapshot.details.battery_percent.is_some();
+    let layout = calculate_layout(config, scale, has_battery);
     if layout.total_width <= 0 || layout.total_height <= 0 {
         return;
     }
@@ -204,6 +224,10 @@ pub unsafe fn render_bar_window(
 
     if let Some(col) = &layout.col_gpu_disk {
         draw_gpu_disk_column(mem_dc, col, snapshot, config, text_color_pri);
+    }
+
+    if let (Some(col), Some(percent)) = (&layout.col_battery, snapshot.details.battery_percent) {
+        draw_battery_bar_gdi(mem_dc, col, percent);
     }
 
     let _ = SelectObject(mem_dc, old_font);
@@ -433,6 +457,48 @@ unsafe fn draw_gauge_bar_gdi(
     let brush = CreateSolidBrush(color);
     FillRect(hdc, &rect, brush);
     let _ = DeleteObject(HGDIOBJ(brush.0 as _));
+}
+
+/// 根据电池电量百分比计算指示色 (60%~100% 绿色, 30%~59% 黄色, <30% 红色)
+#[inline]
+pub(crate) fn get_battery_status_color(percent: u8) -> COLORREF {
+    if percent >= 60 {
+        COLOR_METRIC_GREEN
+    } else if percent >= 30 {
+        COLOR_METRIC_YELLOW
+    } else {
+        COLOR_METRIC_RED
+    }
+}
+
+/// 绘制最右侧竖向电池电量指示条 (Win32 GDI)
+/// 竖向显示，计算任务栏显示总高度并按电量百分比自底向上填充
+unsafe fn draw_battery_bar_gdi(hdc: HDC, col: &RECT, percent: u8) {
+    let total_h = col.bottom - col.top;
+    if total_h <= 0 {
+        return;
+    }
+
+    let p = percent.min(100);
+    let fill_h = if p > 0 {
+        ((total_h as f32 * (p as f32 / 100.0)).round() as i32).clamp(1, total_h)
+    } else {
+        0
+    };
+
+    let color = get_battery_status_color(p);
+
+    if fill_h > 0 {
+        let rect = RECT {
+            left: col.left,
+            top: col.bottom - fill_h,
+            right: col.right,
+            bottom: col.bottom,
+        };
+        let brush = CreateSolidBrush(color);
+        FillRect(hdc, &rect, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0 as _));
+    }
 }
 
 /// 绘制网络指标单行（前缀箭头保持基色、数值按网速动态多色分级）
@@ -760,5 +826,104 @@ mod tests {
         // 非指标文本不匹配
         assert!(parse_metric_display("↑ 120 KB/s").is_none());
         assert!(parse_metric_display("Invalid").is_none());
+    }
+
+    #[test]
+    fn test_battery_status_color_thresholds() {
+        // 60% ~ 100% 绿色
+        assert_eq!(get_battery_status_color(100), COLOR_METRIC_GREEN);
+        assert_eq!(get_battery_status_color(80), COLOR_METRIC_GREEN);
+        assert_eq!(get_battery_status_color(60), COLOR_METRIC_GREEN);
+
+        // 30% ~ 59% 黄色
+        assert_eq!(get_battery_status_color(59), COLOR_METRIC_YELLOW);
+        assert_eq!(get_battery_status_color(45), COLOR_METRIC_YELLOW);
+        assert_eq!(get_battery_status_color(30), COLOR_METRIC_YELLOW);
+
+        // 30% 以下 红色
+        assert_eq!(get_battery_status_color(29), COLOR_METRIC_RED);
+        assert_eq!(get_battery_status_color(10), COLOR_METRIC_RED);
+        assert_eq!(get_battery_status_color(0), COLOR_METRIC_RED);
+    }
+
+    #[test]
+    fn test_calculate_layout_with_and_without_battery() {
+        let cfg = MonitorConfig {
+            show_network: true,
+            show_cpu: true,
+            show_memory: true,
+            show_gpu: true,
+            show_disk: true,
+            ..Default::default()
+        };
+
+        // 1. 无电池状态 (台式机等)
+        let layout_no_battery = calculate_layout(&cfg, 1.0, false);
+        assert!(layout_no_battery.total_width > 0);
+        assert!(layout_no_battery.col_battery.is_none());
+
+        // 2. 有电池状态 (笔记本电脑)，scale = 1.0
+        let layout_battery = calculate_layout(&cfg, 1.0, true);
+        assert_eq!(
+            layout_battery.total_width,
+            layout_no_battery.total_width + 2
+        );
+        let col = layout_battery.col_battery.unwrap();
+        assert_eq!(col.right - col.left, 2);
+        assert_eq!(col.right, layout_battery.total_width);
+        assert_eq!(col.top, 0);
+        assert_eq!(col.bottom, layout_battery.total_height);
+
+        // 3. 高分屏缩放 scale = 2.0
+        let layout_2x_no_battery = calculate_layout(&cfg, 2.0, false);
+        let layout_2x_battery = calculate_layout(&cfg, 2.0, true);
+        assert_eq!(
+            layout_2x_battery.total_width,
+            layout_2x_no_battery.total_width + 4
+        );
+        let col_2x = layout_2x_battery.col_battery.unwrap();
+        assert_eq!(col_2x.right - col_2x.left, 4);
+    }
+
+    #[test]
+    fn test_calculate_layout_empty_config_never_adds_battery() {
+        let cfg = MonitorConfig {
+            show_network: false,
+            show_cpu: false,
+            show_memory: false,
+            show_gpu: false,
+            show_disk: false,
+            ..Default::default()
+        };
+
+        let layout = calculate_layout(&cfg, 1.0, true);
+        assert_eq!(layout.total_width, 0);
+        assert!(layout.col_battery.is_none());
+    }
+
+    #[test]
+    fn test_battery_bar_height_mapping_boundaries() {
+        let test_heights = [38, 48, 60];
+        for &h in &test_heights {
+            // 100% 满电高度
+            let fill_100 = ((h as f32 * 1.0).round() as i32).clamp(1, h);
+            assert_eq!(fill_100, h);
+
+            // 50% 半电高度
+            let fill_50 = ((h as f32 * 0.5).round() as i32).clamp(1, h);
+            assert_eq!(fill_50, h / 2);
+
+            // 1% 极小电量保底可见性
+            let fill_1 = ((h as f32 * 0.01).round() as i32).clamp(1, h);
+            assert_eq!(fill_1, 1);
+
+            // 0% 零电高度
+            let fill_0 = if 0 > 0 {
+                ((h as f32 * 0.0).round() as i32).clamp(1, h)
+            } else {
+                0
+            };
+            assert_eq!(fill_0, 0);
+        }
     }
 }

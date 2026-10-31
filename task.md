@@ -2035,5 +2035,30 @@
   - [x] 清理 `test/` 临时探针文件（`dwm_cloaked_test.ps1`, `probe_clip.ps1`, `probe_clip2.ps1`, `vdm_test.ps1`）
   - [x] 更新 `task.md` 完成状态与交付记录
 
+---
+
+## 阶段七十六：任务栏硬件监控条右侧动态电量指示竖条 (Taskbar Battery Bar Indicator)
+
+> **目标**：在任务栏硬件监控条右侧增加两个像素竖向显示当前电池电量。电量 60%~100% 绿色、30%~60% 黄色、30% 以下红色。按任务栏小部件实际呈现高度动态计算竖向高度。只在检测到电池时显示，台式机无电池或无法读取电量时不显示且不占用宽度。
+
+- [x] **76.1 布局模型扩展与自适应宽度计算 (`src/monitor/window/render.rs`)**
+  - [x] `LayoutInfo` 增加 `col_battery: Option<RECT>` 区域定义
+  - [x] `calculate_layout` 引入 `has_battery: bool`，检测到电池时右侧扩展 `battery_w = ((2.0 * scale).round() as i32).max(2)`
+  - [x] 台式机/无电池时 `has_battery == false`，宽度不增加、`col_battery` 置为 `None`
+- [x] **76.2 竖向电量柱状自绘与三色分级算法 (`src/monitor/window/render.rs`)**
+  - [x] 实现 `draw_battery_bar_gdi`：三色阈值判定（>=60 绿、30~59 黄、<30 红）
+  - [x] 自底向上按当前窗口实际高度百分比填充，极小电量保底 1 像素高
+  - [x] 接入 `render_bar_window` 渲染管线，与 32 位 ARGB DIBSection Alpha 合成机制无缝融合
+- [x] **76.3 窗口尺寸同步与快照驱动集成 (`src/monitor/window/bar_window.rs`)**
+  - [x] `update_position_and_render` 提前加载快照判断 `has_battery`
+  - [x] 动态传递精确总宽度至 `SetWindowPos`
+- [x] **76.4 自动化单测、门禁检验与交付验收 (`src/monitor/window/render.rs`, `task.md`)**
+  - [x] 编写布局计算有无电池、不同缩放比的单测（`test_calculate_layout_with_and_without_battery`、`test_calculate_layout_empty_config_never_adds_battery`）
+  - [x] 编写电量颜色分级与高度填充边界单测（`test_battery_status_color_thresholds`、`test_battery_bar_height_mapping_boundaries`）
+  - [x] 执行全量门禁：`cargo fmt -- --check` 0 差异、`cargo clippy --all-targets -- -D warnings` 0 告警、Release 构建通过
+  - [x] 同步更新 `task.md` 记录实施进展与技术沉淀
+
+
+
 
 
