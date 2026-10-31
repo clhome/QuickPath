@@ -6,11 +6,15 @@
 //! 严格控制 5 秒超时，遵循“访问失败立即静默放弃，绝不重试，绝不打扰用户”原则。
 
 use std::ptr;
+use windows::Win32::Foundation::{GlobalFree, HGLOBAL};
 use windows::Win32::Networking::WinHttp::{
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG, WINHTTP_FLAG_SECURE, WINHTTP_OPTION_PROXY,
+    WINHTTP_OPTION_SECURITY_FLAGS, WINHTTP_PROXY_INFO, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect,
+    WinHttpGetIEProxyConfigForCurrentUser, WinHttpOpen, WinHttpOpenRequest,
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
+    WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
 };
 use windows::core::{PCWSTR, w};
 
@@ -66,15 +70,64 @@ impl Drop for WinHttpHandle {
     }
 }
 
+/// 尝试读取当前用户的系统/IE 代理配置并应用到 WinHttp 会话。
+///
+/// Windows 手动设置的代理（或代理客户端开启的系统代理）存储于 WinINet 配置中。
+/// WinHttp 默认不读取该配置，本函数自动继承并挂载，同时以 RAII 守卫确保释放系统分配的堆内存。
+unsafe fn apply_current_user_ie_proxy(session: *mut core::ffi::c_void) {
+    let mut ie_proxy = WINHTTP_CURRENT_USER_IE_PROXY_CONFIG::default();
+    unsafe {
+        if WinHttpGetIEProxyConfigForCurrentUser(&mut ie_proxy).is_err() {
+            return;
+        }
+    }
+
+    struct IeProxyGuard(WINHTTP_CURRENT_USER_IE_PROXY_CONFIG);
+    impl Drop for IeProxyGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.0.lpszProxy.is_null() {
+                    let _ = GlobalFree(Some(HGLOBAL(self.0.lpszProxy.0 as *mut _)));
+                }
+                if !self.0.lpszProxyBypass.is_null() {
+                    let _ = GlobalFree(Some(HGLOBAL(self.0.lpszProxyBypass.0 as *mut _)));
+                }
+                if !self.0.lpszAutoConfigUrl.is_null() {
+                    let _ = GlobalFree(Some(HGLOBAL(self.0.lpszAutoConfigUrl.0 as *mut _)));
+                }
+            }
+        }
+    }
+    let guard = IeProxyGuard(ie_proxy);
+
+    if !guard.0.lpszProxy.is_null() {
+        let proxy_info = WINHTTP_PROXY_INFO {
+            dwAccessType: WINHTTP_ACCESS_TYPE_NAMED_PROXY,
+            lpszProxy: guard.0.lpszProxy,
+            lpszProxyBypass: guard.0.lpszProxyBypass,
+        };
+        unsafe {
+            let _ = WinHttpSetOption(
+                Some(session),
+                WINHTTP_OPTION_PROXY,
+                Some(std::slice::from_raw_parts(
+                    &proxy_info as *const _ as *const u8,
+                    std::mem::size_of::<WINHTTP_PROXY_INFO>(),
+                )),
+            );
+        }
+    }
+}
+
 /// 执行单次轻量 HTTP GET 请求，获取 JSON 响应字符串。
 ///
 /// 严格 5 秒超时，任何阶段失败均静默返回 `None`。
 fn fetch_latest_release_json() -> Option<String> {
     unsafe {
-        // 1. 初始化 WinHttp 会话，优先使用系统自动代理配置（透明支持本地加速/代理软件）
+        // 1. 初始化 WinHttp 会话，使用系统默认代理模式
         let session = WinHttpOpen(
             w!("QuickPath-Update-Checker"),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
             0,
@@ -83,6 +136,9 @@ fn fetch_latest_release_json() -> Option<String> {
             return None;
         }
         let _session_guard = WinHttpHandle(session);
+
+        // 尝试继承当前用户的 IE / 系统代理（透明支持本地代理与加速工具）
+        apply_current_user_ie_proxy(session);
 
         // 设置有界超时：解析 3s，连接 5s，发送 5s，接收 5s
         let _ = WinHttpSetTimeouts(session, 3000, 5000, 5000, 5000);
@@ -119,7 +175,22 @@ fn fetch_latest_release_json() -> Option<String> {
             "User-Agent: QuickPath-App\r\nAccept: application/vnd.github.v3+json\r\n"
                 .encode_utf16()
                 .collect();
-        let sent = WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0);
+        let mut sent = WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0);
+        if sent.is_err() {
+            // 若遇到安全握手错误（例如在国内网络环境下 DigiCert OCSP/CRL 吊销服务器不可达返回 12175: ERROR_WINHTTP_SECURE_FAILURE），
+            // 尝试设置忽略吊销校验并重试一次，避免因吊销服务器脱机阻断版本检测。
+            const SECURITY_FLAG_IGNORE_REVOCATION: u32 = 0x0000_0080;
+            let sec_flags: u32 = SECURITY_FLAG_IGNORE_REVOCATION;
+            let _ = WinHttpSetOption(
+                Some(request),
+                WINHTTP_OPTION_SECURITY_FLAGS,
+                Some(std::slice::from_raw_parts(
+                    &sec_flags as *const u32 as *const u8,
+                    std::mem::size_of::<u32>(),
+                )),
+            );
+            sent = WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0);
+        }
         if sent.is_err() {
             return None;
         }
@@ -226,6 +297,8 @@ mod tests {
     fn test_is_newer_version() {
         // 典型正向升级
         assert!(is_newer_version("v1.2.4", "1.2.3"));
+        assert!(is_newer_version("v1.2.5", "1.2.4"));
+        assert!(is_newer_version("1.2.5", "1.2.4"));
         assert!(is_newer_version("1.3.0", "1.2.3"));
         assert!(is_newer_version("2.0.0", "1.2.3"));
         assert!(is_newer_version("v1.2.3.1", "1.2.3"));
@@ -233,10 +306,13 @@ mod tests {
         // 相同版本，不应升级
         assert!(!is_newer_version("1.2.3", "1.2.3"));
         assert!(!is_newer_version("v1.2.3", "1.2.3"));
+        assert!(!is_newer_version("v1.2.4", "1.2.4"));
+        assert!(!is_newer_version("v1.2.5", "1.2.5"));
 
         // 本地版本更高或测试版，不应升级
         assert!(!is_newer_version("1.2.2", "1.2.3"));
         assert!(!is_newer_version("1.2.0", "1.2.3"));
+        assert!(!is_newer_version("1.2.4", "1.2.5"));
         assert!(!is_newer_version("0.9.9", "1.2.3"));
 
         // 异常格式输入
@@ -256,6 +332,24 @@ mod tests {
         assert_eq!(
             release.html_url.as_deref(),
             Some("https://github.com/clhome/QuickPath/releases/tag/v1.2.4")
+        );
+
+        // 真实 GitHub API 返回的包含多字段的 payload
+        let full_payload = r#"{
+            "url": "https://api.github.com/repos/clhome/QuickPath/releases/429813443",
+            "tag_name": "v1.2.5",
+            "target_commitish": "main",
+            "name": "QuickPath v1.2.5",
+            "draft": false,
+            "prerelease": false,
+            "html_url": "https://github.com/clhome/QuickPath/releases/tag/v1.2.5",
+            "assets": []
+        }"#;
+        let full_release: GitHubRelease = serde_json::from_str(full_payload).unwrap();
+        assert_eq!(full_release.tag_name, "v1.2.5");
+        assert_eq!(
+            full_release.html_url.as_deref(),
+            Some("https://github.com/clhome/QuickPath/releases/tag/v1.2.5")
         );
     }
 
