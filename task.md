@@ -2077,6 +2077,24 @@
   - [x] 运行 `cargo test`（251 个单测全绿）、`cargo clippy --all-targets -- -D warnings`（0 告警）、`cargo fmt -- --check`（0 差异）验证通过
   - [x] 更新 `task.md` 打勾完成状态并沉淀规范
 
+---
+
+## 阶段七十八：任务栏电量指示条接通电源充电红色像素指示 (Taskbar Battery Charging Indicator)
+
+> **目标**：在右侧电量指示条中，若系统处于“接通电源”（正在充电）状态，在最顶部显示 2 个像素的红色标记，代表正在充电；若处于电池供电（未充电）状态，则不显示这 2 个红色像素。
+
+- [x] **78.1 电量条绘制逻辑扩展与充电状态联动 (`src/monitor/window/render.rs`)**
+  - [x] `draw_battery_bar_gdi` 扩展支持 `is_charging: bool` 与 `scale: f32` 参数
+  - [x] 当 `is_charging == true` 时，在最顶部（`col.top` 到 `col.top + dot_h`，DPI 自适应）叠加绘制红色 `COLOR_METRIC_RED`
+  - [x] 未接通电源时（`is_charging == false`）不绘制顶部红色标记
+  - [x] 在 `render_bar_window` 中传递 `snapshot.details.is_ac_online`
+- [x] **78.2 自动化单测、门禁检验与交付验收 (`src/monitor/window/render.rs`, `task.md`)**
+  - [x] 编写充电指示几何区域计算与状态切换测试（`test_charging_indicator_rect_and_visibility`）
+  - [x] 运行 `cargo test`、`cargo clippy --all-targets -- -D warnings`（0 告警）、`cargo fmt -- --check`（0 差异）与 Release 构建全量校验通过
+  - [x] 同步更新 `task.md` 完成状态并汇报
+
+
+
 
 
 

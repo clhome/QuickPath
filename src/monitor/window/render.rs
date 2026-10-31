@@ -227,7 +227,7 @@ pub unsafe fn render_bar_window(
     }
 
     if let (Some(col), Some(percent)) = (&layout.col_battery, snapshot.details.battery_percent) {
-        draw_battery_bar_gdi(mem_dc, col, percent);
+        draw_battery_bar_gdi(mem_dc, col, percent, snapshot.details.is_ac_online, scale);
     }
 
     let _ = SelectObject(mem_dc, old_font);
@@ -471,9 +471,21 @@ pub(crate) fn get_battery_status_color(percent: u8) -> COLORREF {
     }
 }
 
+/// 计算顶部充电指示像素块的相对矩形 (用于单测与几何校验)
+pub(crate) fn calculate_charging_indicator_rect(col: &RECT, scale: f32) -> RECT {
+    let dot_h = ((2.0 * scale).round() as i32).max(2);
+    RECT {
+        left: col.left,
+        top: col.top,
+        right: col.right,
+        bottom: (col.top + dot_h).min(col.bottom),
+    }
+}
+
 /// 绘制最右侧竖向电池电量指示条 (Win32 GDI)
-/// 竖向显示，计算任务栏显示总高度并按电量百分比自底向上填充
-unsafe fn draw_battery_bar_gdi(hdc: HDC, col: &RECT, percent: u8) {
+/// 竖向显示，计算任务栏显示总高度并按电量百分比自底向上填充；
+/// 若处于接通电源充电中状态 (is_charging == true)，在最顶部显示红色充电指示标记
+unsafe fn draw_battery_bar_gdi(hdc: HDC, col: &RECT, percent: u8, is_charging: bool, scale: f32) {
     let total_h = col.bottom - col.top;
     if total_h <= 0 {
         return;
@@ -497,6 +509,14 @@ unsafe fn draw_battery_bar_gdi(hdc: HDC, col: &RECT, percent: u8) {
         };
         let brush = CreateSolidBrush(color);
         FillRect(hdc, &rect, brush);
+        let _ = DeleteObject(HGDIOBJ(brush.0 as _));
+    }
+
+    // 接通电源状态：在右侧 2 个像素最顶端显示红色标记 (代表正在充电，未充电则不显示)
+    if is_charging {
+        let dot_rect = calculate_charging_indicator_rect(col, scale);
+        let brush = CreateSolidBrush(COLOR_METRIC_RED);
+        FillRect(hdc, &dot_rect, brush);
         let _ = DeleteObject(HGDIOBJ(brush.0 as _));
     }
 }
@@ -925,5 +945,47 @@ mod tests {
             };
             assert_eq!(fill_0, 0);
         }
+    }
+
+    #[test]
+    fn test_charging_indicator_rect_and_visibility() {
+        let col = RECT {
+            left: 100,
+            top: 0,
+            right: 102,
+            bottom: 38,
+        };
+
+        // scale = 1.0 时，顶部指示红点高度应精确为 2 像素
+        let rect_1x = calculate_charging_indicator_rect(&col, 1.0);
+        assert_eq!(rect_1x.left, 100);
+        assert_eq!(rect_1x.right, 102);
+        assert_eq!(rect_1x.top, 0);
+        assert_eq!(rect_1x.bottom, 2);
+        assert_eq!(rect_1x.bottom - rect_1x.top, 2);
+
+        // scale = 2.0 时，高分屏下指示红点高度按比例缩放为 4 像素
+        let col_2x = RECT {
+            left: 200,
+            top: 0,
+            right: 204,
+            bottom: 76,
+        };
+        let rect_2x = calculate_charging_indicator_rect(&col_2x, 2.0);
+        assert_eq!(rect_2x.left, 200);
+        assert_eq!(rect_2x.right, 204);
+        assert_eq!(rect_2x.top, 0);
+        assert_eq!(rect_2x.bottom, 4);
+        assert_eq!(rect_2x.bottom - rect_2x.top, 4);
+
+        // 边界保护：超小高度窗口下不会越界超过 bottom
+        let col_tiny = RECT {
+            left: 50,
+            top: 0,
+            right: 52,
+            bottom: 1,
+        };
+        let rect_tiny = calculate_charging_indicator_rect(&col_tiny, 1.0);
+        assert_eq!(rect_tiny.bottom, 1);
     }
 }
