@@ -13,6 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use super::com::{ShellComManager, is_physical_dir_path};
 use super::select::{async_select_file_item, try_select_tab_item};
 use super::uia::{trigger_new_tab, trigger_new_tab_safe};
+use super::vdm;
 use windows::core::BOOL;
 
 /// 多标签增强配置
@@ -44,6 +45,8 @@ pub struct TabCoordinator {
     bypass_deduplication: Arc<AtomicBool>,
     /// 正在被合并捕获处理中的外部窗口集合（防重触发）
     processing_new_windows: Arc<parking_lot_or_std::Mutex<std::collections::HashSet<usize>>>,
+    /// 已知/已纳管的资源管理器独立窗口集合（过滤切换桌面触发的 SHOW 事件及防止重复处理）
+    known_windows: Arc<parking_lot_or_std::Mutex<std::collections::HashSet<usize>>>,
 }
 
 mod parking_lot_or_std {
@@ -52,7 +55,7 @@ mod parking_lot_or_std {
 
 impl TabCoordinator {
     pub fn new(com_manager: Arc<ShellComManager>) -> Self {
-        Self {
+        let coordinator = Self {
             config: Arc::new(parking_lot_or_std::RwLock::new(TabConfig::default())),
             com_manager,
             pending_inherit_path: Arc::new(parking_lot_or_std::Mutex::new(None)),
@@ -60,7 +63,12 @@ impl TabCoordinator {
             processing_new_windows: Arc::new(parking_lot_or_std::Mutex::new(
                 std::collections::HashSet::new(),
             )),
-        }
+            known_windows: Arc::new(parking_lot_or_std::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+        };
+        coordinator.scan_and_register_existing_windows();
+        coordinator
     }
 
     /// 更新配置
@@ -166,26 +174,20 @@ impl TabCoordinator {
         self.bypass_deduplication.store(false, Ordering::SeqCst);
     }
 
-    /// 廉价判定（纯 Win32，无 COM/UIA，微秒级）：当前是否存在可作为标签宿主的
+    /// 廉价判定（纯 Win32，微秒级）：当前活跃虚拟桌面是否存在可作为标签宿主的
     /// 资源管理器顶级窗口。供低级键盘钩子回调在“吞键 / 放行系统原生”之间快速决策。
     pub fn quick_wine_target() -> Option<HWND> {
         unsafe {
             let fg = GetForegroundWindow();
-            if Self::is_explorer_window(fg) && IsWindowVisible(fg).as_bool() {
+            if Self::is_explorer_window(fg)
+                && IsWindowVisible(fg).as_bool()
+                && !vdm::is_window_cloaked(fg)
+                && vdm::is_window_on_current_desktop(fg)
+            {
                 return Some(fg);
             }
 
-            let found = windows::Win32::UI::WindowsAndMessaging::FindWindowExW(
-                None,
-                None,
-                windows::core::w!("CabinetWClass"),
-                windows::core::PCWSTR::null(),
-            )
-            .ok()?;
-            if found.0.is_null() || !IsWindowVisible(found).as_bool() {
-                return None;
-            }
-            Some(found)
+            Self::find_host_explorer_window(HWND(std::ptr::null_mut()))
         }
     }
 
@@ -243,18 +245,89 @@ impl TabCoordinator {
         &self.com_manager
     }
 
-    /// 查找除 exclude_hwnd 之外真实存活且可见的 Explorer 宿主窗口 (CabinetWClass)
+    /// 启动时预热扫描系统中所有存活的 CabinetWClass 窗口，登记为已知独立窗口
+    pub fn scan_and_register_existing_windows(&self) {
+        use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetClassNameW, IsWindow};
+
+        struct EnumCtx {
+            hwnds: Vec<usize>,
+        }
+
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            unsafe {
+                let ctx = &mut *(lparam.0 as *mut EnumCtx);
+                if IsWindow(Some(hwnd)).as_bool() {
+                    let mut buf = [0u16; 64];
+                    let len = GetClassNameW(hwnd, &mut buf);
+                    if len > 0 {
+                        let cls = String::from_utf16_lossy(&buf[..len as usize]);
+                        if cls == "CabinetWClass" {
+                            ctx.hwnds.push(hwnd.0 as usize);
+                        }
+                    }
+                }
+                BOOL(1)
+            }
+        }
+
+        let mut ctx = EnumCtx { hwnds: Vec::new() };
+        unsafe {
+            let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
+        }
+
+        if let Ok(mut set) = self.known_windows.lock() {
+            for raw in ctx.hwnds {
+                set.insert(raw);
+            }
+        }
+    }
+
+    /// 查询窗口是否为已知纳管的资源管理器独立窗口
+    pub fn is_known_window(&self, hwnd: HWND) -> bool {
+        if hwnd.0.is_null() {
+            return false;
+        }
+        if let Ok(set) = self.known_windows.lock() {
+            set.contains(&(hwnd.0 as usize))
+        } else {
+            false
+        }
+    }
+
+    /// 将窗口登记为已知独立窗口（防止切换桌面 SHOW 或最小化还原时被误吞）
+    pub fn register_known_window(&self, hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        if let Ok(mut set) = self.known_windows.lock() {
+            set.insert(hwnd.0 as usize);
+        }
+    }
+
+    /// 窗口销毁时清理登记
+    pub fn unregister_known_window(&self, hwnd: HWND) {
+        if hwnd.0.is_null() {
+            return;
+        }
+        if let Ok(mut set) = self.known_windows.lock() {
+            set.remove(&(hwnd.0 as usize));
+        }
+    }
+
+    /// 查找除 exclude_hwnd 之外真实存活、可见且处于当前虚拟桌面的 Explorer 宿主窗口 (CabinetWClass)
     pub fn find_host_explorer_window(exclude_hwnd: HWND) -> Option<HWND> {
         use windows::Win32::UI::WindowsAndMessaging::{
             EnumWindows, GetClassNameW, GetForegroundWindow, IsWindow, IsWindowVisible,
         };
 
-        // 优先检查当前前台聚焦窗口是否为合法的宿主窗口
+        // 优先检查当前前台聚焦窗口是否为合法的宿主窗口（必须处于当前虚拟桌面且未 Cloaked）
         let fg = unsafe { GetForegroundWindow() };
         if !fg.0.is_null()
             && fg != exclude_hwnd
             && Self::is_explorer_window(fg)
             && unsafe { IsWindowVisible(fg).as_bool() }
+            && !vdm::is_window_cloaked(fg)
+            && vdm::is_window_on_current_desktop(fg)
         {
             return Some(fg);
         }
@@ -270,12 +343,15 @@ impl TabCoordinator {
                 if hwnd == ctx.exclude {
                     return BOOL(1);
                 }
-                if IsWindow(Some(hwnd)).as_bool() && IsWindowVisible(hwnd).as_bool() {
+                if IsWindow(Some(hwnd)).as_bool()
+                    && IsWindowVisible(hwnd).as_bool()
+                    && !vdm::is_window_cloaked(hwnd)
+                {
                     let mut buf = [0u16; 64];
                     let len = GetClassNameW(hwnd, &mut buf);
                     if len > 0 {
                         let cls = String::from_utf16_lossy(&buf[..len as usize]);
-                        if cls == "CabinetWClass" {
+                        if cls == "CabinetWClass" && vdm::is_window_on_current_desktop(hwnd) {
                             ctx.found = Some(hwnd);
                             return BOOL(0);
                         }
@@ -328,6 +404,8 @@ impl TabCoordinator {
                     .processing_new_windows
                     .lock()
                     .map(|mut set| set.remove(&raw_new));
+                // 登记为该虚拟桌面上的已知独立宿主窗口，防止切换桌面触发 SHOW 时被误挪动
+                self.register_known_window(new_hwnd);
                 return;
             }
         };
@@ -366,6 +444,7 @@ impl TabCoordinator {
         let raw_host = host_hwnd.0 as usize;
         let com = self.com_manager.clone();
         let processing = self.processing_new_windows.clone();
+        let known = self.known_windows.clone();
         let cfg_clone = cfg.clone();
         let bypass = self.bypass_deduplication.clone();
 
@@ -530,6 +609,9 @@ impl TabCoordinator {
                             SetWindowPos(new_h, None, 100, 100, 0, 0, SWP_NOSIZE | SWP_SHOWWINDOW);
                         bring_window_to_front(new_h);
                     }
+                    let _ = known.lock().map(|mut set| set.insert(raw_new));
+                } else {
+                    let _ = known.lock().map(|mut set| set.insert(raw_host));
                 }
             } else {
                 // 【核心 Fail-Safe 兜底】：未能成功合并或超时未就绪，绝对不关窗，立即恢复显示源窗口并恢复不透明度！
@@ -547,6 +629,7 @@ impl TabCoordinator {
                     // 同样走输入桥接：fail-safe 恢复的窗口是用户当前最期望看到的，必须尽力前台化
                     bring_window_to_front(new_h);
                 }
+                let _ = known.lock().map(|mut set| set.insert(raw_new));
             }
 
             // 处理结束，从防重集合中移除记录
@@ -643,6 +726,7 @@ impl TabCoordinator {
             pending_inherit_path: self.pending_inherit_path.clone(),
             bypass_deduplication: self.bypass_deduplication.clone(),
             processing_new_windows: self.processing_new_windows.clone(),
+            known_windows: self.known_windows.clone(),
         })
     }
 }
@@ -1020,6 +1104,7 @@ mod tests {
             ("tab/owner.rs", include_str!("owner.rs")),
             ("tab/select.rs", include_str!("select.rs")),
             ("tab/uia.rs", include_str!("uia.rs")),
+            ("tab/vdm.rs", include_str!("vdm.rs")),
         ];
         // 探针在运行时拼装，避免本测试源码自身出现连续 token 而自命中
         let banned = concat!("SendMessage", "W(");
@@ -1036,5 +1121,53 @@ mod tests {
                  managers::ipc::send_message_timeout（有界 + SMTO_ABORTIFHUNG）"
             );
         }
+    }
+
+    #[test]
+    fn test_known_windows_registry_lifecycle() {
+        let com = Arc::new(ShellComManager::new());
+        let coordinator = TabCoordinator::new(com);
+
+        let dummy_hwnd1 = HWND(0x123456 as *mut _);
+        let dummy_hwnd2 = HWND(0x654321 as *mut _);
+        let null_hwnd = HWND(std::ptr::null_mut());
+
+        // 空句柄安全
+        assert!(!coordinator.is_known_window(null_hwnd));
+        coordinator.register_known_window(null_hwnd);
+        assert!(!coordinator.is_known_window(null_hwnd));
+        coordinator.unregister_known_window(null_hwnd);
+
+        // 未注册状态
+        assert!(!coordinator.is_known_window(dummy_hwnd1));
+        assert!(!coordinator.is_known_window(dummy_hwnd2));
+
+        // 注册 dummy_hwnd1
+        coordinator.register_known_window(dummy_hwnd1);
+        assert!(coordinator.is_known_window(dummy_hwnd1));
+        assert!(!coordinator.is_known_window(dummy_hwnd2));
+
+        // 注册 dummy_hwnd2
+        coordinator.register_known_window(dummy_hwnd2);
+        assert!(coordinator.is_known_window(dummy_hwnd1));
+        assert!(coordinator.is_known_window(dummy_hwnd2));
+
+        // 注销 dummy_hwnd1
+        coordinator.unregister_known_window(dummy_hwnd1);
+        assert!(!coordinator.is_known_window(dummy_hwnd1));
+        assert!(coordinator.is_known_window(dummy_hwnd2));
+
+        // 注销 dummy_hwnd2
+        coordinator.unregister_known_window(dummy_hwnd2);
+        assert!(!coordinator.is_known_window(dummy_hwnd1));
+        assert!(!coordinator.is_known_window(dummy_hwnd2));
+    }
+
+    #[test]
+    fn test_find_host_explorer_window_handles_dummy_and_null_safely() {
+        // 当传入空句柄或任意假句柄时，不发生崩溃或死锁
+        let _ = TabCoordinator::find_host_explorer_window(HWND(std::ptr::null_mut()));
+        let _ = TabCoordinator::find_host_explorer_window(HWND(0x999999 as *mut _));
+        let _ = TabCoordinator::quick_wine_target();
     }
 }

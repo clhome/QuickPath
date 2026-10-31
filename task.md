@@ -2008,4 +2008,32 @@
   - [x] **单一版本源治理重构**：将 `src/rules/version.rs` 清单守卫测试重构为直接断言 `OUT_DIR/app.manifest` 真实编译产物，根目录 `app.manifest` 转为纯净模板；实现升级版本时**仅需修改 `Cargo.toml` 一处**，彻底消除人工同步维护成本。
   - [x] **README 动态 Release 徽标联动**：将 `README.md` 与 `README_CN.md` 版本徽标切换为 Shields.io 官方动态 GitHub Release 抓取徽标（`https://img.shields.io/github/v/release/clhome/QuickPath`），发版全自动秒级同步，并配套完成变异测试防护。
 
+---
+
+## 阶段七十五：多标签增强虚拟桌面隔离与切换桌面防跨屏跳转修复 (Virtual Desktop Isolation & Tab Cross-Desktop Jump Fix)
+
+> **现象**：当使用快捷键 `Ctrl+Win+Left/Right` 切换虚拟桌面时，多标签增强功能会把其它虚拟桌面的文件夹窗口弄到当前桌面显示或误合并，无法保持每个桌面各自独立的文件夹窗口。  
+> **根因**：
+> 1. `find_host_explorer_window` 与 `quick_wine_target` 未做虚拟桌面隔离，Win32 `EnumWindows` 会跨虚拟桌面匹配到其它桌面的资源管理器窗口；
+> 2. `TabHookGuard` 监听 `EVENT_OBJECT_SHOW`，在用户切换虚拟桌面时，系统对目标桌面的已有窗口触发 SHOW 事件，未做已知窗口追踪导致已有旧窗口被当作新开窗口抓去合并与挪移。
+
+- [x] **75.1 虚拟桌面感知与原生 Cloaked 过滤实现 (`src/tab/vdm.rs`, `src/tab/coordinator.rs`)**
+  - [x] 封装轻量零开销的 DWM Cloaked 状态检测：`is_window_cloaked(hwnd)`（基于 `DwmGetWindowAttribute(DWMWA_CLOAKED)`）
+  - [x] 封装 COM 官方虚拟桌面检测：`is_window_on_current_desktop(hwnd)`（基于 `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop`）
+  - [x] 改造 `find_host_explorer_window` 与 `quick_wine_target`，严格限制只在当前活动虚拟桌面查找可见且未 Cloaked 的宿主窗口，无宿主时原生放行
+- [x] **75.2 已知窗口生命周期追踪与 WinEvent 事件去重 (`src/tab/coordinator.rs`, `src/tab/hook.rs`)**
+  - [x] `TabCoordinator` 引入已知窗口注册表 `known_windows: Arc<Mutex<HashSet<usize>>>`
+  - [x] 模块启动时预热扫描系统中当前存活的 `CabinetWClass` 窗口并注册
+  - [x] 增加 `EVENT_OBJECT_DESTROY` 监听，窗口销毁时安全清理已知句柄
+  - [x] 完善 `EVENT_OBJECT_SHOW` 过滤：对于已在 `known_windows` 中的老窗口直接跳过，根除切换虚拟桌面和最小化恢复时的误触发
+  - [x] 新窗口原生放行时，将该桌面上的独立文件夹窗口自动加入 `known_windows`
+- [x] **75.3 自动化测试与质量门禁 (`src/tab/...`)**
+  - [x] 编写虚拟桌面与 Cloaked 过滤单元测试（`test_null_hwnd_handled_safely`）
+  - [x] 编写已知窗口去重与事件过滤逻辑单测（`test_known_windows_registry_lifecycle`、`test_find_host_explorer_window_handles_dummy_and_null_safely`）
+  - [x] 执行全量门禁：`cargo fmt -- --check` 干净、`cargo clippy --all-targets -- -D warnings` 0 告警、`cargo test` 50 个 tab 测试全绿、`cargo build --release` 编译通过
+- [x] **75.4 清理临时文件与收尾交付**
+  - [x] 清理 `test/` 临时探针文件（`dwm_cloaked_test.ps1`, `probe_clip.ps1`, `probe_clip2.ps1`, `vdm_test.ps1`）
+  - [x] 更新 `task.md` 完成状态与交付记录
+
+
 

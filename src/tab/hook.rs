@@ -5,7 +5,8 @@ use std::time::Duration;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS,
 };
 
 use super::coordinator::TabCoordinator;
@@ -94,8 +95,16 @@ unsafe extern "system" fn win_event_proc(
     };
 
     match event {
+        EVENT_OBJECT_DESTROY => {
+            coordinator.unregister_known_window(hwnd);
+        }
         EVENT_OBJECT_CREATE | EVENT_OBJECT_SHOW => {
             if TabCoordinator::is_explorer_window(hwnd) {
+                // 关键守卫：已在已知独立窗口集合中的窗口（如切换虚拟桌面触发的 SHOW、或最小化恢复），
+                // 绝不当作新窗口重复处理，在微秒级直接返回！
+                if coordinator.is_known_window(hwnd) {
+                    return;
+                }
                 coordinator.handle_new_explorer_window(hwnd);
             }
         }

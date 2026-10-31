@@ -8,6 +8,7 @@ pub mod mouse;
 pub mod owner;
 pub mod select;
 pub mod uia;
+pub mod vdm;
 
 pub use com::ShellComManager;
 pub use coordinator::{TabConfig, TabCoordinator};
