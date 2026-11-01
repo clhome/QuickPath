@@ -2093,6 +2093,36 @@
   - [x] 运行 `cargo test`、`cargo clippy --all-targets -- -D warnings`（0 告警）、`cargo fmt -- --check`（0 差异）与 Release 构建全量校验通过
   - [x] 同步更新 `task.md` 完成状态并汇报
 
+---
+
+## 阶段七十九：微软商店上架准备、MSI/MSIX 自动打包与包身份双轨更新
+
+> **目标**：完善微软商店上架指南文档；基于 Win32 API 实现包身份运行时检测与双轨更新控制（MSIX 商店版静默托管，便携版/MSI 版保留 GitHub 更新检测）；在 GitHub Actions 流水线中增加 MSI（WiX）与 MSIX（makeappx）双安装包自动化构建，输出并校验全部 4 种分发产物。
+
+- [x] **79.1 参考文档修订 (`参考/quickpath-microsoft-store-guide.md`)**
+  - [x] 修订第一章与第五章：补充 MSI 与 MSIX 分工，升级为 GitHub Actions 自动化方案
+  - [x] 修订第四章第 3 节：说明包身份双轨更新设计
+  - [x] 修订第七章与第九章：更新隐私政策与提交备注
+- [x] **79.2 包身份检测与双轨更新控制 (`src/win32/package.rs`, `src/main.rs`, `Cargo.toml`)**
+  - [x] `Cargo.toml` 引入 `windows` 的 `Win32_Storage_Packaging_Appx` 特性
+  - [x] 实现 `is_packaged()` 检测函数并编写覆盖单测
+  - [x] `src/main.rs` 改造：仅在 `!is_packaged()` 时启动 GitHub 更新检查线程
+- [x] **79.3 MSIX 商店包工程构建 (`packaging/msix/`)**
+  - [x] 生成全套规格尺寸的 PNG 图标资产（50x50, 44x44, 150x150, 310x150, 310x310）
+  - [x] 编写符合商店规范的 `AppxManifest.xml`（带规范占位与环境变量覆盖）
+  - [x] 编写跨平台 `build-msix.ps1` 脚本并验证封包
+- [x] **79.4 MSI 安装包工程构建 (`packaging/msi/`)**
+  - [x] 编写标准 WiX 定义文件 `quickpath.wxs`
+  - [x] 编写跨平台 `build-msi.ps1` 打包脚本
+- [x] **79.5 GitHub Actions 发布流水线集成 (`.github/workflows/release.yml`)**
+  - [x] 集成 MSI 自动化构建步骤
+  - [x] 集成 MSIX 自动化构建步骤
+  - [x] 扩展 `sha256sums.txt` 生成逻辑与 Release 产物发布列表
+- [x] **79.6 质量门禁验证与交付 (`task.md`)**
+  - [x] 运行 `cargo test`、`cargo clippy`、`cargo fmt` 全量校验（253 个单测全绿，0 告警，0 格式差异）
+  - [x] 更新 `task.md` 打勾完成状态并清理临时工具脚本
+
+
 
 
 

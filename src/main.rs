@@ -304,28 +304,31 @@ fn main() {
         }
 
         // 7. 异步检查 GitHub Release 最新版本（非阻塞、单次轻量、失败静默放弃，绝不重试打扰）
-        let host_raw = host_hwnd.0 as usize;
-        thread::Builder::new()
-            .name("quickpath-update-checker".into())
-            .spawn(move || {
-                if let Some(res) =
-                    win32::updater::check_for_updates_quietly(rules::version::APP_VERSION)
-                {
-                    if let Ok(mut lock) = PENDING_UPDATE.lock() {
-                        *lock = Some(res);
+        // 具备 Package Identity 时（如 MSIX 微软商店版），完全托管给微软商店更新管道，彻底跳过自更新请求。
+        if !win32::package::is_packaged() {
+            let host_raw = host_hwnd.0 as usize;
+            thread::Builder::new()
+                .name("quickpath-update-checker".into())
+                .spawn(move || {
+                    if let Some(res) =
+                        win32::updater::check_for_updates_quietly(rules::version::APP_VERSION)
+                    {
+                        if let Ok(mut lock) = PENDING_UPDATE.lock() {
+                            *lock = Some(res);
+                        }
+                        let host_ptr = HOST_HWND.load(Ordering::SeqCst);
+                        if !host_ptr.is_null() {
+                            let _ = PostMessageW(
+                                Some(HWND(host_raw as *mut _)),
+                                WM_QUICKPATH_NEW_VERSION_AVAILABLE,
+                                WPARAM(0),
+                                LPARAM(0),
+                            );
+                        }
                     }
-                    let host_ptr = HOST_HWND.load(Ordering::SeqCst);
-                    if !host_ptr.is_null() {
-                        let _ = PostMessageW(
-                            Some(HWND(host_raw as *mut _)),
-                            WM_QUICKPATH_NEW_VERSION_AVAILABLE,
-                            WPARAM(0),
-                            LPARAM(0),
-                        );
-                    }
-                }
-            })
-            .ok();
+                })
+                .ok();
+        }
 
         // 8. 进入 Win32 标准消息驱动循环
         //

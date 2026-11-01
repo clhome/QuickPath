@@ -90,7 +90,29 @@ jobs:
       - name: 编译 Release 版本
         run: cargo build --release
 
-      - name: 判定发布通道（含 -rc/-alpha/-beta/-pre 的标签为预发布）
+      - name: 打包 MSI 安装包 (WiX)
+        shell: pwsh
+        run: |
+          $TAG_NAME = "${{ github.ref_name }}"
+          pwsh -NoProfile -ExecutionPolicy Bypass -File packaging/msi/build-msi.ps1 `
+            -ExePath "target/release/quickpath.exe" `
+            -OutputDir "dist" `
+            -OutputFileName "QuickPath-$TAG_NAME-x64.msi"
+
+      - name: 打包 MSIX 微软商店包 (MakeAppx)
+        shell: pwsh
+        env:
+          MS_STORE_IDENTITY_NAME: ${{ secrets.MS_STORE_IDENTITY_NAME }}
+          MS_STORE_PUBLISHER: ${{ secrets.MS_STORE_PUBLISHER }}
+          MS_STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.MS_STORE_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          $TAG_NAME = "${{ github.ref_name }}"
+          pwsh -NoProfile -ExecutionPolicy Bypass -File packaging/msix/build-msix.ps1 `
+            -ExePath "target/release/quickpath.exe" `
+            -OutputDir "dist" `
+            -OutputFileName "QuickPath-$TAG_NAME-x64.msix"
+
+      - name: 判定发布通道（含 -rc|-alpha|-beta|-pre 的标签为预发布）
         id: channel
         shell: pwsh
         run: |
@@ -114,14 +136,14 @@ jobs:
           # 生成便携压缩包
           Compress-Archive -Path "dist/QuickPath.exe" -DestinationPath "dist/QuickPath-$TAG_NAME-windows-x64.zip"
 
-          # 生成严谨的 SHA-256 校验和清单
+          # 生成严谨的 SHA-256 校验和清单（涵盖 exe、zip、msi、msix 全部 4 种分发产物）
           #
           # 注意：`-Include` 必须配合带通配符的路径或 `-Recurse` 才生效。
           # 写成 `-Path "dist"` 时 PowerShell 不会应用 `-Include` 过滤，结果是**一个文件都匹配不到**，
           # 于是清单会静默变成空文件（已在本机用 5 组变体实测确认：`-Path "dist"` → 0 命中，
-          # `-Path "dist\*"` / `-Recurse` → 3 命中）。而报告 §4.3 正是把本清单当作产物字节一致性的
+          # `-Path "dist\*"` / `-Recurse` → 命中全部产物）。而报告 §4.3 正是把本清单当作产物字节一致性的
           # 兜底校验手段，空清单等于该兜底失效，因此这里既修正过滤写法、又加 fail-closed 守卫。
-          $artifacts = Get-ChildItem -Path "dist\*" -File -Include "*.exe", "*.zip"
+          $artifacts = Get-ChildItem -Path "dist\*" -File -Include "*.exe", "*.zip", "*.msi", "*.msix"
           if (-not $artifacts) {
               Write-Error "未能匹配到任何待校验产物（dist 为空或 -Include 未生效），拒绝生成空 SHA-256 清单"
               exit 1
@@ -164,6 +186,8 @@ jobs:
           files: |
             dist/QuickPath-*.exe
             dist/QuickPath-*.zip
+            dist/QuickPath-*.msi
+            dist/QuickPath-*.msix
             dist/sha256sums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
