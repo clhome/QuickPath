@@ -46,4 +46,3 @@ mod tests {
         assert_eq!(APPMODEL_ERROR_NO_PACKAGE_CODE, 15700);
     }
 }
-
