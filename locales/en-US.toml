@@ -48,7 +48,7 @@ version = "v{version} Official Release (Ultra-Fast · Lightweight)"
 company = "Produced by Quzhou Yufeng Technology Co., Ltd."
 desc = "Dedicated to Next-Gen Windows native productivity & system enhancements"
 copyright = "Copyright © 2026 Quzhou Yufeng Technology Co., Ltd. All Rights Reserved."
-website = "https://windpath.yftec.top"
+website = "https://wp.yftec.top"
 github = "https://github.com/clhome/WindPath"
 os_environment = "System: {os_version}"
 

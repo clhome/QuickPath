@@ -84,7 +84,7 @@ BEGIN
             VALUE "OriginalFilename", "windpath.exe"
             VALUE "ProductName", "WindPath"
             VALUE "ProductVersion", "{dot_version}"
-            VALUE "Comments", "https://windpath.yftec.top"
+            VALUE "Comments", "https://wp.yftec.top"
         END
         BLOCK "040904b0"
         BEGIN
@@ -96,7 +96,7 @@ BEGIN
             VALUE "OriginalFilename", "windpath.exe"
             VALUE "ProductName", "WindPath"
             VALUE "ProductVersion", "{dot_version}"
-            VALUE "Comments", "https://windpath.yftec.top"
+            VALUE "Comments", "https://wp.yftec.top"
         END
     END
     BLOCK "VarFileInfo"

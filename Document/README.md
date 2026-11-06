@@ -21,6 +21,7 @@ Welcome to the WindPath documentation hub. Here you will find official user guid
 ---
 
 ### Links & Resources / 链接与资源
-- **Official Website / 官方网址**: [https://windpath.yftec.top](https://windpath.yftec.top)
+
+- **Official Website / 官方网址**: [https://wp.yftec.top](https://wp.yftec.top)
 - **GitHub Repository / 源码仓库**: [https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 - **Produced by / 出品方**: 衢州御风科技有限公司 (Quzhou Yufeng Technology Co., Ltd.)

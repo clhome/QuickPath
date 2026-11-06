@@ -20,7 +20,7 @@
     <!-- 控制面板卸载信息与图标定义 -->
     <Icon Id="AppIcon" SourceFile="$(var.SourceDir)\assets\logo.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    <Property Id="ARPHELPLINK" Value="https://windpath.yftec.top" />
+    <Property Id="ARPHELPLINK" Value="https://wp.yftec.top" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/clhome/WindPath" />
 
     <!-- 目录结构映射 -->

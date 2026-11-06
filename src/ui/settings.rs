@@ -2090,10 +2090,7 @@ unsafe fn render_about_card(
         SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
         let ver_name = if bundle.about.version.is_empty() {
-            format!(
-                "v{} 正式版",
-                crate::rules::version::APP_VERSION
-            )
+            format!("v{} 正式版", crate::rules::version::APP_VERSION)
         } else {
             bundle.about.version.clone()
         };

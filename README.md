@@ -12,11 +12,11 @@
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust)](https://www.rust-lang.org)
 [![Version](https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version)](https://github.com/clhome/WindPath/releases/latest)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/Website-windpath.yftec.top-4A90E2)](https://windpath.yftec.top)
+[![Website](https://img.shields.io/badge/Website-windpath.yftec.top-4A90E2)](https://wp.yftec.top)
 
 **A modern Fluent-style smart path following and quick navigation companion for Windows 10 & 11 file dialogs.**
 
-[🌐 Official Website](https://windpath.yftec.top) · [📘 User Manual (English)](Document/User_Manual_EN.md) · [📖 使用说明书 (中文)](Document/User_Manual_CN.md) · [🐛 Issues & Feedback](https://github.com/clhome/WindPath/issues)
+[🌐 Official Website](https://wp.yftec.top) · [📘 User Manual (English)](Document/User_Manual_EN.md) · [📖 使用说明书 (中文)](Document/User_Manual_CN.md) · [🐛 Issues & Feedback](https://github.com/clhome/WindPath/issues)
 
 </div>
 
@@ -226,7 +226,7 @@ For in-depth usage scenarios, ecosystem configurations, and advanced customizati
 ## 🏢 Producer & Acknowledgments
 
 - **Produced by**: Quzhou Yufeng Technology Co., Ltd. (衢州御风科技有限公司)
-- **Official Website**: [https://windpath.yftec.top](https://windpath.yftec.top)
+- **Official Website**: [https://wp.yftec.top](https://wp.yftec.top)
 - **GitHub Repository**: [https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 - **History & Rebranding**: Originally established and iterated under the name **QuickPath**, the project was officially rebranded to **WindPath** following feature expansions (such as native multi-tab enhancement and taskbar monitoring) and brand vision alignment—delivering an agile experience as swift and smooth as riding the wind, while retaining 100% seamless backward compatibility for legacy configurations.
 

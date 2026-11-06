@@ -48,7 +48,7 @@ version = "v{version} 正式版"
 company = "出品方：衢州御风科技有限公司"
 desc = "专注于新一代 Windows 现代生产力工具与原生系统增强研发"
 copyright = "Copyright © 2026 衢州御风科技有限公司. All Rights Reserved."
-website = "https://windpath.yftec.top"
+website = "https://wp.yftec.top"
 github = "https://github.com/clhome/WindPath"
 os_environment = "系统环境：{os_version}"
 

@@ -12,11 +12,11 @@
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust)](https://www.rust-lang.org)
 [![Version](https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version)](https://github.com/clhome/WindPath/releases/latest)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/Website-windpath.yftec.top-4A90E2)](https://windpath.yftec.top)
+[![Website](https://img.shields.io/badge/Website-windpath.yftec.top-4A90E2)](https://wp.yftec.top)
 
 **专为 Windows 10 与 Windows 11 深度打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器。**
 
-[🌐 官方网站](https://windpath.yftec.top) · [📖 详细使用说明书](Document/User_Manual_CN.md) · [📘 English Manual](Document/User_Manual_EN.md) · [🐛 问题反馈](https://github.com/clhome/WindPath/issues)
+[🌐 官方网站](https://wp.yftec.top) · [📖 详细使用说明书](Document/User_Manual_CN.md) · [📘 English Manual](Document/User_Manual_EN.md) · [🐛 问题反馈](https://github.com/clhome/WindPath/issues)
 
 </div>
 
@@ -25,6 +25,7 @@
 ## 💡 为什么选择 WindPath？
 
 在日常使用电脑时，您是否常常遇到这样的繁琐场景：
+
 - 刚刚在**文件资源管理器**或 **Directory Opus** 中找到了深层工作目录，打开文本编辑器、IDE、Photoshop、Office 或 **WPS** 点击“另存为”或“打开文件”时，对话框却停留在默认的“下载”或“文档”目录；
 - 您不得不一层层重新点选繁琐的目录树，或者手动复制文件管理器地址栏路径再粘贴到对话框中；
 - 某些老旧辅助工具在粘贴路径时经常误触发中文输入法，导致文件名被拼音顶词覆盖破坏；
@@ -80,22 +81,22 @@
 
 ## ⌨️ 常用快捷操作
 
-| 动作 / 按键 | 功能说明 |
-| :--- | :--- |
-| **自动跟随** | 在文件管理器查看文件夹后，切入“打开/另存为”对话框，系统自动秒切到该路径 |
-| **`Ctrl + Q`** (可自定义) | 在文件对话框中呼出现代路径选择悬浮栏 |
-| **`↑` / `↓`** | 在悬浮候选列表（打开的窗口/最近历史/常用目录）中切换高亮项 |
-| **`Enter`** | 确认并将选中的路径注入到当前对话框中瞬时跳转 |
-| **`Esc`** | 关闭悬浮栏 |
-| **`Win + E`** | 开启多标签增强时，若已有打开的窗口则在当前窗口新建标签页，避免弹出多余独立窗口 *(Ver 1.2.0 新增)* |
-| **双击标签页** | 在资源管理器标签栏双击某个标签页，快速在右侧复制克隆一个相同路径的标签页 *(Ver 1.2.0 新增)* |
-| **鼠标中键单击标签页** | 快速关闭当前标签页 *(Windows 原生支持)* |
-| **`Ctrl + Tab` / `Ctrl + Shift + Tab`** | 在资源管理器相邻标签页之间顺畅正向/反向轮转切换 *(Windows 原生支持)* |
-| **监控面板左键双击** | 快速唤起 Windows 任务管理器 (`taskmgr.exe`) *(Ver 1.1.0 之后新增)* |
-| **监控面板鼠标悬停** | 呼出 Fluent 硬件详情看板 (Tooltip)，展开双计量网速、Top 1 进程、独显专有显存、运行时间、电池状态及整行指标动态负载状态色 *(Ver 1.2.5 增强)* |
-| **监控面板右键单击** | 弹出原生菜单：切换显示指标 (网速/CPU/RAM/GPU/Disk)、波形背景、停靠位置、刷新网卡适配器、直达设置中心 *(Ver 1.1.0 之后新增)* |
-| **托盘图标单击 / 双击** | 打开现代卡片式设置中心 |
-| **托盘图标右键** | 快捷菜单：切换自动秒切、任务栏监控开关、开机自启、呼出候选、打开设置或退出 |
+| 动作 / 按键                             | 功能说明                                                                                                                                    |
+| :-------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------ |
+| **自动跟随**                            | 在文件管理器查看文件夹后，切入“打开/另存为”对话框，系统自动秒切到该路径                                                                     |
+| **`Ctrl + Q`** (可自定义)               | 在文件对话框中呼出现代路径选择悬浮栏                                                                                                        |
+| **`↑` / `↓`**                           | 在悬浮候选列表（打开的窗口/最近历史/常用目录）中切换高亮项                                                                                  |
+| **`Enter`**                             | 确认并将选中的路径注入到当前对话框中瞬时跳转                                                                                                |
+| **`Esc`**                               | 关闭悬浮栏                                                                                                                                  |
+| **`Win + E`**                           | 开启多标签增强时，若已有打开的窗口则在当前窗口新建标签页，避免弹出多余独立窗口 _(Ver 1.2.0 新增)_                                           |
+| **双击标签页**                          | 在资源管理器标签栏双击某个标签页，快速在右侧复制克隆一个相同路径的标签页 _(Ver 1.2.0 新增)_                                                 |
+| **鼠标中键单击标签页**                  | 快速关闭当前标签页 _(Windows 原生支持)_                                                                                                     |
+| **`Ctrl + Tab` / `Ctrl + Shift + Tab`** | 在资源管理器相邻标签页之间顺畅正向/反向轮转切换 _(Windows 原生支持)_                                                                        |
+| **监控面板左键双击**                    | 快速唤起 Windows 任务管理器 (`taskmgr.exe`) _(Ver 1.1.0 之后新增)_                                                                          |
+| **监控面板鼠标悬停**                    | 呼出 Fluent 硬件详情看板 (Tooltip)，展开双计量网速、Top 1 进程、独显专有显存、运行时间、电池状态及整行指标动态负载状态色 _(Ver 1.2.5 增强)_ |
+| **监控面板右键单击**                    | 弹出原生菜单：切换显示指标 (网速/CPU/RAM/GPU/Disk)、波形背景、停靠位置、刷新网卡适配器、直达设置中心 _(Ver 1.1.0 之后新增)_                 |
+| **托盘图标单击 / 双击**                 | 打开现代卡片式设置中心                                                                                                                      |
+| **托盘图标右键**                        | 快捷菜单：切换自动秒切、任务栏监控开关、开机自启、呼出候选、打开设置或退出                                                                  |
 
 ---
 
@@ -104,6 +105,7 @@
 ![settings](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/settings.webp)
 
 WindPath 配备了符合 Fluent 视觉的现代化**四选项卡**卡片式设置中心：
+
 - **「常规偏好」**：
   - **常规自动化**：一键开启或关闭“智能自动秒切”，并提供滑块调节切换触发延时（40ms ~ 500ms）；
   - **悬浮条外观**：自绘透明度滑动条，实时预览 40% ~ 100% 亚克力半透明磨砂效果；
@@ -125,19 +127,21 @@ WindPath 配备了符合 Fluent 视觉的现代化**四选项卡**卡片式设�
   - **同一时刻只允许一次剪贴板事务**:显式探测与 WPS 注入 / 文件名恢复共用一把进程级独占锁(由剪贴板事务自持),冲突时后来的请求被直接拒绝且**不碰剪贴板**;取消 / 超时 / 来源不可证明时**不会用旧快照覆盖**当前内容,并给出托盘气泡反馈;
   - **剪贴板事务进行中**,两个显式探测入口(托盘菜单项、吸附条按钮)同时置灰,吸附条按钮显示 `...`。注意:WPS 注入若经 UIA `SetValue` 完成则**不占用剪贴板**,不会触发该置灰状态;
   - **同一时刻也只允许一次 WPS 操作**:WPS 注入与延迟的文件名恢复共用一把操作级独占锁(全局唯一,不区分对话框),重复触发会被去重拒绝,避免重复回车或导航到错误目录。这些相关共享资源的冲突**一律由各自的底层 lease 拒绝**,UI 置灰只作状态反馈。
-![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor.webp)
+    ![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor.webp)
 
 ---
 
 ## ⚙️ 配置文件说明
 
 WindPath 采用绿色双模式设计：
+
 1. **便携模式**：若程序同级目录下存在 `windpath.json`（或旧版 `quickpath.json`），则所有配置就地保存（适合放在 U 盘或移动硬盘）。
 2. **标准模式**：默认持久化保存于 `%APPDATA%\WindPath\config.json`（自动无损迁移旧版 `%APPDATA%\QuickPath\config.json`）。
    - **原子安全落盘**：写入临时文件并执行物理磁盘 `sync_all` 冲刷后再原子替换，自动保留 `config.json.bak` 备份；
    - **防静默损坏覆写**：若配置异常，优先从备份恢复；若均损坏则隔离保存为 `config.json.bad.<时间戳>`，绝不静默覆盖用户热键与历史数据。
 
 配置项示例：
+
 ```json
 {
   "auto_switch_enabled": true,
@@ -179,8 +183,10 @@ WindPath 采用绿色双模式设计：
 ```
 
 > **说明**：
+>
 > - `tab_module` **(Ver 1.2.0 新增)**：控制资源管理器多标签页增强。`enabled` 为总开关；`wine_to_tab` 控制 `Win + E` 是否在已有窗口中转换为新建标签页；`deduplication` 控制同路径标签页智能去重；`double_click_to_duplicate` 控制在标签栏双击某个标签页时克隆复制当前目录。
 > - `monitor` **(Ver 1.1.0 之后新增)**：负责任务栏硬件监控配置，其中 `position` 支持 `"TrayLeft"`（任务栏右侧）与 `"TaskbarLeft"`（任务栏左上方独立悬浮）；`refresh_interval_ms` 支持 `1000`、`3000`（默认推荐）与 `5000` 毫秒。各指标项均支持布尔值细粒度独立开关。
+
 ---
 
 ## 🏗️ 源码构建与编译
@@ -188,10 +194,12 @@ WindPath 采用绿色双模式设计：
 本项目基于标准 Rust 工具链开发，支持 Windows 10 (1809+) 及 Windows 11。
 
 ### 前置环境
+
 - 安装 [Rust 官方工具链](https://www.rust-lang.org/) (建议使用 stable 通道)
 - Windows 10 (1809 及以上) 或 Windows 11
 
 ### 编译步骤
+
 ```pwsh
 # 1. 克隆代码仓库
 git clone https://github.com/clhome/WindPath.git
@@ -211,6 +219,7 @@ cargo build --release
 ## 📚 详细文档
 
 想要深入了解 WindPath 的详细用法、生态适配配置和进阶技巧，请查阅官方手册：
+
 - 🇨🇳 [中文用户使用说明书 (User Manual)](Document/User_Manual_CN.md)
 - 🇺🇸 [English User Manual & Technical Guide](Document/User_Manual_EN.md)
 
@@ -219,7 +228,7 @@ cargo build --release
 ## 🏢 出品与致谢
 
 - **出品方**：衢州御风科技有限公司 (Quzhou Yufeng Technology Co., Ltd.)
-- **官方网址**：[https://windpath.yftec.top](https://windpath.yftec.top)
+- **官方网址**：[https://wp.yftec.top](https://wp.yftec.top)
 - **代码仓库**：[https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 - **更名历史**：本项目最初以 **QuickPath** 之名立项并发布多版迭代；后随着多标签增强、任务栏监控等功能矩阵扩展与品牌战略升级，正式更名为 **WindPath（御风路径）**，寓意“御风而行，行云流水”，并对旧版配置与便携模式保持 100% 平滑无损兼容。
 

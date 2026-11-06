@@ -575,9 +575,7 @@ pub fn open_debug_log() -> bool {
 
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn();
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
         true
     }
 }
