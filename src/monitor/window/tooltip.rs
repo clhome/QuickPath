@@ -107,10 +107,7 @@ impl TooltipData {
         };
         let net_line = format!(
             "{}: ↑ {:.1} Mbps  ↓ {:.1} Mbps{}",
-            net_lbl,
-            snapshot.network.upload_mbps,
-            snapshot.network.download_mbps,
-            net_top
+            net_lbl, snapshot.network.upload_mbps, snapshot.network.download_mbps, net_top
         );
 
         let total_mb = snapshot.network.total_bytes_session as f64 / (1024.0 * 1024.0);
@@ -1330,10 +1327,7 @@ mod tests {
         );
 
         assert_eq!(data.lines[3].icon, MetricIconKind::Memory);
-        assert_eq!(
-            data.lines[3].text,
-            "内存: 52% (14.5 GB / 27.8 GB)"
-        );
+        assert_eq!(data.lines[3].text, "内存: 52% (14.5 GB / 27.8 GB)");
 
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);
         assert_eq!(
@@ -1386,10 +1380,7 @@ mod tests {
         );
 
         assert_eq!(data.lines[3].icon, MetricIconKind::Memory);
-        assert_eq!(
-            data.lines[3].text,
-            "RAM: 52% (14.5 GB / 27.8 GB)"
-        );
+        assert_eq!(data.lines[3].text, "RAM: 52% (14.5 GB / 27.8 GB)");
 
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);
         assert_eq!(
