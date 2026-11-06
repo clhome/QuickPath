@@ -220,6 +220,7 @@ For in-depth usage scenarios, ecosystem configurations, and advanced customizati
 - **Produced by**: Quzhou Yufeng Technology Co., Ltd. (衢州御风科技有限公司)
 - **Official Website**: [https://windpath.yftec.top](https://windpath.yftec.top)
 - **GitHub Repository**: [https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
+- **History & Rebranding**: Originally established and iterated under the name **QuickPath**, the project was officially rebranded to **WindPath** following feature expansions (such as native multi-tab enhancement and taskbar monitoring) and brand vision alignment—delivering an agile experience as swift and smooth as riding the wind, while retaining 100% seamless backward compatibility for legacy configurations.
 
 ---
 

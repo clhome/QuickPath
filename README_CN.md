@@ -221,6 +221,7 @@ cargo build --release
 - **出品方**：衢州御风科技有限公司 (Quzhou Yufeng Technology Co., Ltd.)
 - **官方网址**：[https://windpath.yftec.top](https://windpath.yftec.top)
 - **代码仓库**：[https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
+- **更名历史**：本项目最初以 **QuickPath** 之名立项并发布多版迭代；后随着多标签增强、任务栏监控等功能矩阵扩展与品牌战略升级，正式更名为 **WindPath（御风路径）**，寓意“御风而行，行云流水”，并对旧版配置与便携模式保持 100% 平滑无损兼容。
 
 ---
 
