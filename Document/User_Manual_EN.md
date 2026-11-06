@@ -1,4 +1,4 @@
-# QuickPath User Manual & Technical Guide
+# WindPath User Manual & Technical Guide
 
 <div align="center">
 
@@ -6,16 +6,20 @@
 
 [![Version](https://img.shields.io/badge/Version-v1.2.0-success)](#)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
-[![Producer](https://img.shields.io/badge/Produced%20By-Quzhou%20Yufeng%20Technology%20Co.,%20Ltd.-orange)](https://qp.yftec.top)
+[![Producer](https://img.shields.io/badge/Produced%20By-Quzhou%20Yufeng%20Technology%20Co.,%20Ltd.-orange)](https://windpath.yftec.top)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](../LICENSE)
 
 **A Modern Fluent-Style Smart Path Following and Quick Navigation Companion for Windows File Dialogs**
 
-[🌐 Official Website](https://qp.yftec.top) · [🐙 GitHub Repository](https://github.com/clhome/QuickPath) · [💬 Submit Issues](https://github.com/clhome/QuickPath/issues)
+[🌐 Official Website](https://windpath.yftec.top) · [🐙 GitHub Repository](https://github.com/clhome/WindPath) · [💬 Submit Issues](https://github.com/clhome/WindPath/issues)
 
 </div>
 
 ---
+
+> [!IMPORTANT]
+> **Brand Upgrade Notice**:
+> Due to a naming conflict in the Microsoft Store, this project has been officially renamed from **QuickPath** to **WindPath** (御风路径). All future iterations, releases, and documentation will follow the **WindPath** name. Existing user configurations, autostart entries, and local portable data will be migrated smoothly and seamlessly.
 
 ## Table of Contents
 
@@ -59,14 +63,14 @@ Common pain points include:
 2. Having to manually expand long directory tree hierarchies or copy the folder path from Explorer's address bar and paste it into the dialog;
 3. Using outdated scripting utilities that trigger Input Method Editor (IME) candidate popups during paste operations, causing typographical errors or wiping out previously typed filenames.
 
-### 1.2 The QuickPath Solution
-**QuickPath** eliminates this disconnect completely. Leveraging native WinEvent hooks and precision Win32 control identification, it provides a sub-100ms path synchronization pipeline:
+### 1.2 The WindPath Solution
+**WindPath** eliminates this disconnect completely. Leveraging native WinEvent hooks and precision Win32 control identification, it provides a sub-100ms path synchronization pipeline:
 
 ```mermaid
 graph TD
     A[User navigates deep folder in File Manager] -->|Copy, edit, or locate work directory| B[File Manager is active in foreground]
-    B -->|QuickPath Window Sensing Engine| C[Caches active directory and history in real-time]
-    D[Trigger Open/Save As dialog in external app] -->|Window creation & activation events| E{QuickPath Dialog Detection}
+    B -->|WindPath Window Sensing Engine| C[Caches active directory and history in real-time]
+    D[Trigger Open/Save As dialog in external app] -->|Window creation & activation events| E{WindPath Dialog Detection}
     E -->|Mode A: AutoSwitch Enabled| F[ImeGuard suspends IME -> Injects active path -> Restores filename & focus]
     E -->|Mode B: Floating Bar / Ctrl+Q| G[Snaps Fluent acrylic bar -> Arrow keys navigate -> Enter instantly switches]
 ```
@@ -89,19 +93,19 @@ graph TD
 ## 3. Installation & Startup Modes
 
 ### 3.1 Portable Zero-Install Usage
-QuickPath is distributed as a completely portable, standalone single-file binary:
-1. Extract `quickpath.exe` to any folder of your choice (e.g., `D:\Tools\QuickPath\` or a USB flash drive);
-2. Double-click `quickpath.exe` to run it silently in the background;
-3. Once running, the QuickPath logo appears in the Windows system notification tray area (near the clock).
+WindPath is distributed as a completely portable, standalone single-file binary:
+1. Extract `windpath.exe` to any folder of your choice (e.g., `D:\Tools\WindPath\` or a USB flash drive);
+2. Double-click `windpath.exe` to run it silently in the background;
+3. Once running, the WindPath logo appears in the Windows system notification tray area (near the clock).
 
 ### 3.2 Dual Configuration Storage Modes
-- **Portable Mode**: If `quickpath.json` is located in the same directory as the executable, QuickPath stores all user preferences and history locally in that file;
-- **Standard Mode**: If no local JSON file is present, preferences are safely stored in `%APPDATA%\QuickPath\config.json`.
+- **Portable Mode**: If `windpath.json` (or legacy `quickpath.json`) is located in the same directory as the executable, WindPath automatically operates in portable mode and stores all preferences locally;
+- **Standard Mode**: If no local JSON file is present, preferences are safely stored in `%APPDATA%\WindPath\config.json` (automatic seamless migration from legacy `%APPDATA%\QuickPath\config.json` if detected). Atomic writing and automatic `.bak` backups prevent corruption.
 
 ### 3.3 UAC-Free Silent AutoStart
-- QuickPath features built-in **Windows Task Scheduler** registration for automatic startup;
-- This allows QuickPath to launch with highest privileges on system boot **without displaying annoying yellow UAC elevation prompts**;
-- Elevated execution ensures seamless inter-process communication with other software running as administrator (e.g., Visual Studio, Elevated Terminals, IDA Pro).
+- WindPath features built-in **Windows Task Scheduler** registration for automatic startup;
+- This allows WindPath to launch with highest privileges on system boot **without displaying annoying yellow UAC elevation prompts**;
+- Elevated execution ensures seamless inter-process communication with other software running as administrator (e.g., Visual Studio, Elevated Terminals, IDA Pro). Legacy `QuickPath` autostart entries are automatically detected and cleaned up on launch.
 
 ---
 
@@ -109,12 +113,12 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 
 ### 4.1 Smart AutoSwitch
 - **Description**:
-  When transitioning from a supported file manager to an application triggering an "Open" or "Save As" dialog, QuickPath recognizes the contextual relationship and instantly switches the dialog directory to match your active folder.
+  When transitioning from a supported file manager to an application triggering an "Open" or "Save As" dialog, WindPath recognizes the contextual relationship and instantly switches the dialog directory to match your active folder.
 - **Tuning & Response Delay**:
   - AutoSwitch can be toggled on/off in the Settings Center;
   - **Switch Delay (ms)**: Default is `80ms`. For legacy applications with slower internal UI initialization, consider setting this to `120ms` ~ `150ms`; for rapid switching, `60ms` ~ `80ms` is optimal.
 - **Safety & Anti-Overwrite Protection**:
-  If you have already started browsing or modifying the directory within the dialog, QuickPath will not re-inject or overwrite your active navigation.
+  If you have already started browsing or modifying the directory within the dialog, WindPath will not re-inject or overwrite your active navigation.
 
 ### 4.2 Modern Fluent Floating Bar
 - **Visual Design**:
@@ -125,7 +129,7 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 - **High-Density Single-Line Candidate Layout**:
   Candidates are presented in a clean, compact single-line layout:
   ```
-  📁 [Folder Name]      D:\Work\Projects\QuickPath      [Source Badge: Active / History / Pinned]
+  📁 [Folder Name]      D:\Work\Projects\WindPath      [Source Badge: Active / History / Pinned]
   ```
   Displays up to 8 recent and relevant candidates.
 - **Pure Keyboard Blind Navigation**:
@@ -136,11 +140,11 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 
 ### 4.3 IME Guard & Filename Preservation (ImeGuard)
 - **Input Method Editor Guard (ImeGuard)**:
-  When communicating with Win32 edit and address bar controls, QuickPath suspends the active thread's IME candidate window for microseconds and restores it immediately upon injection. This prevents Chinese, Japanese, or third-party IMEs from producing pinyin letter sequences or corrupted characters;
+  When communicating with Win32 edit and address bar controls, WindPath suspends the active thread's IME candidate window for microseconds and restores it immediately upon injection. This prevents Chinese, Japanese, or third-party IMEs from producing pinyin letter sequences or corrupted characters;
 - **Write order for WPS owner-drawn dialogs (matches the implementation)**:
-  For WPS-style Qt owner-drawn dialogs that expose no native Win32 control handles, QuickPath writes the path through UIA `SetValue` **first — without touching the system clipboard at all**. Only when that write cannot be verified does it fall back to a transactional clipboard injection that restores the clipboard atomically. Either way, `Enter` is sent only after a successful read-back;
+  For WPS-style Qt owner-drawn dialogs that expose no native Win32 control handles, WindPath writes the path through UIA `SetValue` **first — without touching the system clipboard at all**. Only when that write cannot be verified does it fall back to a transactional clipboard injection that restores the clipboard atomically. Either way, `Enter` is sent only after a successful read-back;
 - **Intelligent Filename Preservation**:
-  In "Save As" scenarios where you have already typed a custom filename (e.g., `Financial_Report_Q4.xlsx`), QuickPath isolates the filename, synchronizes only the target directory, and **never clears or overwrites your filename**.
+  In "Save As" scenarios where you have already typed a custom filename (e.g., `Financial_Report_Q4.xlsx`), WindPath isolates the filename, synchronizes only the target directory, and **never clears or overwrites your filename**.
 
 ### 4.4 File Manager Ecosystem Integration
 
@@ -149,13 +153,13 @@ QuickPath is distributed as a completely portable, standalone single-file binary
 | **Windows 11 File Explorer** | Native **Multi-Tab** recognition. Overcomes legacy COM limitations to pinpoint the currently focused tab |
 | **Windows 10 File Explorer** | Full support for standard single-window `CabinetWClass` enumeration |
 | **Directory Opus (DOpus)** | Bridges via `dopusrt` command-line IPC to retrieve active Lister paths in milliseconds |
-| **Total Commander (TC)** | **Experimental and off by default.** Its path can only be returned through the system clipboard, so QuickPath never probes it in the background. Enable it in Settings → Managers, then use **“Get path from TC” in the tray menu or floating bar** to fetch the path once, on demand. Each probe snapshots the clipboard first, and cancels itself (**without restoring an old snapshot over your current clipboard**) whenever the source cannot be proven — e.g. a concurrent copy, a missing update event or an unknown owner. Note that the target manager may still write its path after the request, so avoid copying anything important while a probe is running |
+| **Total Commander (TC)** | **Experimental and off by default.** Its path can only be returned through the system clipboard, so WindPath never probes it in the background. Enable it in Settings → Managers, then use **“Get path from TC” in the tray menu or floating bar** to fetch the path once, on demand. Each probe snapshots the clipboard first, and cancels itself (**without restoring an old snapshot over your current clipboard**) whenever the source cannot be proven — e.g. a concurrent copy, a missing update event or an unknown owner. Note that the target manager may still write its path after the request, so avoid copying anything important while a probe is running |
 | **XYplorer** | **Experimental and off by default**, same rules as Total Commander: authorize in Settings → Managers, then trigger “Get path from XYplorer” manually |
 
 ### 4.5 Taskbar Hardware Status Monitor (New in Ver 1.1.0)
 
 #### 4.5.1 Module Positioning & Unprivileged Lightweight Design
-Integrated as QuickPath's **built-in optional extension module** (enabled by default, fully toggleable in settings or the system tray menu), providing desktop users with a minimalistic, zero-overhead, highly reliable native Windows taskbar hardware dashboard:
+Integrated as WindPath's **built-in optional extension module** (enabled by default, fully toggleable in settings or the system tray menu), providing desktop users with a minimalistic, zero-overhead, highly reliable native Windows taskbar hardware dashboard:
 - **Unprivileged Official APIs**: Operates purely within standard user-mode Windows APIs (IP Helper API `GetIfTable2`, `GetSystemTimes`, `GlobalMemoryStatusEx`, PDH Performance Counters, DXGI `IDXGIAdapter3`), eliminating any Ring 0 kernel driver dependencies or system crash vulnerabilities;
 - **Extreme Lightweight & Zero Idle Waste**: Consumes $\le 5\text{ MB}$ additional working set RAM when active ($\le 0.05\%$ incremental CPU); **when disabled, the background worker sampling thread and all system query handles are completely released, dropping to absolute 0% CPU and 0 MB incremental footprint**.
 
@@ -201,13 +205,13 @@ Hovering over the docked monitor bar for 400ms reveals a modern Fluent dark card
 #### 4.5.6 Mouse & Shortcut Controls
 - **Double-Click**: Quickly launches Windows Task Manager (`taskmgr.exe`) via `ShellExecuteW`;
 - **Right-Click**: Opens native context menu with quick controls:
-  - `Open QuickPath Settings...` (navigates directly to Taskbar Monitor tab)
+  - `Open WindPath Settings...` (navigates directly to Taskbar Monitor tab)
   - `Show Metrics` (independently toggle Network, CPU, RAM, GPU, Disk)
   - `Show Historical Waveform` (toggle waveform background)
   - `Dock Position` (toggle Right of Taskbar / Above Taskbar Left Float)
   - `Refresh Network Adapters` (re-enumerates active interfaces)
   - `Hide Monitor Panel` (dismisses panel)
-  - `Exit QuickPath`
+  - `Exit WindPath`
 - **System Tray Integration**: Toggle taskbar monitoring on/off at any time from the tray icon's context menu.
 
 ### 4.6 File Explorer Tab Utility Module (New in Ver 1.2.0)
@@ -218,34 +222,34 @@ In Windows 11 (22H2 Build 22621 and later), Microsoft officially introduced nati
 2. **Tab Clutter & Infinite Duplication**: Opening the same folder multiple times spawns duplicate tabs without intelligent reuse;
 3. **Lack of Instant Tab Cloning**: Power users lacking an effortless mouse gesture to duplicate a tab side-by-side for folder comparison.
 
-QuickPath **Ver 1.2.0** deconstructs this workflow and provides a pure Rust native **File Explorer Tab Utility**:
+WindPath **Ver 1.2.0** deconstructs this workflow and provides a pure Rust native **File Explorer Tab Utility**:
 - **Pure Native & Zero External Dependencies**: Built strictly upon Win32 APIs, Shell COM interfaces (`IShellWindows` / `IShellBrowser` / `IShellView`), and UI Automation. **Zero external DLL injection**, ensuring total immunity from antivirus heuristic false alarms;
 - **Extreme Memory & CPU Efficiency**: Bypasses heavy rendering engines completely; consumes only **5MB ~ 10MB** incremental working set memory with **0.00%** idle CPU;
 - **Clean Lifecycle**: When disabled in Settings, all global system hooks are completely unhooked and released, reverting Windows to 100% native behavior.
 
 #### 4.6.2 Auto Window-to-Tab Capture & Consolidation
 - **Dual-Event Complementary Interception**: Simultaneously registers `EVENT_OBJECT_CREATE` and `EVENT_OBJECT_SHOW` via `SetWinEventHook`. This ensures 100% reliable detection of incoming `CabinetWClass` windows, resolving edge cases during cold start initialization;
-- **Off-Screen Layered Concealment (Zero Flash)**: In the microsecond an incoming Explorer window spawns, QuickPath applies `WS_EX_LAYERED` with Alpha=0 and shifts its coordinates off-screen. This preserves COM initialization while completely eliminating the unsightly white/black screen flashes common in legacy tools;
+- **Off-Screen Layered Concealment (Zero Flash)**: In the microsecond an incoming Explorer window spawns, WindPath applies `WS_EX_LAYERED` with Alpha=0 and shifts its coordinates off-screen. This preserves COM initialization while completely eliminating the unsightly white/black screen flashes common in legacy tools;
 - **Windows 11 Native Magic Command `0xA21B`**: Sends internal command `WM_COMMAND (0xA21B)` directly to the destination window's `ShellTabWindowClass`, creating an instant tab natively, backed by robust UI Automation and keyboard fallbacks;
 - **Safe Destruction & Focus Transition**: Once the target tab is attached and directed to the target directory, the temporary source window is smoothly closed and destroyed, leaving focus naturally inside the new tab.
 
 #### 4.6.3 External App "Show in Folder" Takeover with Selection Preservation
 Development and productivity software (such as VS Code, Cursor, IntelliJ IDEA, Google Chrome, WeChat, and Telegram) frequently invokes `explorer.exe /select,"C:\path\to\file.ext"` or the Shell API `SHOpenFolderAndSelectItems` to reveal files to users.
-- **Metadata Penetration Extraction**: QuickPath asynchronously queries the incoming window's `IShellItem` and `IShellView` COM interfaces to determine the exact parent folder path and the specific target filename to be selected;
+- **Metadata Penetration Extraction**: WindPath asynchronously queries the incoming window's `IShellItem` and `IShellView` COM interfaces to determine the exact parent folder path and the specific target filename to be selected;
 - **Intelligent Tab Consolidation**: If an Explorer window is already open, the action is routed into that window (switching to an existing tab if already open, or creating a new tab directed to the parent folder);
-- **100% Selection Fidelity (Crucial)**: Once the directory view finishes loading, QuickPath dispatches `IShellView::SelectItem` with `SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`. **The target file remains vividly highlighted and scrolled into the center of the view**, solving the long-standing flaw in basic window mergers where files lose their selected state.
+- **100% Selection Fidelity (Crucial)**: Once the directory view finishes loading, WindPath dispatches `IShellView::SelectItem` with `SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`. **The target file remains vividly highlighted and scrolled into the center of the view**, solving the long-standing flaw in basic window mergers where files lose their selected state.
 
 #### 4.6.4 Win + E Smart Interception & Single-Window Experience
-- **No Existing Explorer Window**: When you press the global shortcut `Win + E`, QuickPath lets the system proceed natively, launching the initial primary window;
+- **No Existing Explorer Window**: When you press the global shortcut `Win + E`, WindPath lets the system proceed natively, launching the initial primary window;
 - **Existing Explorer Window Present**: Intercepts the redundant top-level window and converts the action into creating a new tab in the active Explorer window (defaulting to Home or This PC), preserving an orderly single-window desktop environment.
 
 #### 4.6.5 Smart Tab Deduplication
-- When navigating to folders, QuickPath extracts canonical normalized physical paths across all open tabs in the host window;
+- When navigating to folders, WindPath extracts canonical normalized physical paths across all open tabs in the host window;
 - If the folder is already open in an existing tab, focus shifts immediately to that tab, stopping identical folders from proliferating across the tab bar;
 - **Intent-Aware Bypass**: Deduplication applies to external navigations and address jumps. It automatically bypasses when the user intentionally triggers the "Double-Click Tab to Duplicate" gesture described below.
 
 #### 4.6.6 Double-Click Tab to Duplicate
-- **Intuitive Mouse Gesture**: **Double-click any tab** on the File Explorer tab bar using the left mouse button, and QuickPath will instantly clone and open an identical folder tab directly to its right;
+- **Intuitive Mouse Gesture**: **Double-click any tab** on the File Explorer tab bar using the left mouse button, and WindPath will instantly clone and open an identical folder tab directly to its right;
 - **Ideal for Multi-Directory Workflows**: Compare files or drag items between adjacent views without tedious path copying or manually pressing `+`;
 - **Low-Level Precision Hit-Testing**: Combines a low-level mouse hook with UI Automation hierarchy resolution to accurately identify the clicked `TabItem` node even when the tab is currently in the background.
 
@@ -266,7 +270,7 @@ Development and productivity software (such as VS Code, Cursor, IntelliJ IDEA, G
 ## 5. Graphical Settings Center Guide
 
 ### 5.1 Opening the Settings Center
-- **Mouse Action**: **Single-click** or **Double-click** the QuickPath icon in the system notification tray;
+- **Mouse Action**: **Single-click** or **Double-click** the WindPath icon in the system notification tray;
 - **Context Menu**: **Right-click** the tray icon and select **"⚙️ Settings"**.
 
 ### 5.2 Configuration Options in Detail
@@ -290,10 +294,10 @@ The Settings Center utilizes a modern Fluent **four-tab** card layout (freely to
 5. **Language Selection**
    - Select between **简体中文 (Simplified Chinese)** and **English** via a native dropdown menu;
    - All interfaces, tray menus, floating bars, and tooltips update immediately.
-6. **About QuickPath Card**
-   - Features the high-resolution bicubic resampled QuickPath logo;
+6. **About WindPath Card**
+   - Features the high-resolution bicubic resampled WindPath logo;
    - Displays version number, product overview, and producer branding (*Quzhou Yufeng Technology Co., Ltd.*);
-   - Includes clickable hyperlinks to the official website ([https://qp.yftec.top](https://qp.yftec.top)) and the GitHub repository ([https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)).
+   - Includes clickable hyperlinks to the official website ([https://windpath.yftec.top](https://windpath.yftec.top)) and the GitHub repository ([https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)).
 
 #### "Tab Utility" Tab (New in Ver 1.2.0)
 1. **Master Toggle Card (Card T0: Enable Tab Utility)**:
@@ -313,7 +317,7 @@ The Settings Center utilizes a modern Fluent **four-tab** card layout (freely to
 
 #### "Taskbar Monitor" Tab (New in Ver 1.1.0)
 
-![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
+![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor.webp)
 
 1. **Hardware Monitor Master Switch**: Easily enable or completely disable taskbar hardware monitoring. When turned off, the background worker thread exits immediately with zero resource usage;
 2. **Dock Position**: Radio buttons for selecting placement:
@@ -348,7 +352,7 @@ The Settings Center utilizes a modern Fluent **four-tab** card layout (freely to
 4. **Visible result of cancel / timeout / unprovable source**:
    - Path found: injected into the active dialog when one exists, otherwise recorded to history only, plus a tray balloon "Manager path fetched";
    - No path (timeout, unprovable source, lost ownership, no attributable target, failure cooldown): **no old snapshot is restored over your current clipboard**, plus a tray balloon "No path fetched (cancelled or timed out)";
-   - Note that the target manager may still write its path after the request, so "QuickPath does not restore an old snapshot" is **not** the same as "a concurrent copy can never be lost".
+   - Note that the target manager may still write its path after the request, so "WindPath does not restore an old snapshot" is **not** the same as "a concurrent copy can never be lost".
 
 ### 5.3 Settings Draft & Apply Mechanism
 - **Draft Protection**: Modifications made inside the settings window remain in draft state until confirmed;
@@ -416,7 +420,7 @@ Settings are serialized in standard JSON format:
 | `enable_totalcmd` | boolean | `false` | Authorizes the Total Commander clipboard-based probe. **Granting permission never triggers a probe by itself**: the path is only fetched when you click “Get path from TC” in the tray menu or the floating bar. The same applies to `enable_xyplorer` |
 | `enable_xyplorer` | boolean | `false` | Authorizes the XYplorer clipboard-based probe (same rules as above) |
 
-A probe briefly uses the system clipboard and restores it afterwards. If the source of the update cannot be proven (concurrent copy, missing update notification, unknown owner, timeout), QuickPath cancels the probe and **will not restore an old snapshot over what you currently have on the clipboard**. Note that the target manager may still write its path after the request, so avoid copying anything important while a probe is running. If you upgrade from an older version, both switches are migrated to `false` once.
+A probe briefly uses the system clipboard and restores it afterwards. If the source of the update cannot be proven (concurrent copy, missing update notification, unknown owner, timeout), WindPath cancels the probe and **will not restore an old snapshot over what you currently have on the clipboard**. Note that the target manager may still write its path after the request, so avoid copying anything important while a probe is running. If you upgrade from an older version, both switches are migrated to `false` once.
 
 #### File Explorer Tab Utility Configuration Properties (New in Ver 1.2.0)
 | Property | Type | Default | Description |
@@ -443,11 +447,11 @@ A probe briefly uses the system clipboard and restores it afterwards. If the sou
 ### 6.2 Process Blacklist Strategy (`blacklist_processes`)
 Certain applications may have specific download behaviors where automatic path switching is undesirable:
 - Web browsers (Chrome, Edge, Firefox): Users often prefer saving web downloads to a fixed default folder;
-- Add lower-case executable names to the `blacklist_processes` array (e.g., `"notepad.exe"`). QuickPath will bypass AutoSwitch for these processes while still allowing manual summoning via hotkey.
+- Add lower-case executable names to the `blacklist_processes` array (e.g., `"notepad.exe"`). WindPath will bypass AutoSwitch for these processes while still allowing manual summoning via hotkey.
 
 ### 6.3 Custom External Language Packs
-QuickPath includes embedded English and Simplified Chinese localization, while allowing arbitrary external language extensions:
-1. Create a `locales/` directory next to `quickpath.exe`;
+WindPath includes embedded English and Simplified Chinese localization, while allowing arbitrary external language extensions:
+1. Create a `locales/` directory next to `windpath.exe`;
 2. Add your TOML file (e.g., `locales/ja-JP.toml` or `locales/de-DE.toml`);
 3. Translate keys following the structure of `en-US.toml`;
 4. Re-open the Settings Center, and the new language will appear in the dropdown menu automatically.
@@ -456,8 +460,8 @@ QuickPath includes embedded English and Simplified Chinese localization, while a
 
 ## 7. Troubleshooting & FAQ
 
-### Q1: Why doesn't QuickPath switch paths in certain applications?
-- **Cause 1 (UIPI Elevation Isolation)**: If the target application was launched as Administrator while QuickPath runs with standard user privileges, Windows User Interface Privilege Isolation (UIPI) blocks cross-privilege communication. **Solution**: Enable "AutoStart" in settings or run QuickPath as Administrator.
+### Q1: Why doesn't WindPath switch paths in certain applications?
+- **Cause 1 (UIPI Elevation Isolation)**: If the target application was launched as Administrator while WindPath runs with standard user privileges, Windows User Interface Privilege Isolation (UIPI) blocks cross-privilege communication. **Solution**: Enable "AutoStart" in settings or run WindPath as Administrator.
 - **Cause 2 (Process Blacklist)**: Verify that the process is not listed in `blacklist_processes` inside `config.json`.
 - **Cause 3 (Timing)**: Increase the switch response delay in settings from `80ms` to `120ms` ~ `150ms`.
 
@@ -465,19 +469,19 @@ QuickPath includes embedded English and Simplified Chinese localization, while a
 - If the selected shortcut is already registered by another global application (e.g., chat applications, PowerToys), Windows will reject registration. Choose an alternative combination in settings.
 
 ### Q3: How does the floating bar handle multi-monitor or mixed DPI setups?
-- QuickPath utilizes real-time DPI queries (`GetDpiForMonitor`) to detect the specific physical display containing the file dialog, recalculating bounds and scale factors dynamically to prevent window clipping.
+- WindPath utilizes real-time DPI queries (`GetDpiForMonitor`) to detect the specific physical display containing the file dialog, recalculating bounds and scale factors dynamically to prevent window clipping.
 
 ### Q4: Antivirus false positives?
-- QuickPath is built from clean, open-source Rust. Because it utilizes `SetWinEventHook` to monitor window focus and registers global hotkeys, rare heuristics-based antivirus engines might flag it. QuickPath contains zero telemetry, backdoors, or adware; you can safely whitelist it or inspect the source code.
+- WindPath is built from clean, open-source Rust. Because it utilizes `SetWinEventHook` to monitor window focus and registers global hotkeys, rare heuristics-based antivirus engines might flag it. WindPath contains zero telemetry, backdoors, or adware; you can safely whitelist it or inspect the source code.
 
 ### Q5: Why does the monitor panel disappear during full-screen games, videos, or presentations? *(New in Ver 1.1.0)*
-- **Answer**: This is intentional behavior driven by QuickPath's built-in "Full-Screen Stealth Evasion Mechanism". Whenever the foreground window occupies full-screen resolution (e.g., 3D games, video players in full screen, PowerPoint presentations), the monitor panel automatically hides silently to prevent obstructing gameplay visuals or subtitles. It seamlessly restores once you return to windowed mode or the desktop.
+- **Answer**: This is intentional behavior driven by WindPath's built-in "Full-Screen Stealth Evasion Mechanism". Whenever the foreground window occupies full-screen resolution (e.g., 3D games, video players in full screen, PowerPoint presentations), the monitor panel automatically hides silently to prevent obstructing gameplay visuals or subtitles. It seamlessly restores once you return to windowed mode or the desktop.
 
 ### Q6: Why are unit suffixes hidden on the docked network speed display? *(New in Ver 1.1.0)*
 - **Answer**: To achieve a high-density, compact layout within precious taskbar real estate, bitrates are calculated uniformly in `Mbps` while text labels are omitted (retaining only `↑` and `↓` arrow prefixes). This saves nearly 40% of taskbar width. To view comprehensive dual units (both MB/s and Mbps) as well as the active physical adapter name, simply hover over the monitor bar to inspect the Hardware Dashboard tooltip.
 
 ### Q7: What does Dedicated VRAM represent, and why does it differ from total VRAM shown in some tools? *(New in Ver 1.1.0)*
-- **Answer**: QuickPath strictly measures the dedicated graphics card's physical on-board memory (**Dedicated VRAM**, e.g., 4.0 GB physical VRAM) via DXGI and PDH hardware queries. This intentionally filters out the inflated "Shared GPU Memory" pool that Windows dynamically allocates from system RAM, reflecting true hardware video memory pressure.
+- **Answer**: WindPath strictly measures the dedicated graphics card's physical on-board memory (**Dedicated VRAM**, e.g., 4.0 GB physical VRAM) via DXGI and PDH hardware queries. This intentionally filters out the inflated "Shared GPU Memory" pool that Windows dynamically allocates from system RAM, reflecting true hardware video memory pressure.
 
 ### Q8: How can I change the docking position of the monitor on the taskbar? *(New in Ver 1.1.0)*
 - **Answer**: Right-click the monitor bar and select "Dock Position", or configure it under the "Taskbar Monitor" tab in Settings:
@@ -485,21 +489,21 @@ QuickPath includes embedded English and Simplified Chinese localization, while a
   - **Above Taskbar Left (Float)**: Floats independently directly above the taskbar's left edge, completely preventing any visual overlap with running application taskbar icons.
 
 ### Q9: Why does Settings show "File Explorer Tabs Not Supported on Current Windows"? *(New in Ver 1.2.0)*
-- **Answer**: The multi-tab enhancement relies on the native XAML tabs architecture introduced in **Windows 11 22H2 (Build 22621 or newer)**. If you are running Windows 10 or an earlier Windows 11 build, your system does not have the native tab infrastructure. QuickPath automatically detects this and gracefully disables the tab module with an informational banner, while all core file dialog AutoSwitch and hardware monitor features continue to work flawlessly.
+- **Answer**: The multi-tab enhancement relies on the native XAML tabs architecture introduced in **Windows 11 22H2 (Build 22621 or newer)**. If you are running Windows 10 or an earlier Windows 11 build, your system does not have the native tab infrastructure. WindPath automatically detects this and gracefully disables the tab module with an informational banner, while all core file dialog AutoSwitch and hardware monitor features continue to work flawlessly.
 
 ### Q10: Why does double-clicking a tab duplicate the folder, while opening the same folder from outside triggers deduplication? *(New in Ver 1.2.0)*
-- **Answer**: This is powered by QuickPath's "intent-aware routing":
+- **Answer**: This is powered by WindPath's "intent-aware routing":
   1. Opening folders via external apps usually signifies navigating to an existing workspace, so smart deduplication switches focus to your existing tab to prevent tab clutter;
-  2. In contrast, **explicitly double-clicking a tab** expresses a deliberate desire for a duplicated side-by-side view (e.g., comparing files). QuickPath automatically triggers a deduplication bypass to honor this intent.
+  2. In contrast, **explicitly double-clicking a tab** expresses a deliberate desire for a duplicated side-by-side view (e.g., comparing files). WindPath automatically triggers a deduplication bypass to honor this intent.
 
-### Q11: How does QuickPath preserve file selection when using "Show in Folder" from VS Code, Cursor, etc.? *(New in Ver 1.2.0)*
-- **Answer**: Basic tab mergers often navigate to the parent folder without restoring selection state. In the microsecond an incoming window spawns, QuickPath queries `IShellView` and Shell items to extract the exact item to be selected. Once the tab view is mounted in the target window, QuickPath invokes `IShellView::SelectItem` with `SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`, ensuring the file remains vividly highlighted and scrolled into view.
+### Q11: How does WindPath preserve file selection when using "Show in Folder" from VS Code, Cursor, etc.? *(New in Ver 1.2.0)*
+- **Answer**: Basic tab mergers often navigate to the parent folder without restoring selection state. In the microsecond an incoming window spawns, WindPath queries `IShellView` and Shell items to extract the exact item to be selected. Once the tab view is mounted in the target window, WindPath invokes `IShellView::SelectItem` with `SVSI_SELECT | SVSI_ENSUREVISIBLE | SVSI_FOCUSED`, ensuring the file remains vividly highlighted and scrolled into view.
 
 ---
 
 ## 8. Producer & License
 
 - **Producer**: Quzhou Yufeng Technology Co., Ltd. (衢州御风科技有限公司)
-- **Official Website**: [https://qp.yftec.top](https://qp.yftec.top)
-- **GitHub Repository**: [https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)
+- **Official Website**: [https://windpath.yftec.top](https://windpath.yftec.top)
+- **GitHub Repository**: [https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 - **License**: Released under the [GNU General Public License v3.0 (GPL-3.0)](../LICENSE).

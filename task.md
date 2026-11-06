@@ -32,3 +32,6 @@
   - [x] 7.1 运行全局残留扫描，确保无未处理的旧名称
   - [x] 7.2 运行 `cargo check` 和 `cargo test` 确保所有 254+ 单元测试 100% 通过
   - [x] 7.3 清理临时生成的探测排查文件
+- [ ] 8. 用户详细使用说明书更新 (User Manual)
+  - [ ] 8.1 更新 `Document/User_Manual_CN.md` 为 WindPath（御风路径）并添加品牌过渡说明
+  - [ ] 8.2 更新 `Document/User_Manual_EN.md` 为 WindPath 并同步更新所有安装、配置与 FAQ 说明

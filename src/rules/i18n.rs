@@ -418,10 +418,7 @@ impl I18n {
             }
 
             // 2. 动态扫描外部覆盖与扩展语言文件
-            let mut candidate_dirs = vec![
-                PathBuf::from("locales"),
-                PathBuf::from("./locales"),
-            ];
+            let mut candidate_dirs = vec![PathBuf::from("locales"), PathBuf::from("./locales")];
             if let Some(p) = directories::ProjectDirs::from("com", "yufeng", "WindPath") {
                 candidate_dirs.push(p.config_dir().join("locales"));
             }
