@@ -22,7 +22,7 @@ use ui::tray::{
 };
 use ui::{FloatingBar, SettingsWindow};
 use win32::autostart::set_autostart;
-use win32::events::{WM_QUICKPATH_FOREGROUND, WinEventHookGuard, get_active_foreground_window};
+use win32::events::{WM_WINDPATH_FOREGROUND, WinEventHookGuard, get_active_foreground_window};
 
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -46,18 +46,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const HOTKEY_ID: i32 = 101;
-const WM_QUICKPATH_RETRY_CHECK: u32 = 0x0400 + 102;
-const WM_QUICKPATH_INJECT_FAILED: u32 = 0x0400 + 103;
+const WM_WINDPATH_RETRY_CHECK: u32 = 0x0400 + 102;
+const WM_WINDPATH_INJECT_FAILED: u32 = 0x0400 + 103;
 /// Win+E 接管请求（由低级键盘钩子投递；钩子自身只做识别与投递，不做重活）
-const WM_QUICKPATH_WINE_TO_TAB: u32 = tab::keyboard::WM_QUICKPATH_WINE_TO_TAB;
+const WM_WINDPATH_WINE_TO_TAB: u32 = tab::keyboard::WM_WINDPATH_WINE_TO_TAB;
 /// 后台文件管理器扫描结果回传（携带 generation + 目标 HWND，报告 P1-02）
-const WM_QUICKPATH_MANAGER_SCAN_RESULT: u32 = 0x0400 + 105;
+const WM_WINDPATH_MANAGER_SCAN_RESULT: u32 = 0x0400 + 105;
 /// 后台首轮扫描完成，请宿主重绘一次对话框候选列表（P1-02 冷启动补偿）
-const WM_QUICKPATH_CANDIDATES_REFRESH: u32 = 0x0400 + 106;
+const WM_WINDPATH_CANDIDATES_REFRESH: u32 = 0x0400 + 106;
 /// 用户显式触发的一次性探测结果回传（审计报告 U-01）
-const WM_QUICKPATH_EXPLICIT_PROBE_RESULT: u32 = 0x0400 + 107;
+const WM_WINDPATH_EXPLICIT_PROBE_RESULT: u32 = 0x0400 + 107;
 /// 发现新版本回传通知（由后台启动检测线程投递）
-const WM_QUICKPATH_NEW_VERSION_AVAILABLE: u32 = 0x0400 + 108;
+const WM_WINDPATH_NEW_VERSION_AVAILABLE: u32 = 0x0400 + 108;
 /// 对话框控件异步初始化期间的最大探测次数与间隔
 /// （合计约 1.2s：慢速机器/首次加载的 shell 扩展常需数百毫秒才出现
 ///  DirectUIHWND / ComboBoxEx32 / Edit，过短会导致完全不弹窗）
@@ -184,8 +184,8 @@ struct ExplicitProbeResult {
 
 fn main() {
     unsafe {
-        // 1. 单实例互斥体防护，避免多个 QuickPath 驻留冲突
-        let mutex_name = w!("Local\\QuickPath_SingleInstance_Mutex");
+        // 1. 单实例互斥体防护，避免多个 WindPath 驻留冲突
+        let mutex_name = w!("Local\\WindPath_SingleInstance_Mutex");
         let mutex = CreateMutexW(None, true, mutex_name);
         if let Ok(_m) = mutex
             && windows::Win32::Foundation::GetLastError()
@@ -209,7 +209,7 @@ fn main() {
         }
 
         // 3. 注册主事件接收宿主隐藏窗口
-        let class_name = w!("QuickPath_Host_Class");
+        let class_name = w!("WindPath_Host_Class");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(host_wnd_proc),
             hInstance: HINSTANCE::default(),
@@ -221,7 +221,7 @@ fn main() {
         let host_hwnd = match CreateWindowExW(
             windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
             class_name,
-            w!("QuickPath Host"),
+            w!("WindPath Host"),
             WS_OVERLAPPEDWINDOW,
             0,
             0,
@@ -308,7 +308,7 @@ fn main() {
         if !win32::package::is_packaged() {
             let host_raw = host_hwnd.0 as usize;
             thread::Builder::new()
-                .name("quickpath-update-checker".into())
+                .name("windpath-update-checker".into())
                 .spawn(move || {
                     if let Some(res) =
                         win32::updater::check_for_updates_quietly(rules::version::APP_VERSION)
@@ -320,7 +320,7 @@ fn main() {
                         if !host_ptr.is_null() {
                             let _ = PostMessageW(
                                 Some(HWND(host_raw as *mut _)),
-                                WM_QUICKPATH_NEW_VERSION_AVAILABLE,
+                                WM_WINDPATH_NEW_VERSION_AVAILABLE,
                                 WPARAM(0),
                                 LPARAM(0),
                             );
@@ -377,12 +377,12 @@ unsafe extern "system" fn host_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_QUICKPATH_FOREGROUND => {
+        WM_WINDPATH_FOREGROUND => {
             let fg_hwnd = HWND(wparam.0 as *mut _);
             on_foreground_window_changed(fg_hwnd);
             LRESULT(0)
         }
-        WM_QUICKPATH_WINE_TO_TAB => {
+        WM_WINDPATH_WINE_TO_TAB => {
             let target = HWND(wparam.0 as *mut _);
             let handled = with_state(|state| handle_wine_to_tab_request(state, target));
             if handled.is_none() {
@@ -391,7 +391,7 @@ unsafe extern "system" fn host_wnd_proc(
             }
             LRESULT(0)
         }
-        WM_QUICKPATH_MANAGER_SCAN_RESULT => {
+        WM_WINDPATH_MANAGER_SCAN_RESULT => {
             // 后台线程只负责 `send` + 唤醒；这里排空通道，按原有
             // 「generation + 前台窗口一致性」规则采纳，陈旧结果自然丢弃。
             with_state(|state| {
@@ -416,7 +416,7 @@ unsafe extern "system" fn host_wnd_proc(
             });
             LRESULT(0)
         }
-        WM_QUICKPATH_CANDIDATES_REFRESH => {
+        WM_WINDPATH_CANDIDATES_REFRESH => {
             // 后台首轮扫描完成后的冷启动补刷：仅在仍停留在同一对话框时重绘候选列表。
             let raw = wparam.0;
             if raw != 0 {
@@ -456,7 +456,7 @@ unsafe extern "system" fn host_wnd_proc(
             }
             LRESULT(0)
         }
-        WM_QUICKPATH_EXPLICIT_PROBE_RESULT => {
+        WM_WINDPATH_EXPLICIT_PROBE_RESULT => {
             // 显式探测已在后台线程完成，这里只排空通道并应用结果（零等待）。
             with_state(|state| {
                 let results: Vec<ExplicitProbeResult> = state.probe_rx.try_iter().collect();
@@ -470,7 +470,7 @@ unsafe extern "system" fn host_wnd_proc(
             });
             LRESULT(0)
         }
-        WM_QUICKPATH_RETRY_CHECK => {
+        WM_WINDPATH_RETRY_CHECK => {
             let h = HWND(wparam.0 as *mut _);
             let next_retry = lparam.0 as u32;
             let current_fg = win32::events::get_active_foreground_window();
@@ -480,7 +480,7 @@ unsafe extern "system" fn host_wnd_proc(
             }
             LRESULT(0)
         }
-        WM_QUICKPATH_INJECT_FAILED => {
+        WM_WINDPATH_INJECT_FAILED => {
             // 秒切注入失败：清除去重标记，使该对话框可被重新触发；至多补一次延迟重试，
             // 杜绝“点了没反应、且此后再也不重试”的静默失效。
             let dlg = HWND(wparam.0 as *mut _);
@@ -501,7 +501,7 @@ unsafe extern "system" fn host_wnd_proc(
                                 unsafe {
                                     let _ = PostMessageW(
                                         Some(HWND(host_raw as *mut _)),
-                                        WM_QUICKPATH_RETRY_CHECK,
+                                        WM_WINDPATH_RETRY_CHECK,
                                         WPARAM(dlg_raw),
                                         LPARAM(MAX_RETRIES as isize),
                                     );
@@ -523,7 +523,7 @@ unsafe extern "system" fn host_wnd_proc(
             let event = lparam.0 as u32;
             if event == WM_RBUTTONUP {
                 // 审计报告 U-01A（托盘方案）：在**弹出菜单之前**严格取当前前台窗口。
-                // 菜单弹出会把前台短暂交给 QuickPath 自身窗口，因此必须在
+                // 菜单弹出会把前台短暂交给 WindPath 自身窗口，因此必须在
                 // `SetForegroundWindow` 之前抓取；前台不是目标管理器时对应菜单项置灰，
                 // **不做任何墙钟回退**（600 秒旧记录已删除）。
                 let snapshots = [
@@ -587,7 +587,7 @@ unsafe extern "system" fn host_wnd_proc(
             }
             LRESULT(0)
         }
-        WM_QUICKPATH_NEW_VERSION_AVAILABLE => {
+        WM_WINDPATH_NEW_VERSION_AVAILABLE => {
             // 后台更新检测线程发回通知：提取最新版本，更新状态并弹出托盘气泡
             with_state(|state| {
                 if let Ok(mut lock) = PENDING_UPDATE.lock()
@@ -783,7 +783,7 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
                             unsafe {
                                 let _ = PostMessageW(
                                     Some(HWND(host_ptr as *mut _)),
-                                    WM_QUICKPATH_MANAGER_SCAN_RESULT,
+                                    WM_WINDPATH_MANAGER_SCAN_RESULT,
                                     WPARAM(0),
                                     LPARAM(0),
                                 );
@@ -892,7 +892,7 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
                             unsafe {
                                 let _ = PostMessageW(
                                     Some(HWND(host_raw as *mut _)),
-                                    WM_QUICKPATH_INJECT_FAILED,
+                                    WM_WINDPATH_INJECT_FAILED,
                                     WPARAM(dlg_raw),
                                     LPARAM(if already_retried { 1 } else { 0 }),
                                 );
@@ -954,7 +954,7 @@ fn on_foreground_window_changed_impl(state: &mut AppState, fg_hwnd: HWND, retry_
                                 let host_h = HWND(host_raw as *mut _);
                                 let _ = PostMessageW(
                                     Some(host_h),
-                                    WM_QUICKPATH_RETRY_CHECK,
+                                    WM_WINDPATH_RETRY_CHECK,
                                     WPARAM(hwnd_raw),
                                     LPARAM(next_retry as isize),
                                 );
@@ -1012,7 +1012,7 @@ fn schedule_candidates_refresh(dialog_hwnd: HWND, config: &AppConfig) {
             }
             let _ = PostMessageW(
                 Some(HWND(host_ptr as *mut _)),
-                WM_QUICKPATH_CANDIDATES_REFRESH,
+                WM_WINDPATH_CANDIDATES_REFRESH,
                 WPARAM(dlg_raw),
                 LPARAM(0),
             );
@@ -1304,7 +1304,7 @@ pub fn request_explicit_probe_with_snapshot(
                 unsafe {
                     let _ = PostMessageW(
                         Some(HWND(host_ptr as *mut _)),
-                        WM_QUICKPATH_EXPLICIT_PROBE_RESULT,
+                        WM_WINDPATH_EXPLICIT_PROBE_RESULT,
                         WPARAM(0),
                         LPARAM(0),
                     );
@@ -1328,7 +1328,7 @@ fn apply_explicit_probe_result(state: &mut AppState, result: ExplicitProbeResult
     let lang = state.config.language.clone();
     // 审计报告 D-01A：未取得路径的结局必须给出**可见反馈**（不阻塞、不回显任何剪贴板正文）。
     let notify_failure = |lang: &rules::Language| {
-        ui::tray::notify("QuickPath", rules::I18n::tray_probe_result(lang, false));
+        ui::tray::notify("WindPath", rules::I18n::tray_probe_result(lang, false));
     };
     let path = match result.outcome {
         Outcome::Path(path) => path,
@@ -1384,7 +1384,7 @@ fn apply_explicit_probe_result(state: &mut AppState, result: ExplicitProbeResult
     if !injected {
         // 严格前台托盘流程：此刻没有可注入的对话框，路径只进历史，
         // 因此必须用气泡给出可见反馈（审计报告 D-01A 验收标准 4）。
-        ui::tray::notify("QuickPath", rules::I18n::tray_probe_result(&lang, true));
+        ui::tray::notify("WindPath", rules::I18n::tray_probe_result(&lang, true));
     }
 }
 

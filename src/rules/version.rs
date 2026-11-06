@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-/// QuickPath 官方版本号单一数据源 (Single Source of Truth)
+/// WindPath 官方版本号单一数据源 (Single Source of Truth)
 /// 统一存放于此，修改后全局（包含窗口标题、关于页卡片、页脚、多语言配置）自动联动生效！
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -35,8 +35,8 @@ mod tests {
             .expect("Cargo.toml 必须声明 edition");
 
         const DYNAMIC_RELEASE_BADGE: &str =
-            "https://img.shields.io/github/v/release/clhome/QuickPath?color=success&label=Version";
-        const RELEASES_TARGET_URL: &str = "https://github.com/clhome/QuickPath/releases/latest";
+            "https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version";
+        const RELEASES_TARGET_URL: &str = "https://github.com/clhome/WindPath/releases/latest";
         let language_badge = format!("Language-Rust%20{}", edition);
 
         for (name, content) in [("README.md", README), ("README_CN.md", README_CN)] {
@@ -135,17 +135,17 @@ mod tests {
         );
     }
 
-    /// M-01 守卫：`Cargo.lock` 中 `quickpath` 包条目的版本必须等于单一版本源。
+    /// M-01 守卫：`Cargo.lock` 中 `windpath` 包条目的版本必须等于单一版本源。
     ///
     /// 背景（审计报告 M-01）：`Cargo.toml` 与 `Cargo.lock` 是两处独立落盘的版本号，
     /// 只改 `Cargo.toml` 会让锁文件停留在旧版本。这里把锁文件纳入编译期追踪。
     #[test]
-    fn test_cargo_lock_quickpath_version_tracks_single_version_source() {
+    fn test_cargo_lock_windpath_version_tracks_single_version_source() {
         const CARGO_LOCK: &str = include_str!("../../Cargo.lock");
 
         let entry_version = CARGO_LOCK
             .split("[[package]]")
-            .find(|block| block.contains("name = \"quickpath\""))
+            .find(|block| block.contains("name = \"windpath\""))
             .and_then(|block| {
                 block
                     .lines()
@@ -157,7 +157,7 @@ mod tests {
         assert_eq!(
             entry_version,
             Some(expected.as_str()),
-            "Cargo.lock 中 quickpath 条目的版本必须是 {}（跟随 Cargo.toml），实际锁文件条目为 {:?}",
+            "Cargo.lock 中 windpath 条目的版本必须是 {}（跟随 Cargo.toml），实际锁文件条目为 {:?}",
             APP_VERSION,
             entry_version
         );

@@ -250,7 +250,7 @@ pub struct SettingsWindow {
 
 impl SettingsWindow {
     pub fn new() -> Result<Self, String> {
-        let class_name = w!("QuickPath_Settings_Class");
+        let class_name = w!("WindPath_Settings_Class");
         unsafe {
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let hicon_big = crate::win32::icon::get_app_icon(false);
@@ -270,7 +270,7 @@ impl SettingsWindow {
             let hwnd = match CreateWindowExW(
                 windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
                 class_name,
-                w!("QuickPath 设置中心 - Settings"),
+                w!("WindPath 设置中心 - Settings"),
                 WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                 0,
                 0,
@@ -805,7 +805,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
                     is_dropdown_open,
                 );
 
-                // 卡片 5：“关于 QuickPath”现代专属信息卡片 (About Card)
+                // 卡片 5：“关于 WindPath”现代专属信息卡片 (About Card)
                 let card5_top = card4_top + card_h + card_gap + (2.0 * scale).round() as i32;
                 let about_h = (120.0 * scale).round() as i32;
                 render_about_card(
@@ -1937,7 +1937,7 @@ unsafe fn render_web_dropdown_layer(
     }
 }
 
-/// 渲染“关于 QuickPath”现代商业软件大卡片
+/// 渲染“关于 WindPath”现代商业软件大卡片
 /// 渲染日志卡片：标题 + 日志路径 + 「清理日志」按钮 + 清理结果状态。
 /// 几何由 `general_footer_layout` 统一给出，与命中测试/点击处理共用。
 unsafe fn render_log_card(
@@ -2102,7 +2102,7 @@ unsafe fn render_about_card(
         let text_x = logo_x + logo_w + (18.0 * scale).round() as i32;
         let text_right = right - (16.0 * scale).round() as i32;
 
-        // 行 1: QuickPath + 动态版本徽标
+        // 行 1: WindPath + 动态版本徽标
         SelectObject(hdc, HGDIOBJ(font_bold.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
         let ver_name = if bundle.about.version.is_empty() {
@@ -2113,7 +2113,7 @@ unsafe fn render_about_card(
         } else {
             bundle.about.version.clone()
         };
-        let line1 = format!("QuickPath  {}", ver_name);
+        let line1 = format!("WindPath  {}", ver_name);
         let mut buf1: Vec<u16> = line1.encode_utf16().collect();
         let mut r1 = RECT {
             left: text_x,
@@ -2186,7 +2186,7 @@ unsafe fn render_about_card(
             DT_LEFT | DT_VCENTER | DT_SINGLELINE,
         );
 
-        // 行 4: GitHub 官方开源地址（GitHub 纯白高清图标 + github.com/clhome/QuickPath ↗）
+        // 行 4: GitHub 官方开源地址（GitHub 纯白高清图标 + github.com/clhome/WindPath ↗）
         let gh_size = (15.0 * scale).round() as i32;
         let gh_y = top + (72.0 * scale).round() as i32 + ((18.0 * scale) as i32 - gh_size) / 2;
         let _ = crate::win32::icon::draw_github_png(hdc, text_x, gh_y, gh_size, gh_size);
@@ -2199,7 +2199,7 @@ unsafe fn render_about_card(
         };
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
         SetTextColor(hdc, gh_color);
-        let line3 = "GitHub: github.com/clhome/QuickPath ↗";
+        let line3 = "GitHub: github.com/clhome/WindPath ↗";
         let mut buf3: Vec<u16> = line3.encode_utf16().collect();
         let mut r3 = RECT {
             left: text_x + gh_size + (7.0 * scale).round() as i32,
@@ -4297,7 +4297,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                     }
                     return;
                 } else if x >= text_x && x <= text_right && y >= gh_top && y <= gh_bottom {
-                    let url: Vec<u16> = "https://github.com/clhome/QuickPath\0"
+                    let url: Vec<u16> = "https://github.com/clhome/WindPath\0"
                         .encode_utf16()
                         .collect();
                     let op: Vec<u16> = "open\0".encode_utf16().collect();

@@ -1,6 +1,8 @@
-# QuickPath 🚀
+# WindPath (御风路径) 🚀
 
-![index](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/Image_index.webp)
+> **品牌升级说明**：**WindPath**（原 QuickPath）是由衢州御风科技打造的轻量级、高性能 Windows 资源管理器多标签与现代文件对话框极速路径导航利器。
+
+![index](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/Image_index.webp)
 
 <div align="center">
 
@@ -8,19 +10,19 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/github/v/release/clhome/QuickPath?color=success&label=Version)](https://github.com/clhome/QuickPath/releases/latest)
+[![Version](https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version)](https://github.com/clhome/WindPath/releases/latest)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
+[![Website](https://img.shields.io/badge/Website-windpath.yftec.top-4A90E2)](https://windpath.yftec.top)
 
 **专为 Windows 10 与 Windows 11 深度打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器。**
 
-[🌐 官方网站](https://qp.yftec.top) · [📖 详细使用说明书](Document/User_Manual_CN.md) · [📘 English Manual](Document/User_Manual_EN.md) · [🐛 问题反馈](https://github.com/clhome/QuickPath/issues)
+[🌐 官方网站](https://windpath.yftec.top) · [📖 详细使用说明书](Document/User_Manual_CN.md) · [📘 English Manual](Document/User_Manual_EN.md) · [🐛 问题反馈](https://github.com/clhome/WindPath/issues)
 
 </div>
 
 ---
 
-## 💡 为什么选择 QuickPath？
+## 💡 为什么选择 WindPath？
 
 在日常使用电脑时，您是否常常遇到这样的繁琐场景：
 - 刚刚在**文件资源管理器**或 **Directory Opus** 中找到了深层工作目录，打开文本编辑器、IDE、Photoshop、Office 或 **WPS** 点击“另存为”或“打开文件”时，对话框却停留在默认的“下载”或“文档”目录；
@@ -28,13 +30,13 @@
 - 某些老旧辅助工具在粘贴路径时经常误触发中文输入法，导致文件名被拼音顶词覆盖破坏；
 - 在使用 Windows 11 资源管理器时，每次从外部应用查看文件或按下 `Win + E` 总是不断弹出杂乱的新独立窗口，相同目录多开泛滥，且缺少便捷的标签页克隆手势。
 
-**QuickPath** 专为终结这一系列痛点而生！它能在文件对话框弹出的瞬间，毫秒级感知你正在使用的文件管理器目录，实现无感自动化秒切与悬浮直达；并在 Windows 11 下全面接管多标签页体验，让你行云流水地专注于创作与工作。
+**WindPath** 专为终结这一系列痛点而生！它能在文件对话框弹出的瞬间，毫秒级感知你正在使用的文件管理器目录，实现无感自动化秒切与悬浮直达；并在 Windows 11 下全面接管多标签页体验，让你行云流水地专注于创作与工作。
 
 ---
 
 ## 🌟 核心特性
 
-![detail](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/detail.webp)
+![detail](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/detail.webp)
 
 - **⚡ 智能自动秒切 (AutoSwitch)**：
   在文本编辑器、IDE、办公或设计软件中弹出“打开”或“另存为”对话框时，毫秒级无感自动同步至你最后浏览的文件管理器目录，彻底告别在长目录树中重复点选和复制粘贴。
@@ -99,9 +101,9 @@
 
 ## 🛠️ 设置中心一览
 
-![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings.webp)
+![settings](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/settings.webp)
 
-QuickPath 配备了符合 Fluent 视觉的现代化**四选项卡**卡片式设置中心：
+WindPath 配备了符合 Fluent 视觉的现代化**四选项卡**卡片式设置中心：
 - **「常规偏好」**：
   - **常规自动化**：一键开启或关闭“智能自动秒切”，并提供滑块调节切换触发延时（40ms ~ 500ms）；
   - **悬浮条外观**：自绘透明度滑动条，实时预览 40% ~ 100% 亚克力半透明磨砂效果；
@@ -123,15 +125,15 @@ QuickPath 配备了符合 Fluent 视觉的现代化**四选项卡**卡片式设�
   - **同一时刻只允许一次剪贴板事务**:显式探测与 WPS 注入 / 文件名恢复共用一把进程级独占锁(由剪贴板事务自持),冲突时后来的请求被直接拒绝且**不碰剪贴板**;取消 / 超时 / 来源不可证明时**不会用旧快照覆盖**当前内容,并给出托盘气泡反馈;
   - **剪贴板事务进行中**,两个显式探测入口(托盘菜单项、吸附条按钮)同时置灰,吸附条按钮显示 `...`。注意:WPS 注入若经 UIA `SetValue` 完成则**不占用剪贴板**,不会触发该置灰状态;
   - **同一时刻也只允许一次 WPS 操作**:WPS 注入与延迟的文件名恢复共用一把操作级独占锁(全局唯一,不区分对话框),重复触发会被去重拒绝,避免重复回车或导航到错误目录。这些相关共享资源的冲突**一律由各自的底层 lease 拒绝**,UI 置灰只作状态反馈。
-![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
+![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor.webp)
 
 ---
 
 ## ⚙️ 配置文件说明
 
-QuickPath 采用绿色双模式设计：
-1. **便携模式**：若程序同级目录下存在 `quickpath.json`，则所有配置就地保存（适合放在 U 盘或移动硬盘）。
-2. **标准模式**：默认持久化保存于 `%APPDATA%\QuickPath\config.json`。
+WindPath 采用绿色双模式设计：
+1. **便携模式**：若程序同级目录下存在 `windpath.json`（或旧版 `quickpath.json`），则所有配置就地保存（适合放在 U 盘或移动硬盘）。
+2. **标准模式**：默认持久化保存于 `%APPDATA%\WindPath\config.json`（自动无损迁移旧版 `%APPDATA%\QuickPath\config.json`）。
    - **原子安全落盘**：写入临时文件并执行物理磁盘 `sync_all` 冲刷后再原子替换，自动保留 `config.json.bak` 备份；
    - **防静默损坏覆写**：若配置异常，优先从备份恢复；若均损坏则隔离保存为 `config.json.bad.<时间戳>`，绝不静默覆盖用户热键与历史数据。
 
@@ -192,8 +194,8 @@ QuickPath 采用绿色双模式设计：
 ### 编译步骤
 ```pwsh
 # 1. 克隆代码仓库
-git clone https://github.com/clhome/QuickPath.git
-cd QuickPath
+git clone https://github.com/clhome/WindPath.git
+cd WindPath
 
 # 2. 调试运行
 cargo run
@@ -202,13 +204,13 @@ cargo run
 cargo build --release
 ```
 
-编译产物位于 `target/release/quickpath.exe`，为一个独立无依赖的单文件绿色可执行程序。
+编译产物位于 `target/release/windpath.exe`，为一个独立无依赖的单文件绿色可执行程序。
 
 ---
 
 ## 📚 详细文档
 
-想要深入了解 QuickPath 的详细用法、生态适配配置和进阶技巧，请查阅官方手册：
+想要深入了解 WindPath 的详细用法、生态适配配置和进阶技巧，请查阅官方手册：
 - 🇨🇳 [中文用户使用说明书 (User Manual)](Document/User_Manual_CN.md)
 - 🇺🇸 [English User Manual & Technical Guide](Document/User_Manual_EN.md)
 
@@ -217,8 +219,8 @@ cargo build --release
 ## 🏢 出品与致谢
 
 - **出品方**：衢州御风科技有限公司 (Quzhou Yufeng Technology Co., Ltd.)
-- **官方网址**：[https://qp.yftec.top](https://qp.yftec.top)
-- **代码仓库**：[https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)
+- **官方网址**：[https://windpath.yftec.top](https://windpath.yftec.top)
+- **代码仓库**：[https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 
 ---
 

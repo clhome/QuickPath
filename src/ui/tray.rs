@@ -79,7 +79,7 @@ pub struct TrayIcon {
 
 impl TrayIcon {
     pub fn new(notify_target: HWND) -> Result<Self, String> {
-        let class_name = w!("QuickPath_Tray_Class");
+        let class_name = w!("WindPath_Tray_Class");
         unsafe {
             let wc = WNDCLASSW {
                 lpfnWndProc: Some(tray_wnd_proc),
@@ -92,7 +92,7 @@ impl TrayIcon {
             let hwnd = match CreateWindowExW(
                 windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
                 class_name,
-                w!("QuickPath Tray"),
+                w!("WindPath Tray"),
                 WS_OVERLAPPEDWINDOW,
                 0,
                 0,
@@ -109,7 +109,7 @@ impl TrayIcon {
             let hicon = crate::win32::icon::get_app_icon(true);
 
             let mut tip = [0u16; 128];
-            let tip_str = "QuickPath - 现代文件对话框智能跟随\0";
+            let tip_str = "WindPath - 现代文件对话框智能跟随\0";
             for (i, c) in tip_str.encode_utf16().enumerate() {
                 if i < 127 {
                     tip[i] = c;

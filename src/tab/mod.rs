@@ -18,7 +18,7 @@ pub use mouse::TabMouseGuard;
 use std::sync::Arc;
 use windows::Win32::Foundation::HWND;
 
-/// QuickPath 资源管理器多标签页增强模块核心服务封装
+/// WindPath 资源管理器多标签页增强模块核心服务封装
 pub struct TabModule {
     com_manager: Arc<ShellComManager>,
     coordinator: Arc<TabCoordinator>,

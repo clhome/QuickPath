@@ -1,6 +1,8 @@
-# QuickPath 🚀
+# WindPath 🚀
 
-![index](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/Image_index.webp)
+> **Brand Upgrade Notice**: **WindPath** (formerly QuickPath) is a lightweight, high-performance Windows File Explorer multi-tab enhancement and smart file dialog navigation utility built by Quzhou Yufeng Technology Co., Ltd.
+
+![index](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/Image_index.webp)
 
 <div align="center">
 
@@ -8,19 +10,19 @@
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Rust](https://img.shields.io/badge/Language-Rust%202024-DEA584?logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/github/v/release/clhome/QuickPath?color=success&label=Version)](https://github.com/clhome/QuickPath/releases/latest)
+[![Version](https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version)](https://github.com/clhome/WindPath/releases/latest)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/Website-qp.yftec.top-4A90E2)](https://qp.yftec.top)
+[![Website](https://img.shields.io/badge/Website-windpath.yftec.top-4A90E2)](https://windpath.yftec.top)
 
 **A modern Fluent-style smart path following and quick navigation companion for Windows 10 & 11 file dialogs.**
 
-[🌐 Official Website](https://qp.yftec.top) · [📘 User Manual (English)](Document/User_Manual_EN.md) · [📖 使用说明书 (中文)](Document/User_Manual_CN.md) · [🐛 Issues & Feedback](https://github.com/clhome/QuickPath/issues)
+[🌐 Official Website](https://windpath.yftec.top) · [📘 User Manual (English)](Document/User_Manual_EN.md) · [📖 使用说明书 (中文)](Document/User_Manual_CN.md) · [🐛 Issues & Feedback](https://github.com/clhome/WindPath/issues)
 
 </div>
 
 ---
 
-## 💡 Why QuickPath?
+## 💡 Why WindPath?
 
 When working across multiple applications, do you frequently face this frustration?
 - You just navigated to a deeply nested project folder in **File Explorer** or **Directory Opus**, but when invoking "Open" or "Save As" in your code editor, IDE, Photoshop, Office, or **WPS Office**, the file dialog defaults back to "Downloads" or "Documents";
@@ -28,13 +30,13 @@ When working across multiple applications, do you frequently face this frustrati
 - Outdated legacy switcher tools often trigger your Input Method Editor (IME) unintentionally during path injection, causing typos, candidate popups, or accidentally overwriting your desired filename;
 - On Windows 11 File Explorer, viewing files from IDEs or pressing `Win + E` constantly spawns messy, redundant top-level windows without tab reuse or convenient tab duplication shortcuts.
 
-**QuickPath** was engineered to eliminate this friction once and for all. It senses your active file manager folders in milliseconds upon opening a file dialog, providing seamless automatic synchronization and instant keyboard-driven navigation; while supercharging Windows 11 with native-grade multi-tab window consolidation.
+**WindPath** was engineered to eliminate this friction once and for all. It senses your active file manager folders in milliseconds upon opening a file dialog, providing seamless automatic synchronization and instant keyboard-driven navigation; while supercharging Windows 11 with native-grade multi-tab window consolidation.
 
 ---
 
 ## 🌟 Key Features
 
-![detail](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/detail_en.webp)
+![detail](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/detail_en.webp)
 
 - **⚡ Smart AutoSwitch**:
   When an "Open" or "Save As" dialog appears in editors, IDEs, or creative software, QuickPath synchronizes it to your most recently browsed file manager directory within milliseconds—eliminating repetitive path hunting and copy-pasting.
@@ -99,9 +101,9 @@ When working across multiple applications, do you frequently face this frustrati
 
 ## 🛠️ Modern Settings Center
 
-![settings](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/settings_en.webp)
+![settings](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/settings_en.webp)
 
-QuickPath includes a modern Fluent **four-tab** card-based Settings Center:
+WindPath includes a modern Fluent **four-tab** card-based Settings Center:
 - **"General Preferences" Tab**:
   - **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms);
   - **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency;
@@ -123,15 +125,15 @@ QuickPath includes a modern Fluent **four-tab** card-based Settings Center:
   - **Only one clipboard transaction may run at a time**: explicit probes and WPS injection / filename restore share a single process-wide exclusive lease held by the clipboard transaction itself; a conflicting request is rejected outright and **never touches the clipboard**. On cancel / timeout / unprovable source **no old snapshot is restored** over your current clipboard, and a tray balloon reports the outcome;
   - **While a clipboard transaction is in flight**, both explicit-probe entries (the tray menu items and the floating-bar buttons) are grayed, and the bar button shows `...`. Note: a WPS injection that completes through UIA `SetValue` does **not** occupy the clipboard and therefore does not trigger this busy state;
   - **Only one WPS operation may run at a time**: WPS injection and the delayed filename restore share a single operation-level exclusive lease (process-wide, not per-dialog), so a repeated trigger is de-duplicated (no double Enter, no wrong-directory navigation). Conflicts over these shared resources are **always rejected by the underlying leases**; graying is only status feedback.
-![hardwareMonitor](https://raw.githubusercontent.com/clhome/QuickPath/main/Document/imgs/hardwareMonitor.webp)
+![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor.webp)
 
 ---
 
 ## ⚙️ Configuration File
 
-QuickPath features dual-mode persistence:
-1. **Portable Mode**: If `quickpath.json` exists in the same directory as the executable, all settings are saved locally (ideal for USB drives).
-2. **Standard Mode**: Defaults to `%APPDATA%\QuickPath\config.json`.
+WindPath features dual-mode persistence:
+1. **Portable Mode**: If `windpath.json` (or legacy `quickpath.json`) exists in the same directory as the executable, all settings are saved locally (ideal for USB drives).
+2. **Standard Mode**: Defaults to `%APPDATA%\WindPath\config.json` (with automatic migration from legacy `%APPDATA%\QuickPath\config.json`).
 
 Sample configuration:
 ```json
@@ -182,7 +184,7 @@ Sample configuration:
 
 ## 🏗️ Building from Source
 
-QuickPath is built with the standard Rust toolchain and targets Windows 10 (1809+) and Windows 11.
+WindPath is built with the standard Rust toolchain and targets Windows 10 (1809+) and Windows 11.
 
 ### Prerequisites
 - [Rust Toolchain](https://www.rust-lang.org/) (Stable channel recommended)
@@ -191,8 +193,8 @@ QuickPath is built with the standard Rust toolchain and targets Windows 10 (1809
 ### Build Steps
 ```pwsh
 # 1. Clone the repository
-git clone https://github.com/clhome/QuickPath.git
-cd QuickPath
+git clone https://github.com/clhome/WindPath.git
+cd WindPath
 
 # 2. Run in development mode
 cargo run
@@ -201,7 +203,7 @@ cargo run
 cargo build --release
 ```
 
-The output binary will be located at `target/release/quickpath.exe`. It is a single, zero-dependency, portable executable.
+The output binary will be located at `target/release/windpath.exe`. It is a single, zero-dependency, portable executable.
 
 ---
 
@@ -216,8 +218,8 @@ For in-depth usage scenarios, ecosystem configurations, and advanced customizati
 ## 🏢 Producer & Acknowledgments
 
 - **Produced by**: Quzhou Yufeng Technology Co., Ltd. (衢州御风科技有限公司)
-- **Official Website**: [https://qp.yftec.top](https://qp.yftec.top)
-- **GitHub Repository**: [https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)
+- **Official Website**: [https://windpath.yftec.top](https://windpath.yftec.top)
+- **GitHub Repository**: [https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 
 ---
 

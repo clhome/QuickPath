@@ -242,7 +242,8 @@ fn isolate_corrupted_config(path: &Path) {
 }
 
 impl AppConfig {
-    /// 确定配置文件路径（优先当前目录便携版，否则存入 %APPDATA%\QuickPath\config.json）
+    /// 确定配置文件路径（优先当前目录便携版，否则存入 %APPDATA%\WindPath\config.json）
+    /// 自动执行老版本 QuickPath 配置向 WindPath 的无损静默迁移。
     pub fn get_config_path() -> PathBuf {
         #[cfg(test)]
         if let Some(p) = TEST_CONFIG_PATH.with(|p| p.borrow().clone()) {
@@ -253,19 +254,44 @@ impl AppConfig {
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
-        let portable_config = exe_dir.join("quickpath.json");
+        let portable_config = exe_dir.join("windpath.json");
+        let old_portable_config = exe_dir.join("quickpath.json");
+
+        // 便携模式静默迁移：若存在旧版 quickpath.json 且不存在 windpath.json 则自动迁移
+        if !portable_config.exists() && old_portable_config.exists() {
+            let _ = fs::copy(&old_portable_config, &portable_config);
+        }
 
         if portable_config.exists() {
             return portable_config;
         }
 
-        // 标准模式：%APPDATA%\QuickPath\config.json
-        let standard_dir = directories::BaseDirs::new()
-            .map(|b| b.config_dir().join("QuickPath"))
+        // 标准模式：%APPDATA%\WindPath\config.json
+        let base_dirs = directories::BaseDirs::new();
+        let standard_dir = base_dirs
+            .as_ref()
+            .map(|b| b.config_dir().join("WindPath"))
             .unwrap_or_else(|| PathBuf::from("config"));
         let standard_path = standard_dir.join("config.json");
 
-        // 平滑兼容历史版本可能遗留的旧双层路径：%APPDATA%\QuickPath\QuickPath\config\config.json
+        // 老版本数据静默迁移：
+        // 1. 若新配置尚未生成，且存在旧版 %APPDATA%\QuickPath，则自动迁移数据
+        if !standard_path.exists()
+            && let Some(b) = &base_dirs
+        {
+            let old_dir = b.config_dir().join("QuickPath");
+            let old_path = old_dir.join("config.json");
+            if old_path.exists() {
+                let _ = fs::create_dir_all(&standard_dir);
+                let _ = fs::copy(&old_path, &standard_path);
+                let old_bak = old_dir.join("config.json.bak");
+                if old_bak.exists() {
+                    let _ = fs::copy(&old_bak, standard_dir.join("config.json.bak"));
+                }
+            }
+        }
+
+        // 2. 平滑兼容历史版本可能遗留的旧双层路径：%APPDATA%\QuickPath\QuickPath\config\config.json
         if !standard_path.exists()
             && let Some(old_proj) = directories::ProjectDirs::from("com", "QuickPath", "QuickPath")
         {

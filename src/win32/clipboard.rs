@@ -60,7 +60,7 @@ const MAX_TOTAL_BYTES: usize = 40 * 1024 * 1024;
 pub enum ClipboardSafetyError {
     /// 剪贴板被其他应用锁定占用,超时无法打开
     Busy,
-    /// **QuickPath 自己已有一次剪贴板事务在进行**(进程级独占 lease 拒绝,审计报告 P0-07)
+    /// **WindPath 自己已有一次剪贴板事务在进行**(进程级独占 lease 拒绝,审计报告 P0-07)
     ///
     /// 与 `Busy` 刻意分开:`Busy` 表示外部进程占用 Win32 剪贴板(需要重试/提示),
     /// `AlreadyInUse` 表示内部竞争(安静拒绝或有限重试,绝不计入失败冷却,
@@ -725,9 +725,9 @@ fn create_clipboard_owner() -> Option<HWND> {
         .clone();
 
     let spawned = thread::Builder::new()
-        .name("QuickPath-ClipboardOwner".to_string())
+        .name("WindPath-ClipboardOwner".to_string())
         .spawn(move || unsafe {
-            let class_name = w!("QuickPath_ClipboardOwner_Class");
+            let class_name = w!("WindPath_ClipboardOwner_Class");
 
             // 审计报告 S-02：`GetModuleHandleW(None)` 失败时绝不能静默退化为 NULL 实例。
             // 拿不到模块实例就无法正确注册/查找窗口类，此处显式判定失败并让
@@ -786,7 +786,7 @@ fn create_clipboard_owner() -> Option<HWND> {
             let created = CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                w!("QuickPath Clipboard Owner"),
+                w!("WindPath Clipboard Owner"),
                 WINDOW_STYLE::default(),
                 0,
                 0,
@@ -1641,7 +1641,7 @@ impl ClipboardTransaction {
         }
     }
 
-    /// 由 `QuickPath` 自己向剪贴板写入临时文本（如清空），并登记序列号与精确文本。
+    /// 由 `WindPath` 自己向剪贴板写入临时文本（如清空），并登记序列号与精确文本。
     ///
     /// 审计报告 P0-04 竞态 A：原实现是「先 `ensure_still_owned()`、后 `OpenClipboard`」
     /// 的 check-then-act，两步之间用户复制会被随后的 `EmptyClipboard` 静默清掉。
@@ -2677,7 +2677,7 @@ mod tests {
             FREE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
 
-        let data = b"quickpath-fault-injection-probe";
+        let data = b"windpath-fault-injection-probe";
 
         // 1) 分配失败：无句柄可回收，必须直接返回失败
         let alloc_fail = HandleOps {
@@ -2865,14 +2865,14 @@ mod tests {
     fn test_hdrop_and_registered_format_survive_temporary_text_injection() {
         let _guard = clip_test_lock();
 
-        let hdrop = hdrop_blob(&[r"C:\QuickPath\a.txt", r"D:\QuickPath\b.txt"]);
+        let hdrop = hdrop_blob(&[r"C:\WindPath\a.txt", r"D:\WindPath\b.txt"]);
         let registered = unsafe {
             windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                "QuickPathProbeFormat"
+                "WindPathProbeFormat"
             ))
         };
         assert!(registered != 0, "注册剪贴板格式必须成功");
-        let registered_bytes = b"quickpath-registered-format-probe".to_vec();
+        let registered_bytes = b"windpath-registered-format-probe".to_vec();
 
         seed_clipboard_formats(&[(CF_HDROP, &hdrop), (registered, &registered_bytes)]);
 
@@ -2923,7 +2923,7 @@ mod tests {
         };
         let custom_format = unsafe {
             windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                "QuickPathMixedFormatProbe"
+                "WindPathMixedFormatProbe"
             ))
         };
         assert!(
@@ -2931,15 +2931,15 @@ mod tests {
             "HTML/RTF/自定义格式注册必须成功"
         );
 
-        let html = "<html><body>QuickPath HTML 中文</body></html>"
+        let html = "<html><body>WindPath HTML 中文</body></html>"
             .as_bytes()
             .to_vec();
-        let rtf = r"{\rtf1\ansi QuickPath RTF 中文}".as_bytes().to_vec();
-        let custom = b"quickpath-custom-hglobal-probe".to_vec();
+        let rtf = r"{\rtf1\ansi WindPath RTF 中文}".as_bytes().to_vec();
+        let custom = b"windpath-custom-hglobal-probe".to_vec();
         let hdrop = hdrop_blob(&[
-            r"C:\QuickPath\one.txt",
-            r"D:\QuickPath\two.bin",
-            r"E:\QuickPath\three.log",
+            r"C:\WindPath\one.txt",
+            r"D:\WindPath\two.bin",
+            r"E:\WindPath\three.log",
         ]);
         let dib = minimal_dib_blob();
 
@@ -3119,7 +3119,7 @@ mod tests {
         let hinstance = HINSTANCE(module.0);
 
         // 独立类名，避免与生产 owner 类互相干扰（生产类可能已被注册）。
-        let class_name = w!("QuickPath_ClipboardOwner_TestClass");
+        let class_name = w!("WindPath_ClipboardOwner_TestClass");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(clipboard_owner_proc),
             hInstance: hinstance,
@@ -3141,7 +3141,7 @@ mod tests {
             CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                w!("QuickPath Clipboard Owner (test)"),
+                w!("WindPath Clipboard Owner (test)"),
                 WINDOW_STYLE::default(),
                 0,
                 0,
@@ -3471,7 +3471,7 @@ mod tests {
 
     /// P0-03：构建一个真实存在的临时目录（事务链路需取回“真实目录”才算成功）。
     fn make_probe_dir(tag: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("quickpath_p003_probe_{tag}"));
+        let dir = std::env::temp_dir().join(format!("windpath_p003_probe_{tag}"));
         std::fs::create_dir_all(&dir).expect("测试目录必须可创建");
         dir.to_string_lossy().trim_end_matches('\\').to_string()
     }
@@ -3652,7 +3652,7 @@ mod tests {
             };
             let custom_format = unsafe {
                 windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                    "QuickPathP003Format"
+                    "WindPathP003Format"
                 ))
             };
             assert!(
@@ -3660,12 +3660,12 @@ mod tests {
                 "{label}: HTML/RTF/自定义格式注册必须成功"
             );
 
-            let html = "<html><body>QuickPath P003 HTML 中文</body></html>"
+            let html = "<html><body>WindPath P003 HTML 中文</body></html>"
                 .as_bytes()
                 .to_vec();
-            let rtf = r"{\rtf1\ansi QuickPath P003 RTF 中文}".as_bytes().to_vec();
-            let custom = b"quickpath-p003-custom-hglobal".to_vec();
-            let hdrop = hdrop_blob(&[r"C:\QuickPath\p003\a.txt", r"D:\QuickPath\p003\b.bin"]);
+            let rtf = r"{\rtf1\ansi WindPath P003 RTF 中文}".as_bytes().to_vec();
+            let custom = b"windpath-p003-custom-hglobal".to_vec();
+            let hdrop = hdrop_blob(&[r"C:\WindPath\p003\a.txt", r"D:\WindPath\p003\b.bin"]);
             let dib = minimal_dib_blob();
 
             // seed_clipboard_formats 会额外写入 CF_UNICODETEXT
@@ -4841,17 +4841,17 @@ mod tests {
         };
         let custom_format = unsafe {
             windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                "QuickPathMixedFormatProbe"
+                "WindPathMixedFormatProbe"
             ))
         };
         assert!(html_format != 0 && rtf_format != 0 && custom_format != 0);
 
-        let html = "<html><body>QuickPath 跨进程 HTML</body></html>"
+        let html = "<html><body>WindPath 跨进程 HTML</body></html>"
             .as_bytes()
             .to_vec();
-        let rtf = r"{\rtf1\ansi QuickPath 跨进程 RTF}".as_bytes().to_vec();
-        let custom = b"quickpath-xproc-hglobal-probe".to_vec();
-        let hdrop = hdrop_blob(&[r"C:\QuickPath\x1.txt", r"D:\QuickPath\x2.bin"]);
+        let rtf = r"{\rtf1\ansi WindPath 跨进程 RTF}".as_bytes().to_vec();
+        let custom = b"windpath-xproc-hglobal-probe".to_vec();
+        let hdrop = hdrop_blob(&[r"C:\WindPath\x1.txt", r"D:\WindPath\x2.bin"]);
         let dib = minimal_dib_blob();
 
         seed_clipboard_formats(&[
@@ -4885,7 +4885,7 @@ mod tests {
         assert_mixed_roundtrip(&before, "跨进程真实管理器写入后");
     }
 
-    /// 报告 §5.1 C-01：真实检查 owner 隐藏窗口存在，且 QuickPath 写入剪贴板时
+    /// 报告 §5.1 C-01：真实检查 owner 隐藏窗口存在，且 WindPath 写入剪贴板时
     /// `GetClipboardOwner()` 必须就是该 owner 窗口（而不是 NULL）。
     #[test]
     fn test_owner_window_is_real_clipboard_owner_during_write() {
@@ -4900,14 +4900,14 @@ mod tests {
         );
 
         assert!(
-            set_raw_clipboard_text("qp_p003_owner_probe"),
+            set_raw_clipboard_text("wp_p003_owner_probe"),
             "写入必须成功"
         );
         let actual = unsafe { GetClipboardOwner() }.expect("写入后必须能取到剪贴板所有者");
         assert_ne!(actual, HWND::default(), "写入后剪贴板不得无主（NULL）");
         assert_eq!(
             actual, owner,
-            "QuickPath 写入剪贴板后 GetClipboardOwner() 必须是我们的 owner 窗口"
+            "WindPath 写入剪贴板后 GetClipboardOwner() 必须是我们的 owner 窗口"
         );
 
         // 收尾：不把探针文本留给后续用例
@@ -4986,7 +4986,7 @@ mod tests {
         let _guard = clip_test_lock();
         let html = unsafe {
             windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                "QuickPathT1Format"
+                "WindPathT1Format"
             ))
         };
         assert!(html != 0);
@@ -5086,7 +5086,7 @@ mod tests {
         let _guard = clip_test_lock();
         let html = unsafe {
             windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                "QuickPathT3Format"
+                "WindPathT3Format"
             ))
         };
         seed_clipboard_formats(&[(html, b"t3-html")]);
@@ -5155,7 +5155,7 @@ mod tests {
         let _guard = clip_test_lock();
         let html = unsafe {
             windows::Win32::System::DataExchange::RegisterClipboardFormatW(windows::core::w!(
-                "QuickPathT4Format"
+                "WindPathT4Format"
             ))
         };
         assert!(html != 0);

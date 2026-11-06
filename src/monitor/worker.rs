@@ -47,7 +47,7 @@ impl MetricsWorker {
         let shared_snap = self.shared_snapshot.clone();
 
         let handle = thread::Builder::new()
-            .name("QuickPath-MetricsWorker".to_string())
+            .name("WindPath-MetricsWorker".to_string())
             .spawn(move || {
                 let mut net_collector = NetworkCollector::new();
                 let mut cpu_collector = CpuCollector::new();

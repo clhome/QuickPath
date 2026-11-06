@@ -897,7 +897,7 @@ fn spawn_sta_thread(
         return Err(std::io::Error::other("injected STA spawn failure"));
     }
     thread::Builder::new()
-        .name(format!("QuickPath-ShellComSTA#{}", generation))
+        .name(format!("WindPath-ShellComSTA#{}", generation))
         .spawn(move || sta_worker_loop(rx))
         .map(|_handle| ())
 }

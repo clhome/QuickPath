@@ -55,7 +55,7 @@ const IDM_POS_TRAY_LEFT: usize = 3011;
 const IDM_POS_TASKBAR_LEFT: usize = 3012;
 
 /// 窗口类名（单实例互斥体保证至多一个监控条窗口）。
-const BAR_WINDOW_CLASS: PCWSTR = w!("QuickPath_Taskbar_Monitor_Class");
+const BAR_WINDOW_CLASS: PCWSTR = w!("WindPath_Taskbar_Monitor_Class");
 
 /// 读取监控条实例的 `BarWindowInner` 拥有值（存储在窗口私有存储 `GWLP_USERDATA`）。
 unsafe fn bar_inner(hwnd: HWND) -> *mut BarWindowInner {
@@ -109,7 +109,7 @@ impl BarWindow {
             let hwnd = match CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                 class_name,
-                w!("QuickPath Taskbar Monitor"),
+                w!("WindPath Taskbar Monitor"),
                 WS_POPUP,
                 0,
                 0,

@@ -82,7 +82,7 @@ impl TooltipData {
     fn from_snapshot(snapshot: &MetricsSnapshot, lang: &Language) -> Self {
         let bundle = I18n::get_bundle(lang);
         let title = if bundle.monitor.tooltip_title.is_empty() {
-            "QuickPath硬件看板".to_string()
+            "WindPath硬件看板".to_string()
         } else {
             bundle.monitor.tooltip_title.clone()
         };
@@ -346,7 +346,7 @@ impl TooltipData {
 
 impl MonitorTooltip {
     pub fn new() -> Result<Self, String> {
-        let class_name = w!("QuickPath_Monitor_Tooltip_Class");
+        let class_name = w!("WindPath_Monitor_Tooltip_Class");
         unsafe {
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
@@ -361,7 +361,7 @@ impl MonitorTooltip {
             let hwnd = match CreateWindowExW(
                 WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                 class_name,
-                w!("QuickPath Monitor Tooltip"),
+                w!("WindPath Monitor Tooltip"),
                 WS_POPUP,
                 0,
                 0,
@@ -1320,7 +1320,7 @@ mod tests {
         let snap = create_mock_snapshot();
         let data = TooltipData::from_snapshot(&snap, &Language::ZhCN);
 
-        assert_eq!(data.title, "QuickPath硬件看板");
+        assert_eq!(data.title, "WindPath硬件看板");
         assert_eq!(data.producer, "衢州御风科技有限公司出品");
         assert_eq!(data.lines.len(), 8);
 
@@ -1373,7 +1373,7 @@ mod tests {
         let snap = create_mock_snapshot();
         let data = TooltipData::from_snapshot(&snap, &Language::EnUS);
 
-        assert_eq!(data.title, "QuickPath Hardware Dashboard");
+        assert_eq!(data.title, "WindPath Hardware Dashboard");
         assert_eq!(
             data.producer,
             "Produced by Quzhou Yufeng Technology Co., Ltd."

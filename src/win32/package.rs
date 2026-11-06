@@ -2,7 +2,7 @@
 
 //! Windows 应用包身份（Package Identity）探测模块。
 //!
-//! 用于在运行时识别 QuickPath 是否运行于 MSIX / Windows Store 等具备 Package Identity 的应用容器中。
+//! 用于在运行时识别 WindPath 是否运行于 MSIX / Windows Store 等具备 Package Identity 的应用容器中。
 //! - 若运行于 MSIX 商店包内：关闭应用内部的 GitHub 自更新检测，由 Windows 微软商店管道负责静默安全更新。
 //! - 若运行于独立 EXE 便携版或普通 MSI 安装版：保持原生 GitHub Release 更新检测与托盘提醒。
 

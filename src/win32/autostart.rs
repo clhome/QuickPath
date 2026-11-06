@@ -4,7 +4,8 @@ use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const TASK_NAME: &str = "QuickPath";
+const TASK_NAME: &str = "WindPath";
+const LEGACY_TASK_NAME: &str = "QuickPath";
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// 单次 schtasks 调用的等待上限。
@@ -76,6 +77,9 @@ pub fn set_autostart(enable: bool, use_task_scheduler: bool) -> Result<(), Strin
     let exe_path_str = current_exe.to_string_lossy().to_string();
     // 强制加双引号包裹，彻底解决含空格目录（如 C:\Program Files）开机自启静默失效问题
     let quoted_exe = format!("\"{}\"", exe_path_str);
+
+    // 始终主动尝试清理历史旧版 QuickPath 任务计划程序项，防止双重拉起
+    run_schtasks_quiet(&["/delete", "/tn", LEGACY_TASK_NAME, "/f"]);
 
     if enable {
         if use_task_scheduler {
@@ -156,7 +160,8 @@ fn set_registry_run(quoted_exe: &str, enable: bool) -> Result<(), String> {
 
     unsafe {
         let sub_key = HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Run");
-        let value_name = HSTRING::from("QuickPath");
+        let value_name = HSTRING::from("WindPath");
+        let legacy_value_name = HSTRING::from("QuickPath");
         let mut hkey = HKEY::default();
 
         let open_res = RegOpenKeyExW(
@@ -170,6 +175,9 @@ fn set_registry_run(quoted_exe: &str, enable: bool) -> Result<(), String> {
         if open_res.is_err() {
             return Err("无法打开注册表 Run 键".to_string());
         }
+
+        // 无论启用与否，主动清理历史旧键名 QuickPath
+        let _ = RegDeleteValueW(hkey, &legacy_value_name);
 
         if enable {
             let exe_wide: Vec<u16> = quoted_exe.encode_utf16().chain(Some(0)).collect();
@@ -225,7 +233,8 @@ fn is_registry_run_enabled() -> bool {
 
     unsafe {
         let sub_key = HSTRING::from(r"Software\Microsoft\Windows\CurrentVersion\Run");
-        let value_name = HSTRING::from("QuickPath");
+        let value_name = HSTRING::from("WindPath");
+        let legacy_value_name = HSTRING::from("QuickPath");
         let mut hkey = HKEY::default();
 
         let open_res = RegOpenKeyExW(
@@ -239,7 +248,8 @@ fn is_registry_run_enabled() -> bool {
         if open_res.is_ok() {
             let mut buffer = [0u16; 1024];
             let mut buffer_size = (buffer.len() * 2) as u32;
-            let query_res = RegQueryValueExW(
+            // 优先检查 WindPath 键
+            let mut query_res = RegQueryValueExW(
                 hkey,
                 &value_name,
                 None,
@@ -247,10 +257,22 @@ fn is_registry_run_enabled() -> bool {
                 Some(buffer.as_mut_ptr() as *mut u8),
                 Some(&mut buffer_size),
             );
+            // 若不存在则回退检查旧版 QuickPath 键
+            if query_res.is_err() {
+                buffer_size = (buffer.len() * 2) as u32;
+                query_res = RegQueryValueExW(
+                    hkey,
+                    &legacy_value_name,
+                    None,
+                    None,
+                    Some(buffer.as_mut_ptr() as *mut u8),
+                    Some(&mut buffer_size),
+                );
+            }
             let _ = RegCloseKey(hkey);
 
             if query_res.is_ok() {
-                // 如果能读取到内容，校验是否确实包含 QuickPath
+                // 如果能读取到内容，校验非空
                 let read_len = (buffer_size / 2) as usize;
                 let read_str = String::from_utf16_lossy(&buffer[..read_len.saturating_sub(1)]);
                 return !read_str.trim().is_empty();

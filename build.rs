@@ -77,26 +77,26 @@ BEGIN
         BLOCK "080404b0"
         BEGIN
             VALUE "CompanyName", "衢州御风科技有限公司"
-            VALUE "FileDescription", "QuickPath - 现代文件对话框快速跳转增强工具"
+            VALUE "FileDescription", "WindPath - 现代文件对话框快速跳转增强工具"
             VALUE "FileVersion", "{dot_version}"
-            VALUE "InternalName", "quickpath.exe"
+            VALUE "InternalName", "windpath.exe"
             VALUE "LegalCopyright", "Copyright (C) 2026 衢州御风科技有限公司. 保留所有权利."
-            VALUE "OriginalFilename", "quickpath.exe"
-            VALUE "ProductName", "QuickPath"
+            VALUE "OriginalFilename", "windpath.exe"
+            VALUE "ProductName", "WindPath"
             VALUE "ProductVersion", "{dot_version}"
-            VALUE "Comments", "https://qp.yftec.top"
+            VALUE "Comments", "https://windpath.yftec.top"
         END
         BLOCK "040904b0"
         BEGIN
             VALUE "CompanyName", "Quzhou Yufeng Technology Co., Ltd."
-            VALUE "FileDescription", "QuickPath - Modern File Dialog Quick Switcher"
+            VALUE "FileDescription", "WindPath - Modern File Dialog Quick Switcher"
             VALUE "FileVersion", "{dot_version}"
-            VALUE "InternalName", "quickpath.exe"
+            VALUE "InternalName", "windpath.exe"
             VALUE "LegalCopyright", "Copyright (C) 2026 Quzhou Yufeng Technology Co., Ltd. All rights reserved."
-            VALUE "OriginalFilename", "quickpath.exe"
-            VALUE "ProductName", "QuickPath"
+            VALUE "OriginalFilename", "windpath.exe"
+            VALUE "ProductName", "WindPath"
             VALUE "ProductVersion", "{dot_version}"
-            VALUE "Comments", "https://qp.yftec.top"
+            VALUE "Comments", "https://windpath.yftec.top"
         END
     END
     BLOCK "VarFileInfo"
@@ -107,7 +107,7 @@ END
 "#
     );
 
-    let rc_path = out_dir.join("quickpath.rc");
+    let rc_path = out_dir.join("windpath.rc");
     fs::write(&rc_path, rc_content).expect("写出资源脚本到 OUT_DIR 失败");
 
     // 5. 编译资源。失败必须让构建失败，绝不静默忽略（旧实现 `let _ =` 会产出无版本信息/无图标的 exe）。

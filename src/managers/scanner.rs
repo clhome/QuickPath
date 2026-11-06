@@ -247,7 +247,7 @@ fn scanner() -> &'static Scanner {
     let scanner = SCANNER.get_or_init(Scanner::new);
     WORKER_GATE.try_start(|| {
         thread::Builder::new()
-            .name("QuickPath-ManagerScan".to_string())
+            .name("WindPath-ManagerScan".to_string())
             .spawn(move || worker_loop(scanner))
             .map(|_handle| ())
     });

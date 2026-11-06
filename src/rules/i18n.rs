@@ -418,13 +418,16 @@ impl I18n {
             }
 
             // 2. 动态扫描外部覆盖与扩展语言文件
-            let candidate_dirs = vec![
+            let mut candidate_dirs = vec![
                 PathBuf::from("locales"),
                 PathBuf::from("./locales"),
-                directories::ProjectDirs::from("com", "yufeng", "QuickPath")
-                    .map(|p| p.config_dir().join("locales"))
-                    .unwrap_or_else(|| PathBuf::from("locales")),
             ];
+            if let Some(p) = directories::ProjectDirs::from("com", "yufeng", "WindPath") {
+                candidate_dirs.push(p.config_dir().join("locales"));
+            }
+            if let Some(p) = directories::ProjectDirs::from("com", "yufeng", "QuickPath") {
+                candidate_dirs.push(p.config_dir().join("locales"));
+            }
 
             for dir in candidate_dirs {
                 if dir.is_dir()
@@ -630,12 +633,12 @@ impl I18n {
         let zh = Self::resolve_locale_code(lang) == "zh-CN";
         if zh {
             (
-                format!("QuickPath 发现新版本 {}", version),
+                format!("WindPath 发现新版本 {}", version),
                 "点击此处前往 GitHub 下载最新版本".to_string(),
             )
         } else {
             (
-                format!("QuickPath New Version {}", version),
+                format!("WindPath New Version {}", version),
                 "Click here to download the latest release from GitHub".to_string(),
             )
         }
@@ -741,7 +744,7 @@ impl I18n {
         if !b.about.github.is_empty() {
             &b.about.github
         } else {
-            "https://github.com/clhome/QuickPath"
+            "https://github.com/clhome/WindPath"
         }
     }
 }

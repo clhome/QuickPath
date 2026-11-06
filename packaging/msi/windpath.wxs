@@ -2,7 +2,7 @@
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <!-- 固定 UpgradeCode 保持版本升级链路 -->
   <Product Id="*"
-           Name="QuickPath"
+           Name="WindPath"
            Language="2052"
            Version="$(var.Version)"
            Manufacturer="Quzhou Yufeng Technology Co., Ltd."
@@ -11,36 +11,36 @@
     <Package InstallerVersion="500"
              Compressed="yes"
              InstallScope="perMachine"
-             Description="QuickPath - 专为 Windows 10/11 打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器"
-             Comments="QuickPath Windows Installer" />
+             Description="WindPath - 专为 Windows 10/11 打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器"
+             Comments="WindPath Windows Installer" />
 
-    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 QuickPath，安装已中止。" />
+    <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 WindPath，安装已中止。" />
     <MediaTemplate EmbedCab="yes" />
 
     <!-- 控制面板卸载信息与图标定义 -->
     <Icon Id="AppIcon" SourceFile="$(var.SourceDir)\assets\logo.ico" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-    <Property Id="ARPHELPLINK" Value="https://qp.yftec.top" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/clhome/QuickPath" />
+    <Property Id="ARPHELPLINK" Value="https://windpath.yftec.top" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/clhome/WindPath" />
 
     <!-- 目录结构映射 -->
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <!-- 64 位程序目录: C:\Program Files\QuickPath -->
+      <!-- 64 位程序目录: C:\Program Files\WindPath -->
       <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLDIR" Name="QuickPath" />
+        <Directory Id="INSTALLDIR" Name="WindPath" />
       </Directory>
 
-      <!-- 开始菜单目录: Programs\QuickPath -->
+      <!-- 开始菜单目录: Programs\WindPath -->
       <Directory Id="ProgramMenuFolder">
-        <Directory Id="ApplicationProgramsFolder" Name="QuickPath" />
+        <Directory Id="ApplicationProgramsFolder" Name="WindPath" />
       </Directory>
     </Directory>
 
     <!-- 安装组件：主执行文件 -->
     <DirectoryRef Id="INSTALLDIR">
       <Component Id="MainExecutable" Guid="3F85A489-0A08-466D-B072-EE4F9A68361B" Win64="yes">
-        <File Id="QuickPathExe"
-              Name="QuickPath.exe"
+        <File Id="WindPathExe"
+              Name="WindPath.exe"
               Source="$(var.ExePath)"
               KeyPath="yes" />
       </Component>
@@ -50,14 +50,14 @@
     <DirectoryRef Id="ApplicationProgramsFolder">
       <Component Id="ApplicationShortcut" Guid="8705C6AA-A1E4-4279-8802-BD90BF99C3D2">
         <Shortcut Id="ApplicationStartMenuShortcut"
-                  Name="QuickPath"
-                  Description="QuickPath 文件对话框快速切换工具"
-                  Target="[INSTALLDIR]QuickPath.exe"
+                  Name="WindPath"
+                  Description="WindPath 文件对话框快速切换工具"
+                  Target="[INSTALLDIR]WindPath.exe"
                   WorkingDirectory="INSTALLDIR"
                   Icon="AppIcon" />
         <RemoveFolder Id="CleanUpShortCut" Directory="ApplicationProgramsFolder" On="uninstall" />
         <RegistryValue Root="HKCU"
-                       Key="Software\QuickPath"
+                       Key="Software\WindPath"
                        Name="installed"
                        Type="integer"
                        Value="1"
@@ -66,7 +66,7 @@
     </DirectoryRef>
 
     <!-- 核心安装特性 -->
-    <Feature Id="MainApplication" Title="QuickPath" Level="1">
+    <Feature Id="MainApplication" Title="WindPath" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="ApplicationShortcut" />
     </Feature>

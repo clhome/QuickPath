@@ -1,4 +1,4 @@
-# QuickPath Documentation Center | 文档中心
+# WindPath Documentation Center | 文档中心
 
 <div align="center">
 
@@ -8,9 +8,9 @@
 
 ---
 
-Welcome to the QuickPath documentation hub. Here you will find official user guides and technical specifications for QuickPath:
+Welcome to the WindPath documentation hub. Here you will find official user guides and technical specifications for WindPath:
 
-欢迎来到 QuickPath 官方文档中心。本目录包含 QuickPath 官方用户手册与技术规范：
+欢迎来到 WindPath 官方文档中心。本目录包含 WindPath（原 QuickPath）官方用户手册与技术规范：
 
 - 🇨🇳 **[中文使用说明书与操作手册 (User_Manual_CN.md)](User_Manual_CN.md)**
   - 详细涵盖产品概述、工作原理、系统兼容性、绿色安装与自启、核心功能（自动秒切、悬浮吸附条、输入法防顶词、文件管理器生态）、图形设置中心指南、配置文件详解与常见问题排查（FAQ）。
@@ -21,6 +21,6 @@ Welcome to the QuickPath documentation hub. Here you will find official user gui
 ---
 
 ### Links & Resources / 链接与资源
-- **Official Website / 官方网址**: [https://qp.yftec.top](https://qp.yftec.top)
-- **GitHub Repository / 源码仓库**: [https://github.com/clhome/QuickPath](https://github.com/clhome/QuickPath)
+- **Official Website / 官方网址**: [https://windpath.yftec.top](https://windpath.yftec.top)
+- **GitHub Repository / 源码仓库**: [https://github.com/clhome/WindPath](https://github.com/clhome/WindPath)
 - **Produced by / 出品方**: 衢州御风科技有限公司 (Quzhou Yufeng Technology Co., Ltd.)

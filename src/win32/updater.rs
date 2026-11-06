@@ -19,7 +19,7 @@ use windows::Win32::Networking::WinHttp::{
 use windows::core::{PCWSTR, w};
 
 /// 官方 Release 页面兜底下载地址
-pub const DEFAULT_RELEASES_URL: &str = "https://github.com/clhome/QuickPath/releases";
+pub const DEFAULT_RELEASES_URL: &str = "https://github.com/clhome/WindPath/releases";
 
 /// GitHub API Release 简要信息
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -126,7 +126,7 @@ fn fetch_latest_release_json() -> Option<String> {
     unsafe {
         // 1. 初始化 WinHttp 会话，使用系统默认代理模式
         let session = WinHttpOpen(
-            w!("QuickPath-Update-Checker"),
+            w!("WindPath-Update-Checker"),
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),
@@ -159,7 +159,7 @@ fn fetch_latest_release_json() -> Option<String> {
         let request = WinHttpOpenRequest(
             connect,
             w!("GET"),
-            w!("/repos/clhome/QuickPath/releases/latest"),
+            w!("/repos/clhome/WindPath/releases/latest"),
             PCWSTR::null(),
             PCWSTR::null(),
             ptr::null(),
@@ -172,7 +172,7 @@ fn fetch_latest_release_json() -> Option<String> {
 
         // 4. 发送请求，附带必要的 GitHub API 请求头
         let headers: Vec<u16> =
-            "User-Agent: QuickPath-App\r\nAccept: application/vnd.github.v3+json\r\n"
+            "User-Agent: WindPath-App\r\nAccept: application/vnd.github.v3+json\r\n"
                 .encode_utf16()
                 .collect();
         let mut sent = WinHttpSendRequest(request, Some(&headers), None, 0, 0, 0);
@@ -324,32 +324,32 @@ mod tests {
     fn test_release_json_deserialization() {
         let sample_json = r#"{
             "tag_name": "v1.2.4",
-            "html_url": "https://github.com/clhome/QuickPath/releases/tag/v1.2.4",
+            "html_url": "https://github.com/clhome/WindPath/releases/tag/v1.2.4",
             "name": "Release v1.2.4"
         }"#;
         let release: GitHubRelease = serde_json::from_str(sample_json).unwrap();
         assert_eq!(release.tag_name, "v1.2.4");
         assert_eq!(
             release.html_url.as_deref(),
-            Some("https://github.com/clhome/QuickPath/releases/tag/v1.2.4")
+            Some("https://github.com/clhome/WindPath/releases/tag/v1.2.4")
         );
 
         // 真实 GitHub API 返回的包含多字段的 payload
         let full_payload = r#"{
-            "url": "https://api.github.com/repos/clhome/QuickPath/releases/429813443",
+            "url": "https://api.github.com/repos/clhome/WindPath/releases/429813443",
             "tag_name": "v1.2.5",
             "target_commitish": "main",
-            "name": "QuickPath v1.2.5",
+            "name": "WindPath v1.2.5",
             "draft": false,
             "prerelease": false,
-            "html_url": "https://github.com/clhome/QuickPath/releases/tag/v1.2.5",
+            "html_url": "https://github.com/clhome/WindPath/releases/tag/v1.2.5",
             "assets": []
         }"#;
         let full_release: GitHubRelease = serde_json::from_str(full_payload).unwrap();
         assert_eq!(full_release.tag_name, "v1.2.5");
         assert_eq!(
             full_release.html_url.as_deref(),
-            Some("https://github.com/clhome/QuickPath/releases/tag/v1.2.5")
+            Some("https://github.com/clhome/WindPath/releases/tag/v1.2.5")
         );
     }
 

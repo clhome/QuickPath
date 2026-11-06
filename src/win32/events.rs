@@ -6,7 +6,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINEVENT_SKIPOWNPROCESS,
 };
 
-pub const WM_QUICKPATH_FOREGROUND: u32 = 0x0400 + 101;
+pub const WM_WINDPATH_FOREGROUND: u32 = 0x0400 + 101;
 
 static MAIN_THREAD_WINDOW: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -64,7 +64,7 @@ unsafe extern "system" fn win_event_proc(
                 let target_hwnd = HWND(target as *mut _);
                 let _ = PostMessageW(
                     Some(target_hwnd),
-                    WM_QUICKPATH_FOREGROUND,
+                    WM_WINDPATH_FOREGROUND,
                     WPARAM(hwnd.0 as usize),
                     LPARAM(0),
                 );

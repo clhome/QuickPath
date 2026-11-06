@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    将 QuickPath 打包为 Microsoft Store 规范的 MSIX 格式安装包。
+    将 WindPath 打包为 Microsoft Store 规范的 MSIX 格式安装包。
 .DESCRIPTION
     读取 packaging/msix/AppxManifest.xml 与 Assets 目录，
     将指定 Exe 封装为可直接提交微软 Partner Center 的 .msix 包。
@@ -8,9 +8,9 @@
 
 [CmdletBinding()]
 param(
-    [string]$ExePath = "target/release/quickpath.exe",
+    [string]$ExePath = "target/release/windpath.exe",
     [string]$OutputDir = "dist",
-    [string]$OutputFileName = "QuickPath.msix",
+    [string]$OutputFileName = "WindPath.msix",
     [string]$Version = "",
     [string]$IdentityName = "",
     [string]$Publisher = "",
@@ -49,13 +49,13 @@ Write-Host "MSIX 四段式版本号: $quadVersion"
 
 # 3. 解析发布者与身份信息（支持环境变量覆盖）
 if (-not $IdentityName) {
-    $IdentityName = if ($env:MS_STORE_IDENTITY_NAME) { $env:MS_STORE_IDENTITY_NAME } else { "QuickPath" }
+    $IdentityName = if ($env:MS_STORE_IDENTITY_NAME) { $env:MS_STORE_IDENTITY_NAME } else { "WindPath" }
 }
 if (-not $Publisher) {
-    $Publisher = if ($env:MS_STORE_PUBLISHER) { $env:MS_STORE_PUBLISHER } else { "CN=QuickPath" }
+    $Publisher = if ($env:MS_STORE_PUBLISHER) { $env:MS_STORE_PUBLISHER } else { "CN=WindPath" }
 }
 if (-not $PublisherDisplayName) {
-    $PublisherDisplayName = if ($env:MS_STORE_PUBLISHER_DISPLAY_NAME) { $env:MS_STORE_PUBLISHER_DISPLAY_NAME } else { "QuickPath" }
+    $PublisherDisplayName = if ($env:MS_STORE_PUBLISHER_DISPLAY_NAME) { $env:MS_STORE_PUBLISHER_DISPLAY_NAME } else { "WindPath" }
 }
 
 Write-Host "MSIX Identity Name: $IdentityName"
@@ -88,8 +88,8 @@ $stagingDir = Join-Path $env:TEMP ("qp_msix_staging_" + [System.Guid]::NewGuid()
 New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
 
 try {
-    # 5.1 复制可执行文件为规范命名 QuickPath.exe
-    $destExe = Join-Path $stagingDir "QuickPath.exe"
+    # 5.1 复制可执行文件为规范命名 WindPath.exe
+    $destExe = Join-Path $stagingDir "WindPath.exe"
     Copy-Item -Path $ExePath -Destination $destExe -Force
 
     # 5.2 复制 Assets

@@ -4,10 +4,10 @@
   <assemblyIdentity
     version="0.0.0.0"
     processorArchitecture="*"
-    name="QuickPath"
+    name="WindPath"
     type="win32"
   />
-  <description>QuickPath - Modern File Dialog Quick Switcher</description>
+  <description>WindPath - Modern File Dialog Quick Switcher</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>

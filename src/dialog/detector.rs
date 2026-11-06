@@ -36,12 +36,12 @@ pub fn is_debug_mode_enabled() -> bool {
 pub fn set_debug_mode_enabled(enabled: bool) {
     let prev = DEBUG_MODE_ENABLED.swap(enabled, Ordering::SeqCst);
     if enabled && !prev {
-        log_debug("=== QuickPath Debug Mode Enabled by User ===");
+        log_debug("=== WindPath Debug Mode Enabled by User ===");
     }
 }
 
 /// 单一日志文件名（审计报告 P2-04：不再同时写 exe 目录与 `%TEMP%` 两份）
-const DEBUG_LOG_FILE_NAME: &str = "quickpath_debug.log";
+const DEBUG_LOG_FILE_NAME: &str = "windpath_debug.log";
 /// 单个日志文件的最大字节数（超过即轮换，只保留一份备份 → 磁盘占用上限约 4 MB）
 const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// 轮换备份的保留期（超过即删除）
@@ -72,9 +72,9 @@ fn resolve_debug_log_path() -> Option<PathBuf> {
         candidates.push(dir);
     }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("QuickPath").join("logs"));
+        candidates.push(PathBuf::from(local).join("WindPath").join("logs"));
     }
-    candidates.push(std::env::temp_dir().join("QuickPath").join("logs"));
+    candidates.push(std::env::temp_dir().join("WindPath").join("logs"));
 
     for dir in candidates {
         if std::fs::create_dir_all(&dir).is_err() {
@@ -1545,7 +1545,7 @@ mod debug_log_tests {
     /// 轮换：当前文件改名为 `.1` 并覆盖旧备份 → 磁盘占用有上限
     #[test]
     fn test_rotate_log_keeps_single_backup_and_caps_disk_use() {
-        let dir = std::env::temp_dir().join(format!("quickpath_log_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("windpath_log_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("创建临时目录");
         let path = dir.join(DEBUG_LOG_FILE_NAME);
@@ -1779,7 +1779,7 @@ mod debug_log_tests {
     /// `remove_log_files`：当前文件与 `.1` 备份都被删除。
     #[test]
     fn test_remove_log_files_deletes_current_and_backup() {
-        let dir = std::env::temp_dir().join(format!("quickpath_clear_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("windpath_clear_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("创建临时目录");
         let path = dir.join(DEBUG_LOG_FILE_NAME);
@@ -1798,7 +1798,7 @@ mod debug_log_tests {
     #[test]
     fn test_remove_log_files_is_idempotent_and_reports_failures() {
         let dir =
-            std::env::temp_dir().join(format!("quickpath_clear_absent_{}", std::process::id()));
+            std::env::temp_dir().join(format!("windpath_clear_absent_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("创建临时目录");
         let path = dir.join(DEBUG_LOG_FILE_NAME);

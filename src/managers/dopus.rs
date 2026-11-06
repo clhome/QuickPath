@@ -47,7 +47,7 @@ pub fn get_dopus_folders() -> Vec<DopusFolder> {
         }
 
         let temp_dir = std::env::temp_dir();
-        let info_file = temp_dir.join("quickpath_dopus.xml");
+        let info_file = temp_dir.join("windpath_dopus.xml");
 
         // 尝试找到 dopusrt.exe（可信绝对路径）
         let Some(dopusrt) = find_dopusrt() else {

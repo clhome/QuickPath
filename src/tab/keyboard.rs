@@ -17,7 +17,7 @@ use super::owner::CoordinatorSlot;
 
 /// 自定义消息：Win+E 已被钩子拦截，请宿主窗口消息线程接管
 ///（新建标签页；失败时补偿打开原生资源管理器窗口）
-pub const WM_QUICKPATH_WINE_TO_TAB: u32 = 0x0400 + 104;
+pub const WM_WINDPATH_WINE_TO_TAB: u32 = 0x0400 + 104;
 
 static COORDINATOR_SLOT: CoordinatorSlot = CoordinatorSlot::new();
 /// 宿主导出窗口句柄：钩子只向它投递消息，自身不做任何重活
@@ -105,7 +105,7 @@ unsafe extern "system" fn keyboard_ll_proc(code: i32, wparam: WPARAM, lparam: LP
                 let posted = unsafe {
                     PostMessageW(
                         Some(HWND(notify_raw as *mut _)),
-                        WM_QUICKPATH_WINE_TO_TAB,
+                        WM_WINDPATH_WINE_TO_TAB,
                         WPARAM(target.0 as usize),
                         LPARAM(0),
                     )

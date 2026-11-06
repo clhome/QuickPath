@@ -119,7 +119,7 @@ pub struct FloatingBar {
 
 impl FloatingBar {
     pub fn new() -> Result<Self, String> {
-        let class_name = w!("QuickPath_FloatingBar_Class");
+        let class_name = w!("WindPath_FloatingBar_Class");
         unsafe {
             let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
             let wc = WNDCLASSW {
@@ -137,7 +137,7 @@ impl FloatingBar {
             let hwnd = match CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
                 class_name,
-                w!("QuickPath Floating Bar"),
+                w!("WindPath Floating Bar"),
                 WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                 0,
                 0,

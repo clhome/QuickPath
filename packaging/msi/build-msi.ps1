@@ -1,16 +1,16 @@
 <#
 .SYNOPSIS
-    将 QuickPath 编译打包为标准 Windows Installer (.msi) 安装包。
+    将 WindPath 编译打包为标准 Windows Installer (.msi) 安装包。
 .DESCRIPTION
-    调用 WiX Toolset 将 QuickPath.exe 封装为支持开机快捷方式、Program Files 安装与控制面板卸载的标准 MSI 安装包。
+    调用 WiX Toolset 将 WindPath.exe 封装为支持开机快捷方式、Program Files 安装与控制面板卸载的标准 MSI 安装包。
     自动适配 GitHub Actions 环境（WiX v3.11 或 .NET WiX v4/v5）。
 #>
 
 [CmdletBinding()]
 param(
-    [string]$ExePath = "target/release/quickpath.exe",
+    [string]$ExePath = "target/release/windpath.exe",
     [string]$OutputDir = "dist",
-    [string]$OutputFileName = "QuickPath.msi",
+    [string]$OutputFileName = "WindPath.msi",
     [string]$Version = ""
 )
 
@@ -40,9 +40,11 @@ $cleanVersion = ($Version -replace '^v', '') -replace '(?i)(-rc|-alpha|-beta|-pr
 $vParts = $cleanVersion.Split('.')
 if ($vParts.Count -gt 3) {
     $cleanVersion = ($vParts[0..2] -join '.')
-} elseif ($vParts.Count -eq 1) {
+}
+elseif ($vParts.Count -eq 1) {
     $cleanVersion = "$cleanVersion.0.0"
-} elseif ($vParts.Count -eq 2) {
+}
+elseif ($vParts.Count -eq 2) {
     $cleanVersion = "$cleanVersion.0"
 }
 Write-Host "MSI Product Version: $cleanVersion"
@@ -52,7 +54,7 @@ if (-not (Test-Path $OutputDir)) {
     New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 }
 $targetMsi = Join-Path (Resolve-Path $OutputDir).Path $OutputFileName
-$wxsFile = Join-Path $rootDir "packaging/msi/quickpath.wxs"
+$wxsFile = Join-Path $rootDir "packaging/msi/windpath.wxs"
 
 if (-not (Test-Path $wxsFile)) {
     Write-Error "未找到 WiX 配置文件: $wxsFile"
@@ -104,7 +106,8 @@ if ($wixV3Candle -and $wixV3Light) {
             Remove-Item -Force $objFile -ErrorAction SilentlyContinue
         }
     }
-} elseif ($wixCli) {
+}
+elseif ($wixCli) {
     Write-Host "检测到 WiX CLI 工具链: $wixCli"
     Write-Host "正在构建 MSI 安装包..."
     & $wixCli build -arch x64 "-d" "Version=$cleanVersion" "-d" "SourceDir=$rootDir" "-d" "ExePath=$resolvedExe" $wxsFile -o $targetMsi
@@ -112,7 +115,8 @@ if ($wixV3Candle -and $wixV3Light) {
         Write-Error "WiX build 失败，退出码: $LASTEXITCODE"
         exit 1
     }
-} else {
+}
+else {
     # 尝试通过 dotnet tool 在线安装 WiX
     $dotnet = Get-Command "dotnet.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -First 1
     if ($dotnet) {
@@ -126,11 +130,13 @@ if ($wixV3Candle -and $wixV3Light) {
                 Write-Error "WiX build 失败，退出码: $LASTEXITCODE"
                 exit 1
             }
-        } else {
+        }
+        else {
             Write-Error "未找到可用 WiX 工具链，且自动安装未就绪。"
             exit 1
         }
-    } else {
+    }
+    else {
         Write-Error "未找到 WiX Toolset（需 WiX v3.11 或 .NET wix tool）。请在环境预装 WiX。"
         exit 1
     }
