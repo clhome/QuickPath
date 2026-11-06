@@ -6,7 +6,7 @@
 
 **简体中文** | [English Manual](User_Manual_EN.md) · [返回项目主页](../README_CN.md)
 
-[![Version](https://img.shields.io/badge/版本-v1.2.6-success)](#)
+[![Version](https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version)](https://github.com/clhome/WindPath/releases/latest)
 [![Platform](https://img.shields.io/badge/平台-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Producer](https://img.shields.io/badge/出品方-衢州御风科技有限公司-orange)](https://wp.yftec.top)
 [![License](https://img.shields.io/badge/协议-GPL--3.0-blue.svg)](../LICENSE)

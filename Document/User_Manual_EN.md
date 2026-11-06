@@ -4,7 +4,7 @@
 
 [使用说明书 (中文)](User_Manual_CN.md) | **English Manual** · [Back to Home](../README.md)
 
-[![Version](https://img.shields.io/badge/Version-v1.2.0-success)](#)
+[![Version](https://img.shields.io/github/v/release/clhome/WindPath?color=success&label=Version)](https://github.com/clhome/WindPath/releases/latest)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?logo=windows)](https://microsoft.com)
 [![Producer](https://img.shields.io/badge/Produced%20By-Quzhou%20Yufeng%20Technology%20Co.,%20Ltd.-orange)](https://wp.yftec.top)
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](../LICENSE)

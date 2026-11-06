@@ -58,5 +58,11 @@
   - [x] 13.1 更新 `locales/zh-CN.toml`，将版本文案调整为 `"v{version} 正式版"`
   - [x] 13.2 更新 `src/ui/settings.rs` 中的 fallback 缺省版本文本为 `"v{} 正式版"`
   - [x] 13.3 运行单元测试与编译检查验证
+- [x] 14. 自动化版本更新与 Git Tag 发布工具
+  - [x] 14.1 设计并编写 Python 自动化发布脚本 `release.py`（版本校验、Cargo.toml 精准替换、Cargo.lock 同步、Git 提交与打标签推送）
+  - [x] 14.2 编写根目录启动批处理 `release.bat`（UTF-8 编码、Python 探测、传参透传与交互适配）
+  - [x] 14.3 在 `test/` 目录下编写自动化验证脚本，验证版本号提取、替换及防误伤逻辑
+  - [x] 14.4 运行验证测试，确保跨平台与 Windows 终端体验顺畅，清理测试脚本
+
 
 
