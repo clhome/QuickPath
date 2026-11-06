@@ -25,6 +25,7 @@
 ## 💡 Why WindPath?
 
 When working across multiple applications, do you frequently face this frustration?
+
 - You just navigated to a deeply nested project folder in **File Explorer** or **Directory Opus**, but when invoking "Open" or "Save As" in your code editor, IDE, Photoshop, Office, or **WPS Office**, the file dialog defaults back to "Downloads" or "Documents";
 - You are forced to traverse through long directory trees again or manually copy and paste folder paths into the dialog address bar;
 - Outdated legacy switcher tools often trigger your Input Method Editor (IME) unintentionally during path injection, causing typos, candidate popups, or accidentally overwriting your desired filename;
@@ -80,22 +81,22 @@ When working across multiple applications, do you frequently face this frustrati
 
 ## ⌨️ Common Shortcuts & Controls
 
-| Action / Hotkey | Description |
-| :--- | :--- |
-| **Auto Follow** | Browse a folder in your file manager; when an "Open/Save" dialog appears, QuickPath switches to it automatically |
-| **`Ctrl + Q`** (Customizable) | Summon the modern path picker floating bar adjacent to the active file dialog |
-| **`↑` / `↓`** | Navigate between active file manager tabs, pinned favorites, and recent history |
-| **`Enter`** | Confirm and instantly inject the selected path into the file dialog |
-| **`Esc`** | Dismiss the floating bar |
-| **`Win + E`** | When Tab Utility is active, opens a new tab in the active Explorer window instead of launching a separate window *(New in Ver 1.2.0)* |
-| **Double-Click Tab** | Double-click any tab on the Explorer tab bar to quickly clone and open the same folder to its right *(New in Ver 1.2.0)* |
-| **Middle-Click Tab** | Middle-click any tab to close it quickly *(Windows Native Feature)* |
-| **`Ctrl + Tab` / `Ctrl + Shift + Tab`** | Cycle forward / backward smoothly through adjacent tabs *(Windows Native Feature)* |
-| **Monitor Double-Click** | Instantly launch Windows Task Manager (`taskmgr.exe`) *(New in Ver 1.1.0)* |
-| **Monitor Mouse Hover** | Summon Fluent Hardware Dashboard (Tooltip) showing dual-unit network speed, top consumer process, dedicated VRAM, uptime, battery, and dynamic metric-colored text lines *(Enhanced in Ver 1.2.5)* |
-| **Monitor Right-Click** | Native context menu: toggle metrics (Net/CPU/RAM/GPU/Disk), waveform background, dock position, refresh network, open settings *(New in Ver 1.1.0)* |
-| **Tray Icon (Left Click / Double Click)** | Open the modern card-style Settings Center |
-| **Tray Icon (Right Click)** | Context menu: toggle AutoSwitch, toggle Taskbar Monitor, toggle AutoStart, summon bar, open settings, or exit |
+| Action / Hotkey                           | Description                                                                                                                                                                                        |
+| :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Auto Follow**                           | Browse a folder in your file manager; when an "Open/Save" dialog appears, QuickPath switches to it automatically                                                                                   |
+| **`Ctrl + Q`** (Customizable)             | Summon the modern path picker floating bar adjacent to the active file dialog                                                                                                                      |
+| **`↑` / `↓`**                             | Navigate between active file manager tabs, pinned favorites, and recent history                                                                                                                    |
+| **`Enter`**                               | Confirm and instantly inject the selected path into the file dialog                                                                                                                                |
+| **`Esc`**                                 | Dismiss the floating bar                                                                                                                                                                           |
+| **`Win + E`**                             | When Tab Utility is active, opens a new tab in the active Explorer window instead of launching a separate window _(New in Ver 1.2.0)_                                                              |
+| **Double-Click Tab**                      | Double-click any tab on the Explorer tab bar to quickly clone and open the same folder to its right _(New in Ver 1.2.0)_                                                                           |
+| **Middle-Click Tab**                      | Middle-click any tab to close it quickly _(Windows Native Feature)_                                                                                                                                |
+| **`Ctrl + Tab` / `Ctrl + Shift + Tab`**   | Cycle forward / backward smoothly through adjacent tabs _(Windows Native Feature)_                                                                                                                 |
+| **Monitor Double-Click**                  | Instantly launch Windows Task Manager (`taskmgr.exe`) _(New in Ver 1.1.0)_                                                                                                                         |
+| **Monitor Mouse Hover**                   | Summon Fluent Hardware Dashboard (Tooltip) showing dual-unit network speed, top consumer process, dedicated VRAM, uptime, battery, and dynamic metric-colored text lines _(Enhanced in Ver 1.2.5)_ |
+| **Monitor Right-Click**                   | Native context menu: toggle metrics (Net/CPU/RAM/GPU/Disk), waveform background, dock position, refresh network, open settings _(New in Ver 1.1.0)_                                                |
+| **Tray Icon (Left Click / Double Click)** | Open the modern card-style Settings Center                                                                                                                                                         |
+| **Tray Icon (Right Click)**               | Context menu: toggle AutoSwitch, toggle Taskbar Monitor, toggle AutoStart, summon bar, open settings, or exit                                                                                      |
 
 ---
 
@@ -104,6 +105,7 @@ When working across multiple applications, do you frequently face this frustrati
 ![settings](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/settings_en.webp)
 
 WindPath includes a modern Fluent **four-tab** card-based Settings Center:
+
 - **"General Preferences" Tab**:
   - **General Automation**: Toggle "Smart AutoSwitch" with a single click, and adjust switch response delay (40ms – 500ms);
   - **Appearance & Opacity**: Intuitive opacity slider supporting real-time preview between 40% and 100% acrylic transparency;
@@ -125,17 +127,19 @@ WindPath includes a modern Fluent **four-tab** card-based Settings Center:
   - **Only one clipboard transaction may run at a time**: explicit probes and WPS injection / filename restore share a single process-wide exclusive lease held by the clipboard transaction itself; a conflicting request is rejected outright and **never touches the clipboard**. On cancel / timeout / unprovable source **no old snapshot is restored** over your current clipboard, and a tray balloon reports the outcome;
   - **While a clipboard transaction is in flight**, both explicit-probe entries (the tray menu items and the floating-bar buttons) are grayed, and the bar button shows `...`. Note: a WPS injection that completes through UIA `SetValue` does **not** occupy the clipboard and therefore does not trigger this busy state;
   - **Only one WPS operation may run at a time**: WPS injection and the delayed filename restore share a single operation-level exclusive lease (process-wide, not per-dialog), so a repeated trigger is de-duplicated (no double Enter, no wrong-directory navigation). Conflicts over these shared resources are **always rejected by the underlying leases**; graying is only status feedback.
-![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor.webp)
+    ![hardwareMonitor](https://raw.githubusercontent.com/clhome/WindPath/main/Document/imgs/hardwareMonitor_en.webp)
 
 ---
 
 ## ⚙️ Configuration File
 
 WindPath features dual-mode persistence:
+
 1. **Portable Mode**: If `windpath.json` (or legacy `quickpath.json`) exists in the same directory as the executable, all settings are saved locally (ideal for USB drives).
 2. **Standard Mode**: Defaults to `%APPDATA%\WindPath\config.json` (with automatic migration from legacy `%APPDATA%\QuickPath\config.json`).
 
 Sample configuration:
+
 ```json
 {
   "auto_switch_enabled": true,
@@ -177,6 +181,7 @@ Sample configuration:
 ```
 
 > **Notes**:
+>
 > - `tab_module` **(New in Ver 1.2.0)**: Configures File Explorer multi-tab enhancement. `enabled` is the master switch; `wine_to_tab` converts `Win + E` into new tabs in existing windows; `deduplication` prevents duplicate folder tabs; `double_click_to_duplicate` allows double-clicking tabs to clone the folder.
 > - `monitor` **(New in Ver 1.1.0)**: Configures the taskbar hardware status monitor. `position` accepts `"TrayLeft"` (Right of Taskbar) or `"TaskbarLeft"` (Floating Above Taskbar Left). `refresh_interval_ms` supports `1000`, `3000` (default recommended), and `5000` ms. Each metric toggle is independently configurable.
 
@@ -187,10 +192,12 @@ Sample configuration:
 WindPath is built with the standard Rust toolchain and targets Windows 10 (1809+) and Windows 11.
 
 ### Prerequisites
+
 - [Rust Toolchain](https://www.rust-lang.org/) (Stable channel recommended)
 - Windows 10 (1809 or higher) / Windows 11
 
 ### Build Steps
+
 ```pwsh
 # 1. Clone the repository
 git clone https://github.com/clhome/WindPath.git
@@ -210,6 +217,7 @@ The output binary will be located at `target/release/windpath.exe`. It is a sing
 ## 📚 Detailed Documentation
 
 For in-depth usage scenarios, ecosystem configurations, and advanced customization, refer to our comprehensive manuals:
+
 - 📘 [English User Manual & Technical Guide](Document/User_Manual_EN.md)
 - 🇨🇳 [中文用户使用说明书 (User Manual)](Document/User_Manual_CN.md)
 
