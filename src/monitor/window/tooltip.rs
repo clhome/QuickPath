@@ -144,27 +144,15 @@ impl TooltipData {
         let cpu_line = format!("{}: {:.0}%{}", cpu_lbl, snapshot.cpu.usage_percent, cpu_top);
 
         let mem_lbl = if bundle.monitor.tooltip_memory.is_empty() {
-            "物 理 内 存"
+            "内存"
         } else {
             &bundle.monitor.tooltip_memory
         };
-        let used_lbl = if bundle.monitor.tooltip_used.is_empty() {
-            "已用"
-        } else {
-            &bundle.monitor.tooltip_used
-        };
-        let total_lbl = if bundle.monitor.tooltip_total.is_empty() {
-            "共"
-        } else {
-            &bundle.monitor.tooltip_total
-        };
         let mem_line = format!(
-            "{}: {}% ({} {:.1} GB / {} {:.1} GB)",
+            "{}: {}% ({:.1} GB / {:.1} GB)",
             mem_lbl,
             snapshot.memory.usage_percent,
-            used_lbl,
             snapshot.memory.used_gb,
-            total_lbl,
             snapshot.memory.total_gb
         );
 
@@ -1344,7 +1332,7 @@ mod tests {
         assert_eq!(data.lines[3].icon, MetricIconKind::Memory);
         assert_eq!(
             data.lines[3].text,
-            "物 理 内 存: 52% (已用 14.5 GB / 共 27.8 GB)"
+            "内存: 52% (14.5 GB / 27.8 GB)"
         );
 
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);
@@ -1400,7 +1388,7 @@ mod tests {
         assert_eq!(data.lines[3].icon, MetricIconKind::Memory);
         assert_eq!(
             data.lines[3].text,
-            "RAM: 52% (Used 14.5 GB / Total 27.8 GB)"
+            "RAM: 52% (14.5 GB / 27.8 GB)"
         );
 
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);

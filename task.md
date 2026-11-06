@@ -39,3 +39,8 @@
   - [x] 9.1 修改 `src/monitor/window/tooltip.rs`，移除看板网速中的 MB/s 显示
   - [x] 9.2 更新单元测试断言
   - [x] 9.3 运行全量测试验证
+- [x] 10. 硬件看板内存展示精简
+  - [x] 10.1 更新语言包 `locales/zh-CN.toml` 中的 `tooltip_memory` 为 `"内存"`
+  - [x] 10.2 修改 `src/monitor/window/tooltip.rs` 中的内存格式化逻辑，精简为 `内存: {percent}% ({used} GB / {total} GB)`
+  - [x] 10.3 同步更新 `src/monitor/window/tooltip.rs` 的单元测试断言
+  - [x] 10.4 运行 `cargo test` 验证修改并确保通过
