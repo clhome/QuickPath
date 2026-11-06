@@ -4,6 +4,7 @@
   <Product Id="*"
            Name="WindPath"
            Language="2052"
+           Codepage="936"
            Version="$(var.Version)"
            Manufacturer="Quzhou Yufeng Technology Co., Ltd."
            UpgradeCode="4D58FE92-B792-4916-86AC-8E1E55E12E99">
@@ -11,7 +12,8 @@
     <Package InstallerVersion="500"
              Compressed="yes"
              InstallScope="perMachine"
-             Description="WindPath - 专为 Windows 10/11 打造的现代 Fluent 风格文件对话框智能路径跟随与快速跳转利器"
+             SummaryCodepage="936"
+             Description="WindPath - 专为 Windows 打造的智能文件对话框路径跟随利器"
              Comments="WindPath Windows Installer" />
 
     <MajorUpgrade DowngradeErrorMessage="已安装更高版本的 WindPath，安装已中止。" />

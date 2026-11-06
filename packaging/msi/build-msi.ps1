@@ -85,7 +85,7 @@ if (-not $wixCli) {
 # 5. 执行编译
 if ($wixV3Candle -and $wixV3Light) {
     Write-Host "检测到 WiX v3 工具链: $wixV3Candle"
-    $objFile = Join-Path $env:TEMP ("qp_wix_" + [System.Guid]::NewGuid().ToString("N") + ".wixobj")
+    $objFile = Join-Path $env:TEMP ("windpath_wix_" + [System.Guid]::NewGuid().ToString("N") + ".wixobj")
     try {
         Write-Host "正在编译 WiX 源码..."
         & $wixV3Candle -arch x64 "-dVersion=$cleanVersion" "-dSourceDir=$rootDir" "-dExePath=$resolvedExe" $wxsFile -out $objFile

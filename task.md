@@ -63,6 +63,11 @@
   - [x] 14.2 编写根目录启动批处理 `release.bat`（UTF-8 编码、Python 探测、传参透传与交互适配）
   - [x] 14.3 在 `test/` 目录下编写自动化验证脚本，验证版本号提取、替换及防误伤逻辑
   - [x] 14.4 运行验证测试，确保跨平台与 Windows 终端体验顺畅，清理测试脚本
+- [x] 15. 修复 WiX MSI 打包代码页编码问题 (LGHT0311)
+  - [x] 15.1 更新 `packaging/msi/windpath.wxs`：在 `<Product>` 添加 `Codepage="936"`，在 `<Package>` 添加 `SummaryCodepage="936"` 适配中文环境
+  - [x] 15.2 更新 `packaging/msi/build-msi.ps1`：优化 WiX v3 临时编译对象前缀为 `windpath_wix_*`
+  - [x] 15.3 检查确保修改文件保持 UTF-8 无 BOM 与 LF 换行规范
+
 
 
 
