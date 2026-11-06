@@ -35,3 +35,7 @@
 - [ ] 8. 用户详细使用说明书更新 (User Manual)
   - [ ] 8.1 更新 `Document/User_Manual_CN.md` 为 WindPath（御风路径）并添加品牌过渡说明
   - [ ] 8.2 更新 `Document/User_Manual_EN.md` 为 WindPath 并同步更新所有安装、配置与 FAQ 说明
+- [x] 9. 硬件看板网速展示优化
+  - [x] 9.1 修改 `src/monitor/window/tooltip.rs`，移除看板网速中的 MB/s 显示
+  - [x] 9.2 更新单元测试断言
+  - [x] 9.3 运行全量测试验证
