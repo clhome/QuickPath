@@ -170,7 +170,7 @@ impl TooltipData {
             .map(|v| format!("{:.0}%", v))
             .unwrap_or_else(|| "--%".to_string());
         let gpu_lbl = if bundle.monitor.tooltip_gpu.is_empty() {
-            "独 立 显 卡"
+            "独立显卡"
         } else {
             &bundle.monitor.tooltip_gpu
         };
@@ -1188,7 +1188,7 @@ unsafe extern "system" fn tooltip_wnd_proc(
                 && y >= inner.producer_rect.top
                 && y <= inner.producer_rect.bottom
             {
-                let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
+                let url: Vec<u16> = "https://wp.yftec.top\0".encode_utf16().collect();
                 let op: Vec<u16> = "open\0".encode_utf16().collect();
                 let _ = ShellExecuteW(
                     None,
@@ -1332,7 +1332,7 @@ mod tests {
         assert_eq!(data.lines[4].icon, MetricIconKind::Gpu);
         assert_eq!(
             data.lines[4].text,
-            "独 立 显 卡: 2% (1.4 GB / 4.2 GB) (Top: dwm.exe)"
+            "独立显卡: 2% (1.4 GB / 4.2 GB) (Top: dwm.exe)"
         );
 
         assert_eq!(data.lines[5].icon, MetricIconKind::Disk);
@@ -1423,7 +1423,7 @@ mod tests {
         let data_zh = TooltipData::from_snapshot(&snap, &Language::ZhCN);
         let data_en = TooltipData::from_snapshot(&snap, &Language::EnUS);
 
-        assert_eq!(data_zh.lines[4].text, "独 立 显 卡: 2% (显存: --)");
+        assert_eq!(data_zh.lines[4].text, "独立显卡: 2% (显存: --)");
         assert_eq!(data_en.lines[4].text, "GPU: 2% (VRAM: --)");
     }
 

@@ -511,6 +511,77 @@ pub fn clear_debug_logs() -> bool {
     }
 }
 
+/// 确保日志文件存在；若不存在则自动创建父目录并创建空文件。
+fn ensure_log_file_exists(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+    }
+    Ok(())
+}
+
+/// 直接打开日志文件供查看。
+///
+/// 若日志文件尚未存在（例如已被清理或尚未产生调试日志），
+/// 会先自动创建空文件，避免操作系统弹出“文件不存在”等错误。
+/// 在 Windows 下使用系统默认关联程序打开；若关联程序不可用或返回失败，则回退至 notepad.exe。
+pub fn open_debug_log() -> bool {
+    let Some(path) = debug_log_path() else {
+        return false;
+    };
+
+    if ensure_log_file_exists(path).is_err() {
+        return false;
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut path_w: Vec<u16> = path.as_os_str().encode_wide().collect();
+        path_w.push(0);
+        let op: Vec<u16> = "open\0".encode_utf16().collect();
+        unsafe {
+            use windows::Win32::UI::Shell::ShellExecuteW;
+            use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
+            let ret = ShellExecuteW(
+                None,
+                windows::core::PCWSTR(op.as_ptr()),
+                windows::core::PCWSTR(path_w.as_ptr()),
+                windows::core::PCWSTR::null(),
+                windows::core::PCWSTR::null(),
+                SW_SHOW,
+            );
+            // ShellExecute 返回 HINSTANCE，若大于 32 则成功
+            if ret.0 as usize <= 32 {
+                let notepad: Vec<u16> = "notepad.exe\0".encode_utf16().collect();
+                let ret_np = ShellExecuteW(
+                    None,
+                    windows::core::PCWSTR(op.as_ptr()),
+                    windows::core::PCWSTR(notepad.as_ptr()),
+                    windows::core::PCWSTR(path_w.as_ptr()),
+                    windows::core::PCWSTR::null(),
+                    SW_SHOW,
+                );
+                return ret_np.0 as usize > 32;
+            }
+            true
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn();
+        true
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileDialogInfo {
     pub hwnd: HWND,
@@ -1812,5 +1883,27 @@ mod debug_log_tests {
             "无法删除时必须上报失败"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ensure_log_file_exists`：文件不存在时自动创建父级目录与空文件；已存在时不覆盖。
+    #[test]
+    fn test_ensure_log_file_exists() {
+        let dir = std::env::temp_dir()
+            .join(format!("windpath_ensure_test_{}", std::process::id()))
+            .join("sub_logs");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("test_ensure.log");
+
+        assert!(!path.exists());
+        assert!(ensure_log_file_exists(&path).is_ok());
+        assert!(path.exists());
+
+        // 写入内容验证不会被清空或覆盖
+        std::fs::write(&path, b"keep_me").unwrap();
+        assert!(ensure_log_file_exists(&path).is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "keep_me");
+
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 }

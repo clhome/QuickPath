@@ -610,7 +610,7 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
             .unwrap_or(SettingsTab::General);
         let hovered = HOVER_CARD_IDX.lock().ok().and_then(|h| *h);
 
-        // 1. 顶部 Header 品牌区（主标题 + 副标题）
+        // 1. 顶部 Header 品牌区（主标题）
         let header_text_x = pad_x;
         SelectObject(hdc, HGDIOBJ(font_h1.0 as _));
         SetTextColor(hdc, COLORREF(0x00ffffff));
@@ -618,35 +618,14 @@ unsafe fn render_settings_ui(hwnd: HWND, hdc: HDC) {
         let mut title_buf: Vec<u16> = title_str.encode_utf16().collect();
         let mut title_rect = RECT {
             left: header_text_x,
-            top: (14.0 * scale).round() as i32,
+            top: (16.0 * scale).round() as i32,
             right: rect.right - pad_x,
-            bottom: (34.0 * scale).round() as i32,
+            bottom: (40.0 * scale).round() as i32,
         };
         DrawTextW(
             hdc,
             &mut title_buf,
             &mut title_rect,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-
-        SelectObject(hdc, HGDIOBJ(font_text.0 as _));
-        SetTextColor(hdc, COLORREF(0x008e8e8e));
-        let sub_str = if bundle.settings.subtitle.is_empty() {
-            "系统集成与智能文件对话框跳转偏好"
-        } else {
-            &bundle.settings.subtitle
-        };
-        let mut sub_buf: Vec<u16> = sub_str.encode_utf16().collect();
-        let mut sub_rect = RECT {
-            left: header_text_x,
-            top: (35.0 * scale).round() as i32,
-            right: rect.right - pad_x,
-            bottom: (50.0 * scale).round() as i32,
-        };
-        DrawTextW(
-            hdc,
-            &mut sub_buf,
-            &mut sub_rect,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
 
@@ -1993,9 +1972,14 @@ unsafe fn render_log_card(
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
         );
 
-        // 日志路径（小字，超长省略，避免撑破卡片）
+        // 日志路径（小字，超长省略，避免撑破卡片；悬停时高亮显示）
         SelectObject(hdc, HGDIOBJ(font_small.0 as _));
-        SetTextColor(hdc, COLORREF(0x00909090));
+        let path_color = if is_card_hovered && !is_button_hovered {
+            COLORREF(0x00ffcd60) // 悬停 Fluent Accent 亮天蓝
+        } else {
+            COLORREF(0x00909090)
+        };
+        SetTextColor(hdc, path_color);
         let mut path_buf: Vec<u16> = path_text.encode_utf16().collect();
         let mut path_rect = RECT {
             left: inner_x,
@@ -2107,7 +2091,7 @@ unsafe fn render_about_card(
         SetTextColor(hdc, COLORREF(0x00ffffff));
         let ver_name = if bundle.about.version.is_empty() {
             format!(
-                "v{} 正式版 (原生极速 · 极简轻量)",
+                "v{} 正式版",
                 crate::rules::version::APP_VERSION
             )
         } else {
@@ -2157,7 +2141,7 @@ unsafe fn render_about_card(
             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
 
-        // 行 3: 出品方及官网链接（衢州御风科技有限公司 · qp.yftec.top ↗）
+        // 行 3: 出品方及官网链接（衢州御风科技有限公司 · wp.yftec.top ↗）
         SelectObject(hdc, HGDIOBJ(font_normal.0 as _));
         let is_hov_web = hovered == Some(20);
         let web_color = if is_hov_web {
@@ -2171,7 +2155,7 @@ unsafe fn render_about_card(
         } else {
             &bundle.about.company
         };
-        let line2 = format!("{}  ·  qp.yftec.top ↗", company_text);
+        let line2 = format!("{}  ·  wp.yftec.top ↗", company_text);
         let mut buf2: Vec<u16> = line2.encode_utf16().collect();
         let mut r2 = RECT {
             left: text_x,
@@ -4283,7 +4267,7 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                 let gh_bottom = card5_top + (90.0 * scale).round() as i32;
 
                 if x >= text_x && x <= text_right && y >= web_top && y <= web_bottom {
-                    let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
+                    let url: Vec<u16> = "https://wp.yftec.top\0".encode_utf16().collect();
                     let op: Vec<u16> = "open\0".encode_utf16().collect();
                     unsafe {
                         ShellExecuteW(
@@ -4324,6 +4308,9 @@ fn handle_settings_mouse_down(hwnd: HWND, x: i32, y: i32) {
                         }
                         IS_RECORDING_HOTKEY.store(false, Ordering::SeqCst);
                         need_redraw = true;
+                    }
+                    Some(HOVER_ID_LOG_CARD) => {
+                        crate::dialog::detector::open_debug_log();
                     }
                     Some(HOVER_ID_DEBUG_CHECKBOX) => {
                         let cur = crate::dialog::detector::is_debug_mode_enabled();

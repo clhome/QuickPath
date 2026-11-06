@@ -44,3 +44,19 @@
   - [x] 10.2 修改 `src/monitor/window/tooltip.rs` 中的内存格式化逻辑，精简为 `内存: {percent}% ({used} GB / {total} GB)`
   - [x] 10.3 同步更新 `src/monitor/window/tooltip.rs` 的单元测试断言
   - [x] 10.4 运行 `cargo test` 验证修改并确保通过
+- [x] 11. 移除设置中心副标题文案与渲染
+  - [x] 11.1 从 `locales/zh-CN.toml` 与 `locales/en-US.toml` 中移除 `subtitle`
+  - [x] 11.2 从 `src/ui/settings.rs` 中移除设置中心副标题的绘制逻辑，并优化主标题上下居中对齐
+  - [x] 11.3 运行全量单元测试与编译检查验证
+- [x] 12. 点击日志路径支持直接打开查看
+  - [x] 12.1 在 `src/dialog/detector.rs` 中实现 `open_debug_log()`，处理文件预检/自动创建及打开与回退逻辑
+  - [x] 12.2 在 `src/ui/settings.rs` 的点击事件中对接 `HOVER_ID_LOG_CARD` 处理
+  - [x] 12.3 优化 `render_log_card` 中日志路径的悬停高亮反馈（Fluent Accent 亮天蓝）
+  - [x] 12.4 编写针对 `open_debug_log` 及日志交互的相关单元测试
+  - [x] 12.5 运行全量单元测试与 `cargo check` 验证
+- [x] 13. 删除中文对应版本信息中的“(原生极速 · 极简轻量)”
+  - [x] 13.1 更新 `locales/zh-CN.toml`，将版本文案调整为 `"v{version} 正式版"`
+  - [x] 13.2 更新 `src/ui/settings.rs` 中的 fallback 缺省版本文本为 `"v{} 正式版"`
+  - [x] 13.3 运行单元测试与编译检查验证
+
+

@@ -732,7 +732,7 @@ impl I18n {
         if !b.about.website.is_empty() {
             &b.about.website
         } else {
-            "https://qp.yftec.top"
+            "https://wp.yftec.top"
         }
     }
 

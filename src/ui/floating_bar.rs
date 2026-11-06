@@ -1042,13 +1042,13 @@ fn handle_mouse_click(hwnd: HWND, x: i32, y: i32) {
         }
     }
 
-    // 1. 点击顶栏右侧出品方文字 -> 跳转官网 https://qp.yftec.top 并隐藏浮动栏
+    // 1. 点击顶栏右侧出品方文字 -> 跳转官网 https://wp.yftec.top 并隐藏浮动栏
     if x >= state.producer_rect.left
         && x <= state.producer_rect.right
         && y >= state.producer_rect.top
         && y <= state.producer_rect.bottom
     {
-        let url: Vec<u16> = "https://qp.yftec.top\0".encode_utf16().collect();
+        let url: Vec<u16> = "https://wp.yftec.top\0".encode_utf16().collect();
         let op: Vec<u16> = "open\0".encode_utf16().collect();
         unsafe {
             ShellExecuteW(
